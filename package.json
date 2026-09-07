@@ -1,0 +1,476 @@
+{
+  "name": "herdr-collie",
+  "publisher": "phine-apps",
+  "displayName": "Herdr Collie",
+  "description": "Bridge between VS Code and Herdr",
+  "version": "0.1.0",
+  "icon": "media/icon.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/phine-apps/herdr-collie"
+  },
+  "bugs": {
+    "url": "https://github.com/phine-apps/herdr-collie/issues"
+  },
+  "homepage": "https://github.com/phine-apps/herdr-collie#readme",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "herdr-collie.attachWorkspace",
+        "title": "Herdr Collie: Attach to Workspace"
+      },
+      {
+        "command": "herdr-collie.sendContext",
+        "title": "Herdr Collie: Send Selection"
+      },
+      {
+        "command": "herdr-collie.sendDiagnostics",
+        "title": "Herdr Collie: Send Errors/Warnings"
+      },
+      {
+        "command": "herdr-collie.sendStagedChanges",
+        "title": "Herdr Collie: Send Staged Changes",
+        "icon": "$(check)"
+      },
+      {
+        "command": "herdr-collie.sendWorkingTreeChanges",
+        "title": "Herdr Collie: Send Working Tree Changes",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "herdr-collie.sendBranchContext",
+        "title": "Herdr Collie: Send Branch Context",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "herdr-collie.sendWorkspaceProblems",
+        "title": "Herdr Collie: Send Workspace Problems",
+        "icon": "$(error)"
+      },
+      {
+        "command": "herdr-collie.sendHoverInfo",
+        "title": "Herdr Collie: Send Symbol Info (Hover)",
+        "icon": "$(symbol-class)"
+      },
+      {
+        "command": "herdr-collie.refreshWorkspaces",
+        "title": "Herdr Collie: Refresh Workspaces",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "herdr-collie.createWorkspace",
+        "title": "Herdr Collie: Create Workspace",
+        "icon": "$(add)"
+      },
+      {
+        "command": "herdr-collie.renameWorkspace",
+        "title": "Herdr Collie: Rename Workspace",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "herdr-collie.closeWorkspace",
+        "title": "Herdr Collie: Close Workspace",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "herdr-collie.sendTerminalOutput",
+        "title": "Herdr Collie: Send Terminal Output / Error",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "herdr-collie.switchSession",
+        "title": "Herdr Collie: Switch Session",
+        "icon": "$(layers)"
+      },
+      {
+        "command": "herdr-collie.createSession",
+        "title": "Herdr Collie: Create Session",
+        "icon": "$(add)"
+      },
+      {
+        "command": "herdr-collie.refreshSessions",
+        "title": "Herdr Collie: Refresh Sessions",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "herdr-collie.deleteSession",
+        "title": "Herdr Collie: Delete Session",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "herdr-collie.launchWorktreeAgent",
+        "title": "Herdr Collie: Launch Agent in Git Worktree",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "herdr-collie.mergeWorktree",
+        "title": "Herdr Collie: Merge Worktree Changes",
+        "icon": "$(git-merge)"
+      },
+      {
+        "command": "herdr-collie.removeWorktree",
+        "title": "Herdr Collie: Remove Worktree & Workspace",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "herdr-collie.showAgentHUD",
+        "title": "Herdr Collie: Show Agent HUD",
+        "icon": "$(hubot)"
+      },
+      {
+        "command": "herdr-collie.selectAgent",
+        "title": "Herdr Collie: Select & Attach Agent",
+        "icon": "$(hubot)"
+      },
+      {
+        "command": "herdr-collie.selectWorkspace",
+        "title": "Herdr Collie: Select & Focus Workspace",
+        "icon": "$(window)"
+      },
+      {
+        "command": "herdr-collie.toggleAgentSort",
+        "title": "Herdr Collie: Toggle Agent Sort Order (Grouped / Priority)",
+        "icon": "$(list-ordered)"
+      }
+    ],
+
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "herdr-collie.selectAgent"
+        },
+        {
+          "command": "herdr-collie.selectWorkspace"
+        },
+        {
+          "command": "herdr-collie.launchWorktreeAgent",
+          "when": "gitOpenRepositoryCount > 0"
+        },
+        {
+          "command": "herdr-collie.showAgentHUD"
+        },
+        {
+          "command": "herdr-collie.mergeWorktree",
+          "when": "gitOpenRepositoryCount > 0"
+        },
+        {
+          "command": "herdr-collie.removeWorktree",
+          "when": "gitOpenRepositoryCount > 0"
+        },
+        {
+          "command": "herdr-collie.refreshWorkspaces",
+          "when": "false"
+        },
+        {
+          "command": "herdr-collie.createWorkspace",
+          "when": "false"
+        },
+        {
+          "command": "herdr-collie.renameWorkspace",
+          "when": "false"
+        },
+        {
+          "command": "herdr-collie.closeWorkspace",
+          "when": "false"
+        },
+        {
+          "command": "herdr-collie.sendContext",
+          "when": "editorFocus"
+        },
+        {
+          "command": "herdr-collie.sendDiagnostics",
+          "when": "editorFocus"
+        },
+        {
+          "command": "herdr-collie.sendHoverInfo",
+          "when": "editorFocus"
+        },
+        {
+          "command": "herdr-collie.sendStagedChanges",
+          "when": "gitOpenRepositoryCount > 0"
+        },
+        {
+          "command": "herdr-collie.sendWorkingTreeChanges",
+          "when": "gitOpenRepositoryCount > 0"
+        },
+        {
+          "command": "herdr-collie.sendBranchContext",
+          "when": "gitOpenRepositoryCount > 0"
+        },
+        {
+          "command": "herdr-collie.sendWorkspaceProblems"
+        },
+        {
+          "command": "herdr-collie.sendTerminalOutput",
+          "when": "terminalIsOpen"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "herdr-collie.sendContext",
+          "group": "herdr@1"
+        },
+        {
+          "command": "herdr-collie.sendDiagnostics",
+          "group": "herdr@2"
+        },
+        {
+          "command": "herdr-collie.sendHoverInfo",
+          "group": "herdr@3"
+        },
+        {
+          "command": "herdr-collie.sendWorkspaceProblems",
+          "group": "herdr@4"
+        },
+        {
+          "command": "herdr-collie.sendStagedChanges",
+          "group": "herdr@5"
+        },
+        {
+          "command": "herdr-collie.sendWorkingTreeChanges",
+          "group": "herdr@6"
+        },
+        {
+          "command": "herdr-collie.sendBranchContext",
+          "group": "herdr@7"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "herdr-collie.createSession",
+          "when": "view == herdr-collie.sessions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "herdr-collie.refreshSessions",
+          "when": "view == herdr-collie.sessions",
+          "group": "navigation@2"
+        },
+        {
+          "command": "herdr-collie.launchWorktreeAgent",
+          "when": "view == herdr-collie.workspaces",
+          "group": "navigation@0"
+        },
+        {
+          "command": "herdr-collie.createWorkspace",
+          "when": "view == herdr-collie.workspaces",
+          "group": "navigation@1"
+        },
+        {
+          "command": "herdr-collie.refreshWorkspaces",
+          "when": "view == herdr-collie.workspaces || view == herdr-collie.agents",
+          "group": "navigation@2"
+        },
+        {
+          "command": "herdr-collie.toggleAgentSort",
+          "when": "view == herdr-collie.agents",
+          "group": "navigation@0"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "herdr-collie.deleteSession",
+          "when": "view == herdr-collie.sessions && viewItem == deletableSession",
+          "group": "inline@1"
+        },
+        {
+          "command": "herdr-collie.mergeWorktree",
+          "when": "view == herdr-collie.workspaces && viewItem == worktreeWorkspace",
+          "group": "inline@1"
+        },
+        {
+          "command": "herdr-collie.removeWorktree",
+          "when": "view == herdr-collie.workspaces && viewItem == worktreeWorkspace",
+          "group": "inline@2"
+        },
+        {
+          "command": "herdr-collie.renameWorkspace",
+          "when": "view == herdr-collie.workspaces && viewItem == workspace",
+          "group": "inline@1"
+        },
+        {
+          "command": "herdr-collie.closeWorkspace",
+          "when": "view == herdr-collie.workspaces && viewItem == workspace",
+          "group": "inline@2"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "herdr-collie.launchWorktreeAgent",
+          "group": "navigation@0"
+        },
+        {
+          "command": "herdr-collie.sendStagedChanges",
+          "group": "navigation@1"
+        },
+        {
+          "command": "herdr-collie.sendWorkingTreeChanges",
+          "group": "navigation@2"
+        },
+        {
+          "command": "herdr-collie.sendBranchContext",
+          "group": "navigation@3"
+        }
+      ],
+      "scm/resourceState/context": [
+        {
+          "command": "herdr-collie.sendStagedChanges",
+          "group": "inline@1"
+        },
+        {
+          "command": "herdr-collie.sendWorkingTreeChanges",
+          "group": "inline@2"
+        }
+      ],
+      "terminal/context": [
+        {
+          "command": "herdr-collie.sendTerminalOutput",
+          "group": "herdr@1"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "herdr-collie-sidebar",
+          "title": "Herdr Collie",
+          "icon": "media/collie-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "herdr-collie-sidebar": [
+        {
+          "id": "herdr-collie.sessions",
+          "name": "Sessions"
+        },
+        {
+          "id": "herdr-collie.workspaces",
+          "name": "Workspaces"
+        },
+        {
+          "id": "herdr-collie.agents",
+          "name": "Agents"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Herdr Collie",
+      "properties": {
+        "herdr-collie.hideHerdrSidebar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Hide Herdr's built-in sidebar (spaces and agents) when running in VS Code terminal"
+        },
+        "herdr-collie.sessionName": {
+          "type": "string",
+          "default": "vscode",
+          "description": "Session name to use when launching Herdr from VS Code terminal (e.g. 'vscode')"
+        },
+        "herdr-collie.worktreeLocation": {
+          "type": "string",
+          "enum": [
+            "sibling",
+            ".worktrees"
+          ],
+          "default": "sibling",
+          "description": "Where to create Git worktrees when launching swarm agents ('sibling' directory or '.worktrees' subfolder)"
+        },
+        "herdr-collie.agentHUD.enableNotifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show interactive notifications when an agent requires approval or completes a task"
+        },
+        "herdr-collie.defaultAgentCommand": {
+          "type": "string",
+          "default": "claude",
+          "description": "Default AI agent command to launch in worktrees (e.g. 'claude', 'agy', 'cursor', 'gh copilot')"
+        },
+        "herdr-collie.agentSortOrder": {
+          "type": "string",
+          "enum": [
+            "grouped",
+            "priority"
+          ],
+          "default": "grouped",
+          "description": "Sort order for active agents in the Agents sidebar: 'grouped' (by workspace) or 'priority' (by urgency/attention queue)"
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "herdr-collie.sendContext",
+        "key": "ctrl+alt+h s",
+        "mac": "ctrl+alt+h s",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "herdr-collie.selectAgent",
+        "key": "ctrl+alt+h a",
+        "mac": "ctrl+alt+h a"
+      },
+      {
+        "command": "herdr-collie.selectWorkspace",
+        "key": "ctrl+alt+h w",
+        "mac": "ctrl+alt+h w"
+      },
+      {
+        "command": "herdr-collie.attachWorkspace",
+        "key": "ctrl+alt+h t",
+        "mac": "ctrl+alt+h t"
+      },
+      {
+        "command": "herdr-collie.sendDiagnostics",
+        "key": "ctrl+alt+h d",
+        "mac": "ctrl+alt+h d",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "herdr-collie.showAgentHUD",
+        "key": "ctrl+alt+h h",
+        "mac": "ctrl+alt+h h"
+      },
+      {
+        "command": "herdr-collie.launchWorktreeAgent",
+        "key": "ctrl+alt+h l",
+        "mac": "ctrl+alt+h l",
+        "when": "gitOpenRepositoryCount > 0"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-dependencies",
+    "publish:vsce": "vsce publish",
+    "test:unit": "mocha -r ts-node/register 'src/test/unit/**/*.test.ts'",
+    "test:integration": "mocha -r ts-node/register 'src/test/integration/**/*.test.ts'",
+    "test": "npm run test:unit && npm run test:integration"
+  },
+  "devDependencies": {
+    "@types/chai": "^5.2.3",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "20.x",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.9.2",
+    "chai": "^6.2.2",
+    "esbuild": "^0.21.5",
+    "mocha": "^11.8.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "smol-toml": "^1.8.0"
+  }
+}

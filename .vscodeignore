@@ -1,0 +1,29 @@
+# Editor & SCM
+.vscode/
+.github/
+.gitignore
+
+# Source & Tests
+src/
+out/
+
+# Build Configuration & Dependencies
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+tsconfig.json
+
+# Documentation (Internal)
+CONTRIBUTING.md
+DEVELOPMENT.md
+PUBLISHING.md
+TODO.md
+
+# Artifacts & Logs
+*.vsix
+*.log
+
+# Bundled Extension Inclusion
+dist/**
+!dist/extension.js
+!media/**
