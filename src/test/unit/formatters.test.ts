@@ -12,9 +12,10 @@ import {
     formatHoverInfo,
     formatTerminalOutput,
     formatAgentDisplay,
+    formatWorkspaceDisplay,
     sortAgents
 } from '../../formatters';
-import { ParsedAgent, GitWorktreeInfo } from '../../parsers';
+import { ParsedAgent, ParsedWorkspace, GitWorktreeInfo } from '../../parsers';
 
 describe('formatters Unit Tests', () => {
     describe('formatSelectionContext', () => {
@@ -161,8 +162,8 @@ describe('formatters Unit Tests', () => {
             };
 
             const result = formatAgentDisplay(agent);
-            expect(result.label).to.equal('🟡 [herdr-collie] cursor');
-            expect(result.description).to.equal('(w1:p1)');
+            expect(result.label).to.equal('🟡 cursor');
+            expect(result.description).to.equal('herdr-collie');
             expect(result.displayLabel).to.equal('cursor [herdr-collie]');
             expect(result.tooltip).to.include('Agent: cursor');
             expect(result.tooltip).to.include('Workspace: herdr-collie');
@@ -195,8 +196,8 @@ describe('formatters Unit Tests', () => {
             ];
 
             const result = formatAgentDisplay(agent, worktrees);
-            expect(result.label).to.equal('⚪ [electric-prophet (main)] agy');
-            expect(result.description).to.equal('(wD:p1)');
+            expect(result.label).to.equal('⚪ agy');
+            expect(result.description).to.equal('electric-prophet (main)');
             expect(result.displayLabel).to.equal('agy [electric-prophet (main)]');
             expect(result.tooltip).to.include('Branch: main');
             expect(result.tooltip).to.include('Status: done');
@@ -216,8 +217,8 @@ describe('formatters Unit Tests', () => {
             };
 
             const result = formatAgentDisplay(agent);
-            expect(result.label).to.equal('🔴 [herdr-collie] claude');
-            expect(result.description).to.equal('⚠️ Input Needed (w1:p2)');
+            expect(result.label).to.equal('🔴 claude');
+            expect(result.description).to.equal('⚠️ Input Needed • herdr-collie');
             expect(result.tooltip).to.include('Status: blocked');
             expect(result.tooltip).to.include('⚠️ Waiting for user confirmation');
         });
@@ -235,8 +236,8 @@ describe('formatters Unit Tests', () => {
             };
 
             const result = formatAgentDisplay(agent);
-            expect(result.label).to.equal('🟢 [Workspace w9] Agent');
-            expect(result.description).to.equal('(w9:p1)');
+            expect(result.label).to.equal('🟢 Agent');
+            expect(result.description).to.equal('Workspace w9');
             expect(result.tooltip).to.include('Workspace: Workspace w9');
             expect(result.tooltip).to.include('Status: working');
         });
@@ -256,6 +257,183 @@ describe('formatters Unit Tests', () => {
             expect(result.label).to.equal('🟡 Agent');
             expect(result.description).to.equal('(orphan-1)');
             expect(result.tooltip).to.include('Workspace: Unknown');
+        });
+    });
+
+    describe('formatWorkspaceDisplay', () => {
+        it('formats standard workspace with path and idle status', () => {
+            const ws: ParsedWorkspace = {
+                id: 'ws-1',
+                label: 'main-app',
+                cwd: '/path/to/main-app',
+                focused: false
+            };
+
+            const result = formatWorkspaceDisplay(ws);
+            expect(result.label).to.equal('main-app');
+            expect(result.isFocused).to.be.false;
+            expect(result.isWorktree).to.be.false;
+            expect(result.iconId).to.equal('window');
+            expect(result.description).to.equal('/path/to/main-app');
+            expect(result.tooltip).to.include('Workspace: main-app');
+            expect(result.tooltip).to.include('Path: /path/to/main-app');
+            expect(result.tooltip).to.include('Workspace ID: ws-1');
+            expect(result.tooltip).to.include('Active Agents: (None)');
+        });
+
+        it('formats focused workspace with clean window icon and concise description', () => {
+            const ws: ParsedWorkspace = {
+                id: 'ws-2',
+                label: 'api-service',
+                cwd: '/path/to/api',
+                focused: true
+            };
+
+            const result = formatWorkspaceDisplay(ws);
+            expect(result.label).to.equal('api-service');
+            expect(result.isFocused).to.be.true;
+            expect(result.iconId).to.equal('window');
+            expect(result.description).to.not.include('[Active in Herdr]');
+            expect(result.tooltip).to.include('(Active in Herdr)');
+        });
+
+        it('formats Git worktree workspace with git-branch icon and (branch) description', () => {
+            const ws: ParsedWorkspace = {
+                id: 'ws-wt',
+                label: 'feat-auth',
+                cwd: '/path/to/feat-auth',
+                focused: true
+            };
+
+            const worktrees: GitWorktreeInfo[] = [
+                {
+                    worktree: '/path/to/feat-auth',
+                    head: 'c1d2e3f',
+                    branch: 'feat/auth'
+                }
+            ];
+
+            const result = formatWorkspaceDisplay(ws, worktrees);
+            expect(result.label).to.equal('feat-auth');
+            expect(result.isWorktree).to.be.true;
+            expect(result.branchName).to.equal('feat/auth');
+            expect(result.iconId).to.equal('git-branch');
+            expect(result.description).to.equal('(feat/auth)');
+            expect(result.tooltip).to.include('Branch: feat/auth (Git Worktree)');
+            expect(result.tooltip).to.include('(Active in Herdr)');
+        });
+
+        it('matches current VS Code window folder and assigns folder-active icon', () => {
+            const ws: ParsedWorkspace = {
+                id: 'ws-local',
+                label: 'my-project',
+                cwd: '/path/to/current-project',
+                focused: false
+            };
+
+            const result = formatWorkspaceDisplay(ws, [], [], '/path/to/current-project');
+            expect(result.isCurrentWindow).to.be.true;
+            expect(result.iconId).to.equal('folder-active');
+            expect(result.description).to.not.include('[Current Window]');
+            expect(result.tooltip).to.include('VS Code Window: Matches current open folder');
+        });
+
+        it('includes associated active agents in description and tooltip without text truncation', () => {
+            const ws: ParsedWorkspace = {
+                id: 'ws-agents',
+                label: 'swarm-hub',
+                cwd: '/path/to/hub',
+                focused: true
+            };
+
+            const agents: ParsedAgent[] = [
+                {
+                    id: 'pane-1',
+                    name: 'claude',
+                    status: 'running',
+                    statusType: 'working',
+                    statusIcon: '🟢',
+                    isWorking: true,
+                    isBlocked: false,
+                    workspaceId: 'ws-agents'
+                },
+                {
+                    id: 'pane-2',
+                    name: 'helper',
+                    status: 'blocked',
+                    statusType: 'blocked',
+                    statusIcon: '🔴',
+                    isWorking: false,
+                    isBlocked: true,
+                    workspaceId: 'ws-agents'
+                }
+            ];
+
+            const result = formatWorkspaceDisplay(ws, [], agents);
+            expect(result.matchedAgents).to.have.lengthOf(2);
+            expect(result.agentBadges).to.equal('claude 🟢, helper 🔴');
+            expect(result.description).to.equal('[claude 🟢, helper 🔴]');
+            expect(result.tooltip).to.include('Active Agents (2):');
+            expect(result.tooltip).to.include('- 🟢 claude (running)');
+            expect(result.tooltip).to.include('- 🔴 helper (blocked)');
+        });
+
+        it('aggregates agent badges by status count prioritizing urgency when 3 or more agents exist', () => {
+            const ws: ParsedWorkspace = {
+                id: 'ws-swarm',
+                label: 'swarm-hub',
+                cwd: '/path/to/hub',
+                focused: false
+            };
+
+            const agents: ParsedAgent[] = [
+                {
+                    id: 'pane-1',
+                    name: 'claude',
+                    status: 'running',
+                    statusType: 'working',
+                    statusIcon: '🟢',
+                    isWorking: true,
+                    isBlocked: false,
+                    workspaceId: 'ws-swarm'
+                },
+                {
+                    id: 'pane-2',
+                    name: 'cursor',
+                    status: 'running',
+                    statusType: 'working',
+                    statusIcon: '🟢',
+                    isWorking: true,
+                    isBlocked: false,
+                    workspaceId: 'ws-swarm'
+                },
+                {
+                    id: 'pane-3',
+                    name: 'helper',
+                    status: 'blocked',
+                    statusType: 'blocked',
+                    statusIcon: '🔴',
+                    isWorking: false,
+                    isBlocked: true,
+                    workspaceId: 'ws-swarm'
+                },
+                {
+                    id: 'pane-4',
+                    name: 'monitor',
+                    status: 'idle',
+                    statusType: 'idle',
+                    statusIcon: '🟡',
+                    isWorking: false,
+                    isBlocked: false,
+                    workspaceId: 'ws-swarm'
+                }
+            ];
+
+            const result = formatWorkspaceDisplay(ws, [], agents);
+            expect(result.matchedAgents).to.have.lengthOf(4);
+            expect(result.agentBadges).to.equal('🔴 1, 🟢 2, 🟡 1');
+            expect(result.description).to.equal('[🔴 1, 🟢 2, 🟡 1]');
+            expect(result.tooltip).to.include('Active Agents (4):');
         });
     });
 

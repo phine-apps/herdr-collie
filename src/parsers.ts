@@ -249,7 +249,7 @@ export function parseSnapshotWorkspaces(
     return snapshot.workspaces.map(ws => {
         const id = String(ws.workspace_id || ws.name || ws.id || '');
         const wsPanes = panes.filter(p => p.workspace_id === id);
-        let cwd = wsPanes.length > 0 ? (wsPanes[0].foreground_cwd || wsPanes[0].cwd || '') : '';
+        let cwd = wsPanes.length > 0 ? (wsPanes[0].foreground_cwd || wsPanes[0].cwd || '') : (ws.cwd || '');
         
         const explicitLabel = ws.label ? String(ws.label) : '';
         let label = explicitLabel;
