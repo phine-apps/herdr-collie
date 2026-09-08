@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 import * as vscode from 'vscode';
+import * as l10n from '@vscode/l10n';
 import { HerdrSocketClient } from './socketClient';
 import { ParsedAgent, AgentStatusType, parseSnapshotAgents, parseAgents } from './parsers';
 import { execHerdr } from './executors';
@@ -162,31 +163,36 @@ export class AgentHUD implements vscode.Disposable {
      */
     private async triggerBlockedNotification(agent: ParsedAgent): Promise<void> {
         const sessionName = this.getSessionName();
+        const approveBtn = l10n.t('Approve (y)');
+        const denyBtn = l10n.t('Deny (n)');
+        const replyBtn = l10n.t('Quick Reply...');
+        const focusBtn = l10n.t('Focus Terminal');
+
         const action = await vscode.window.showWarningMessage(
-            `🤖 Agent '${agent.name}' requires input / confirmation:`,
-            'Approve (y)',
-            'Deny (n)',
-            'Quick Reply...',
-            'Focus Terminal'
+            l10n.t("🤖 Agent '{0}' requires input / confirmation:", agent.name),
+            approveBtn,
+            denyBtn,
+            replyBtn,
+            focusBtn
         );
 
-        if (action === 'Approve (y)') {
+        if (action === approveBtn) {
             await this.sendKeysToAgent(agent.id, ['y', 'enter']);
-            vscode.window.showInformationMessage(`Approved tool execution for '${agent.name}' (Sent 'y')`);
-        } else if (action === 'Deny (n)') {
+            vscode.window.showInformationMessage(l10n.t("Approved tool execution for '{0}' (Sent 'y')", agent.name));
+        } else if (action === denyBtn) {
             await this.sendKeysToAgent(agent.id, ['n', 'enter']);
-            vscode.window.showInformationMessage(`Denied tool execution for '${agent.name}' (Sent 'n')`);
-        } else if (action === 'Quick Reply...') {
+            vscode.window.showInformationMessage(l10n.t("Denied tool execution for '{0}' (Sent 'n')", agent.name));
+        } else if (action === replyBtn) {
             const reply = await vscode.window.showInputBox({
-                title: `Reply to Agent: ${agent.name}`,
-                prompt: 'Enter reply to send to the agent',
-                placeHolder: 'e.g. yes, proceed with tests'
+                title: l10n.t('Reply to Agent: {0}', agent.name),
+                prompt: l10n.t('Enter reply to send to the agent'),
+                placeHolder: l10n.t('e.g. yes, proceed with tests')
             });
             if (reply !== undefined && reply.trim().length > 0) {
                 await this.sendInputToAgent(agent.id, reply.trim(), ['enter']);
-                vscode.window.showInformationMessage(`Sent reply to '${agent.name}'`);
+                vscode.window.showInformationMessage(l10n.t("Sent reply to '{0}'", agent.name));
             }
-        } else if (action === 'Focus Terminal') {
+        } else if (action === focusBtn) {
             vscode.commands.executeCommand('herdr-collie.attachWorkspace', agent.id, true, this.getAgentDisplayName(agent), sessionName);
         }
     }
@@ -205,13 +211,16 @@ export class AgentHUD implements vscode.Disposable {
      */
     private async triggerDoneNotification(agent: ParsedAgent): Promise<void> {
         const sessionName = this.getSessionName();
+        const focusBtn = l10n.t('Focus Terminal');
+        const dismissBtn = l10n.t('Dismiss');
+
         const action = await vscode.window.showInformationMessage(
-            `✅ Agent '${agent.name}' finished its task!`,
-            'Focus Terminal',
-            'Dismiss'
+            l10n.t("✅ Agent '{0}' finished its task!", agent.name),
+            focusBtn,
+            dismissBtn
         );
 
-        if (action === 'Focus Terminal') {
+        if (action === focusBtn) {
             vscode.commands.executeCommand('herdr-collie.attachWorkspace', agent.id, true, this.getAgentDisplayName(agent), sessionName);
         }
     }
@@ -263,7 +272,7 @@ export class AgentHUD implements vscode.Disposable {
     private updateHUDText(agents: ParsedAgent[]): void {
         if (agents.length === 0) {
             this.statusBarItem.text = `$(hubot) Herdr`;
-            this.statusBarItem.tooltip = 'Herdr Collie: No active agents';
+            this.statusBarItem.tooltip = l10n.t('Herdr Collie: No active agents');
             this.statusBarItem.backgroundColor = undefined;
             return;
         }
@@ -273,27 +282,27 @@ export class AgentHUD implements vscode.Disposable {
         const idleCount = agents.length - blockedCount - workingCount;
 
         if (blockedCount > 0) {
-            this.statusBarItem.text = `$(alert) ${blockedCount} Waiting`;
+            this.statusBarItem.text = `$(alert) ` + l10n.t('{0} Waiting', blockedCount);
             this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
         } else if (workingCount > 0) {
-            this.statusBarItem.text = `$(sync~spin) ${workingCount} Working`;
+            this.statusBarItem.text = `$(sync~spin) ` + l10n.t('{0} Working', workingCount);
             this.statusBarItem.backgroundColor = undefined;
         } else {
-            this.statusBarItem.text = `$(hubot) ${idleCount} Idle`;
+            this.statusBarItem.text = `$(hubot) ` + l10n.t('{0} Idle', idleCount);
             this.statusBarItem.backgroundColor = undefined;
         }
 
         // Build rich markdown tooltip
         const md = new vscode.MarkdownString();
         md.isTrusted = true;
-        md.appendMarkdown(`### Herdr Agents (${agents.length} active)\n\n`);
-        md.appendMarkdown(`| Agent | Workspace | Status | Pane ID |\n`);
+        md.appendMarkdown(`### ` + l10n.t('Herdr Agents ({0} active)', agents.length) + `\n\n`);
+        md.appendMarkdown(`| ${l10n.t('Agent')} | ${l10n.t('Workspace')} | ${l10n.t('Status')} | ${l10n.t('Pane ID')} |\n`);
         md.appendMarkdown(`| :--- | :--- | :--- | :--- |\n`);
         for (const a of agents) {
             const wsBadge = a.workspaceLabel || (a.workspaceId ? `Workspace ${a.workspaceId}` : '-');
             md.appendMarkdown(`| ${a.statusIcon} **${a.name}** | \`${wsBadge}\` | \`${a.status}\` | \`${a.id}\` |\n`);
         }
-        md.appendMarkdown(`\n*Click to open Agent Command Palette*`);
+        md.appendMarkdown(`\n*` + l10n.t('Click to open Agent Command Palette') + `*`);
         this.statusBarItem.tooltip = md;
     }
 
@@ -311,12 +320,12 @@ export class AgentHUD implements vscode.Disposable {
 
         if (agents.length === 0) {
             const pick = await vscode.window.showQuickPick([
-                { label: '$(rocket) Launch Agent in Git Worktree...', action: 'worktree' },
-                { label: '$(terminal) Launch Herdr Terminal', action: 'terminal' },
-                { label: '$(refresh) Refresh Agents', action: 'refresh' }
+                { label: `$(rocket) ` + l10n.t('Launch Agent in Git Worktree...'), action: 'worktree' },
+                { label: `$(terminal) ` + l10n.t('Launch Herdr Terminal'), action: 'terminal' },
+                { label: `$(refresh) ` + l10n.t('Refresh Agents'), action: 'refresh' }
             ], {
-                title: 'Herdr Collie HUD',
-                placeHolder: 'No active AI agents detected in current session'
+                title: l10n.t('Herdr Collie HUD'),
+                placeHolder: l10n.t('No active AI agents detected in current session')
             });
 
             if (pick?.action === 'worktree') {
@@ -339,52 +348,55 @@ export class AgentHUD implements vscode.Disposable {
             const label = wsBadge ? `${a.statusIcon} [${wsBadge}] ${agentTitle}` : `${a.statusIcon} ${agentTitle}`;
             return {
                 label,
-                description: a.isBlocked ? `⚠️ Input Needed (${a.id})` : `(${a.id})`,
+                description: a.isBlocked ? `⚠️ ` + l10n.t('Input Needed') + ` (${a.id})` : `(${a.id})`,
                 detail: a.isBlocked 
-                    ? '⚠️ Waiting for confirmation! Click to respond or focus.' 
-                    : (a.isWorking ? '🟢 Agent is actively processing tasks...' : '🟡 Agent is idle and ready for instructions.'),
+                    ? l10n.t('⚠️ Waiting for confirmation! Click to respond or focus.') 
+                    : (a.isWorking ? l10n.t('🟢 Agent is actively processing tasks...') : l10n.t('🟡 Agent is idle and ready for instructions.')),
                 agent: a,
                 buttons: [
                     {
                         iconPath: new vscode.ThemeIcon('terminal'),
-                        tooltip: 'Attach / Focus Terminal'
+                        tooltip: l10n.t('Attach / Focus Terminal')
                     },
                     {
                         iconPath: new vscode.ThemeIcon('comment'),
-                        tooltip: 'Send Prompt to Agent'
+                        tooltip: l10n.t('Send Prompt to Agent')
                     },
                     ...(a.isBlocked ? [{
                         iconPath: new vscode.ThemeIcon('check'),
-                        tooltip: 'Quick Approve (y)'
+                        tooltip: l10n.t('Quick Approve (y)')
                     }] : [])
                 ]
             };
         });
 
         const qp = vscode.window.createQuickPick<AgentQuickPickItem>();
-        qp.title = `Herdr Collie Agent HUD (${this.getSessionName()})`;
-        qp.placeholder = 'Select an agent to interact with';
+        qp.title = l10n.t('Herdr Collie Agent HUD ({0})', this.getSessionName());
+        qp.placeholder = l10n.t('Select an agent to interact with');
         qp.items = items;
+
+        const quickApproveTooltip = l10n.t('Quick Approve (y)');
+        const sendPromptTooltip = l10n.t('Send Prompt to Agent');
 
         qp.onDidTriggerItemButton(async (e) => {
             qp.hide();
             const targetAgent = e.item.agent;
             const tooltip = e.button.tooltip;
 
-            if (tooltip === 'Quick Approve (y)') {
+            if (tooltip === quickApproveTooltip) {
                 await this.sendKeysToAgent(targetAgent.id, ['y', 'enter']);
-                vscode.window.showInformationMessage(`Sent 'y' to '${targetAgent.name}'`);
+                vscode.window.showInformationMessage(l10n.t("Sent 'y' to '{0}'", targetAgent.name));
                 this.refresh();
-            } else if (tooltip === 'Send Prompt to Agent') {
+            } else if (tooltip === sendPromptTooltip) {
                 const prompt = await vscode.window.showInputBox({
-                    title: `Prompt Agent: ${targetAgent.name}`,
-                    prompt: 'Enter instructions for the agent'
+                    title: l10n.t('Prompt Agent: {0}', targetAgent.name),
+                    prompt: l10n.t('Enter instructions for the agent')
                 });
                 if (prompt && prompt.trim()) {
                     if (this.socketClient.isConnected) {
                         try {
                             await this.socketClient.sendAgentPrompt(targetAgent.id, prompt.trim());
-                            vscode.window.showInformationMessage(`Prompt sent to '${targetAgent.name}'`);
+                            vscode.window.showInformationMessage(l10n.t("Prompt sent to '{0}'", targetAgent.name));
                             this.refresh();
                             return;
                         } catch {
@@ -392,7 +404,7 @@ export class AgentHUD implements vscode.Disposable {
                         }
                     }
                     execHerdr(['--session', sessionName, 'agent', 'prompt', targetAgent.id, prompt.trim()], () => {
-                        vscode.window.showInformationMessage(`Prompt sent to '${targetAgent.name}'`);
+                        vscode.window.showInformationMessage(l10n.t("Prompt sent to '{0}'", targetAgent.name));
                         this.refresh();
                     });
                 }

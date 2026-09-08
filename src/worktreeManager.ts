@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 import type * as vscodeTypes from 'vscode';
+import * as l10n from '@vscode/l10n';
 import * as path from 'path';
 import * as fs from 'fs';
 import { runGitCmd, execHerdr, isCommandAvailable } from './executors';
@@ -59,8 +60,8 @@ export async function getInstalledAgentOptions(): Promise<AgentOptionItem[]> {
 
     return [
         ...installedAgents,
-        { label: '$(terminal) Bash / Zsh Shell', description: 'Default interactive shell', cmd: '' },
-        { label: '$(edit) Custom Command...', description: 'Enter custom CLI command', cmd: 'CUSTOM' }
+        { label: `$(terminal) ` + l10n.t('Bash / Zsh Shell'), description: l10n.t('Default interactive shell'), cmd: '' },
+        { label: `$(edit) ` + l10n.t('Custom Command...'), description: l10n.t('Enter custom CLI command'), cmd: 'CUSTOM' }
     ];
 }
 
@@ -95,11 +96,11 @@ export function buildAgentLaunchCommand(agentCmd: string, prompt?: string): stri
  * Validates branch name for Git ref compliance and prevents option flag injection
  */
 export function validateBranchName(val: string): string | null {
-    if (!val || !val.trim()) return 'Branch name cannot be empty';
+    if (!val || !val.trim()) return l10n.t('Branch name cannot be empty');
     const trimmed = val.trim();
-    if (trimmed.startsWith('-')) return 'Branch name cannot start with a hyphen (-)';
-    if (/\s/.test(trimmed)) return 'Branch name cannot contain spaces';
-    if (/[\0~^:?*\[\\]|\.\.|\/\/|@\{/.test(trimmed)) return 'Branch name contains invalid Git ref characters';
+    if (trimmed.startsWith('-')) return l10n.t('Branch name cannot start with a hyphen (-)');
+    if (/\s/.test(trimmed)) return l10n.t('Branch name cannot contain spaces');
+    if (/[\0~^:?*\[\\]|\.\.|\/\/|@\{/.test(trimmed)) return l10n.t('Branch name contains invalid Git ref characters');
     return null;
 }
 
@@ -234,22 +235,22 @@ export async function launchWorktreeAgentWizard(
 ): Promise<void> {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
-        vscode.window.showErrorMessage('Please open a folder inside a Git repository first.');
+        vscode.window.showErrorMessage(l10n.t('Please open a folder inside a Git repository first.'));
         return;
     }
 
     const currentCwd = workspaceFolders[0].uri.fsPath;
     const repoRoot = await getRepoRoot(currentCwd);
     if (!repoRoot) {
-        vscode.window.showErrorMessage('The current workspace is not a Git repository.');
+        vscode.window.showErrorMessage(l10n.t('The current workspace is not a Git repository.'));
         return;
     }
 
     // 1. Branch name input
     const branchName = await vscode.window.showInputBox({
-        title: 'Herdr Swarm: Branch Name',
-        prompt: 'Enter a branch name for the new agent worktree',
-        placeHolder: 'e.g. feat/user-auth, fix/issue-42',
+        title: l10n.t('Herdr Swarm: Branch Name'),
+        prompt: l10n.t('Enter a branch name for the new agent worktree'),
+        placeHolder: l10n.t('e.g. feat/user-auth, fix/issue-42'),
         validateInput: validateBranchName
     });
 
@@ -264,13 +265,13 @@ export async function launchWorktreeAgentWizard(
     
     const baseBranchItems = sortedBranches.map(b => ({
         label: `$(git-branch) ${b}`,
-        description: b === currentBranch ? '(current branch)' : '',
+        description: b === currentBranch ? l10n.t('(current branch)') : '',
         branchName: b
     }));
 
     const selectedBase = await vscode.window.showQuickPick(baseBranchItems, {
-        title: 'Herdr Swarm: Base Branch',
-        placeHolder: `Select base branch to branch from (default: ${currentBranch})`
+        title: l10n.t('Herdr Swarm: Base Branch'),
+        placeHolder: l10n.t('Select base branch to branch from (default: {0})', currentBranch)
     });
 
     if (!selectedBase) return;
@@ -283,17 +284,17 @@ export async function launchWorktreeAgentWizard(
 
     let chosenAgentCmd = defaultAgent;
     const selectedAgent = await vscode.window.showQuickPick(agentOptions, {
-        title: 'Herdr Swarm: AI Agent Engine',
-        placeHolder: 'Select AI Agent tool to launch in the worktree workspace'
+        title: l10n.t('Herdr Swarm: AI Agent Engine'),
+        placeHolder: l10n.t('Select AI Agent tool to launch in the worktree workspace')
     });
 
     if (!selectedAgent) return;
 
     if (selectedAgent.cmd === 'CUSTOM') {
         const customCmd = await vscode.window.showInputBox({
-            title: 'Custom Agent Command',
-            prompt: 'Enter command to run inside the worktree workspace',
-            placeHolder: 'e.g. claude --dangerously-skip-permissions'
+            title: l10n.t('Custom Agent Command'),
+            prompt: l10n.t('Enter command to run inside the worktree workspace'),
+            placeHolder: l10n.t('e.g. claude --dangerously-skip-permissions')
         });
         if (!customCmd) return;
         chosenAgentCmd = customCmd;
@@ -303,9 +304,9 @@ export async function launchWorktreeAgentWizard(
 
     // 4. Initial Task / Prompt input
     const prompt = await vscode.window.showInputBox({
-        title: 'Herdr Swarm: Initial Task Prompt (Optional)',
-        prompt: 'Enter initial instructions or task description for the agent',
-        placeHolder: 'e.g. Implement OAuth2 Google login flow and write unit tests'
+        title: l10n.t('Herdr Swarm: Initial Task Prompt (Optional)'),
+        prompt: l10n.t('Enter initial instructions or task description for the agent'),
+        placeHolder: l10n.t('e.g. Implement OAuth2 Google login flow and write unit tests')
     });
 
     // 5. Worktree Location resolution
@@ -323,18 +324,18 @@ export async function launchWorktreeAgentWizard(
     // 6. Execute Provisioning with progress notification
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
-        title: `Spawning Herdr Swarm Agent on '${branchName}'...`,
+        title: l10n.t("Spawning Herdr Swarm Agent on '{0}'...", branchName),
         cancellable: false
     }, async (progress) => {
-        progress.report({ message: 'Creating Git Worktree...' });
+        progress.report({ message: l10n.t('Creating Git Worktree...') });
         try {
             await createWorktree(repoRoot, branchName, worktreePath, selectedBase.branchName);
         } catch (err: any) {
-            vscode.window.showErrorMessage(`Failed to create Git Worktree: ${err.message || err}`);
+            vscode.window.showErrorMessage(l10n.t('Failed to create Git Worktree: {0}', err.message || err));
             return;
         }
 
-        progress.report({ message: 'Creating Herdr Workspace...' });
+        progress.report({ message: l10n.t('Creating Herdr Workspace...') });
         try {
             await new Promise<void>((resolve, reject) => {
                 const createArgs = ['--session', sessionName, 'workspace', 'create', '--cwd', worktreePath, '--label', branchName];
@@ -347,7 +348,7 @@ export async function launchWorktreeAgentWizard(
                 });
             });
         } catch (err: any) {
-            vscode.window.showErrorMessage(`Failed to create Herdr Workspace: ${err.message || err}`);
+            vscode.window.showErrorMessage(l10n.t('Failed to create Herdr Workspace: {0}', err.message || err));
             return;
         }
 
@@ -385,7 +386,7 @@ export async function launchWorktreeAgentWizard(
         // Spawn agent if agent command specified
         if (chosenAgentCmd) {
             const launchCmd = buildAgentLaunchCommand(chosenAgentCmd, prompt);
-            progress.report({ message: `Starting Agent (${chosenAgentCmd})...` });
+            progress.report({ message: l10n.t('Starting Agent ({0})...', chosenAgentCmd) });
             if (targetPaneId) {
                 await new Promise<void>((resolve) => {
                     execHerdr(['--session', sessionName, 'pane', 'send-text', targetPaneId, `${launchCmd}\n`], { cwd: worktreePath }, (err: any) => {
@@ -396,7 +397,7 @@ export async function launchWorktreeAgentWizard(
                     });
                 });
             } else {
-                vscode.window.showWarningMessage(`Workspace '${branchName}' was created, but initial pane could not be determined. Please start the agent manually in the terminal.`);
+                vscode.window.showWarningMessage(l10n.t("Workspace '{0}' was created, but initial pane could not be determined. Please start the agent manually in the terminal.", branchName));
             }
         }
 
@@ -405,15 +406,17 @@ export async function launchWorktreeAgentWizard(
         }
 
         // Show completed notification with actions
+        const openWindowBtn = l10n.t('Open in VS Code Window');
+        const attachTerminalBtn = l10n.t('Attach Terminal');
         const action = await vscode.window.showInformationMessage(
-            `🚀 Agent launched in worktree '${branchName}' (${worktreePath})`,
-            'Open in VS Code Window',
-            'Attach Terminal'
+            l10n.t("🚀 Agent launched in worktree '{0}' ({1})", branchName, worktreePath),
+            openWindowBtn,
+            attachTerminalBtn
         );
 
-        if (action === 'Open in VS Code Window') {
+        if (action === openWindowBtn) {
             vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(worktreePath), { forceNewWindow: true });
-        } else if (action === 'Attach Terminal') {
+        } else if (action === attachTerminalBtn) {
             vscode.commands.executeCommand('herdr-collie.attachWorkspace', targetWorkspaceId || branchName, false, branchName, sessionName);
         }
     });

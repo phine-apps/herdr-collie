@@ -94,7 +94,16 @@ export class MockDataTransfer {
     }
 }
 
+import * as l10n from '@vscode/l10n';
+
 export const mockVscode = {
+    l10n: {
+        t: (message: any, ...args: any[]): string => {
+            return (l10n.t as any)(message, ...args);
+        },
+        uri: undefined,
+        bundle: undefined
+    },
     StatusBarAlignment: {
         Left: 1,
         Right: 2

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as l10n from '@vscode/l10n';
 import * as os from 'os';
 import * as path from 'path';
 import { execHerdr, runGitCmd, ensureSessionServerRunning } from './executors';
@@ -108,6 +109,14 @@ async function getWorktreesForCwds(cwds: (string | undefined)[]): Promise<GitWor
 }
 
 export function activate(context: vscode.ExtensionContext) {
+    if (vscode.l10n?.uri) {
+        try {
+            l10n.config({ fsPath: vscode.l10n.uri.fsPath });
+        } catch {
+            // Ignore in non-file URI or test environments
+        }
+    }
+
     // Ensure session server is running in background
     const initialSession = getSessionName();
     ensureSessionServerRunning(initialSession).catch(() => {});
@@ -153,9 +162,9 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (existingTerminal) {
             existingTerminal.show();
-            const targetType = isAgent ? 'Agent' : 'Workspace';
+            const targetType = isAgent ? l10n.t('Agent') : l10n.t('Workspace');
             const label = displayLabel || target;
-            vscode.window.showInformationMessage(`Focused ${targetType}: ${label}`);
+            vscode.window.showInformationMessage(l10n.t('Focused {0}: {1}', targetType, label));
             refreshAllProviders();
             return;
         }
@@ -181,9 +190,9 @@ export function activate(context: vscode.ExtensionContext) {
         terminal.show();
         terminal.sendText(command);
 
-        const targetType = isAgent ? 'Agent' : 'Workspace';
+        const targetType = isAgent ? l10n.t('Agent') : l10n.t('Workspace');
         const label = displayLabel || target || targetSession || 'Herdr';
-        vscode.window.showInformationMessage(`Attached to Herdr${sessionLabel} (${targetType}: ${label})`);
+        vscode.window.showInformationMessage(l10n.t('Attached to Herdr{0} ({1}: {2})', sessionLabel, targetType, label));
         refreshAllProviders();
     }
 
@@ -305,8 +314,8 @@ export function activate(context: vscode.ExtensionContext) {
             });
 
             const selected = await vscode.window.showQuickPick(targetItems, {
-                placeHolder: 'Select Herdr Workspace or Agent to attach (↑/↓ to navigate, Enter to select)',
-                title: 'Herdr Collie: Attach Target'
+                placeHolder: l10n.t('Select Herdr Agent or Workspace to Attach / Focus'),
+                title: l10n.t('Select Herdr Agent or Workspace to Attach / Focus')
             });
 
             if (!selected) {
@@ -396,8 +405,8 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         if (agentItems.length === 0) {
-            const launchNew = 'Launch Worktree Agent';
-            const res = await vscode.window.showInformationMessage('No active Herdr agents found.', launchNew);
+            const launchNew = l10n.t('Launch New Agent...');
+            const res = await vscode.window.showInformationMessage(l10n.t('No active Herdr agents found.'), launchNew);
             if (res === launchNew) {
                 vscode.commands.executeCommand('herdr-collie.launchWorktreeAgent');
             }
@@ -405,8 +414,8 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         const selected = await vscode.window.showQuickPick(agentItems, {
-            placeHolder: 'Select an agent to open terminal (↑/↓ to navigate, Enter to select)',
-            title: 'Herdr Collie: Select & Attach Agent'
+            placeHolder: l10n.t('Select Herdr Agent to Attach / Focus'),
+            title: l10n.t('Select Herdr Agent to Attach / Focus')
         });
 
         if (!selected) return;
@@ -415,30 +424,24 @@ export function activate(context: vscode.ExtensionContext) {
 
     let selectWorkspaceDisposable = vscode.commands.registerCommand('herdr-collie.selectWorkspace', async () => {
         const sessionName = getActiveSidebarSession();
+        const currentFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         let wsItems: TargetQuickPickItem[] = [];
 
         // 1. Try socket snapshot
         if (socketClient.isConnected) {
             const snapshot = await socketClient.getSnapshot();
             if (snapshot) {
-                const parsedWorkspaces = parseSnapshotWorkspaces(snapshot, os.homedir());
-                const parsedAgents = parseSnapshotAgents(snapshot, parsedWorkspaces);
-                const worktrees = await getWorktreesForCwds(parsedWorkspaces.map(w => w.cwd));
-                const currentRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-
-                wsItems = parsedWorkspaces.map(ws => {
-                    const displayInfo = formatWorkspaceDisplay(ws, worktrees, parsedAgents, currentRoot);
-                    const icon = `$(${displayInfo.iconId})`;
-
+                const parsedWs = parseSnapshotWorkspaces(snapshot, os.homedir());
+                const parsedAg = parseSnapshotAgents(snapshot, parsedWs);
+                const worktrees = await getWorktreesForCwds(parsedWs.map(w => w.cwd));
+                wsItems = parsedWs.map(ws => {
+                    const displayInfo = formatWorkspaceDisplay(ws, worktrees, parsedAg, currentFolder);
                     return {
-                        label: `${icon} ${displayInfo.label}`,
+                        label: `$(${displayInfo.iconId}) ${displayInfo.label}`,
                         description: displayInfo.description,
-                        detail: displayInfo.isWorktree 
-                            ? `Git Worktree at ${ws.cwd}${displayInfo.agentBadges ? ` • Agents: ${displayInfo.agentBadges}` : ''}`
-                            : (displayInfo.agentBadges ? `Active Agents: ${displayInfo.agentBadges}` : (ws.cwd ? `Path: ${ws.cwd}` : undefined)),
+                        detail: displayInfo.tooltip.split('\n')[0],
                         targetId: ws.id,
-                        sessionName,
-                        isAgent: false,
+                        sessionName: sessionName,
                         displayLabel: ws.label
                     };
                 });
@@ -448,24 +451,26 @@ export function activate(context: vscode.ExtensionContext) {
         // 2. CLI fallback
         if (wsItems.length === 0 && !socketClient.isConnected) {
             const sessions = await fetchActiveSessions();
-            await Promise.all(sessions.map(s => {
+            await Promise.all(sessions.map(sName => {
                 return new Promise<void>((resolve) => {
-                    const sessionArgs = ['--session', s];
+                    const sessionArgs = ['--session', sName];
                     let pending = 2;
                     let rawWs = '';
                     let rawPanes = '';
-                    const checkDone = () => {
+                    const checkDone = async () => {
                         pending--;
                         if (pending === 0) {
                             const parsedPanes = parsePanes(rawPanes);
                             const parsedWs = parseWorkspaces(rawWs, parsedPanes, os.homedir());
+                            const worktrees = await getWorktreesForCwds(parsedWs.map(w => w.cwd));
                             parsedWs.forEach(ws => {
+                                const displayInfo = formatWorkspaceDisplay(ws, worktrees, [], currentFolder);
                                 wsItems.push({
-                                    label: `[${s}] $(window) Workspace: ${ws.label}`,
-                                    description: ws.cwd || `ID: ${ws.id}`,
+                                    label: `[${sName}] $(${displayInfo.iconId}) ${displayInfo.label}`,
+                                    description: displayInfo.description,
+                                    detail: displayInfo.tooltip.split('\n')[0],
                                     targetId: ws.id,
-                                    sessionName: s,
-                                    isAgent: false,
+                                    sessionName: sName,
                                     displayLabel: ws.label
                                 });
                             });
@@ -485,8 +490,8 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         if (wsItems.length === 0) {
-            const createNew = 'Create Workspace';
-            const res = await vscode.window.showInformationMessage('No Herdr workspaces found.', createNew);
+            const createNew = l10n.t('Create New Workspace...');
+            const res = await vscode.window.showInformationMessage(l10n.t('No Herdr workspaces found.'), createNew);
             if (res === createNew) {
                 vscode.commands.executeCommand('herdr-collie.createWorkspace');
             }
@@ -494,8 +499,8 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         const selected = await vscode.window.showQuickPick(wsItems, {
-            placeHolder: 'Select a workspace to focus (↑/↓ to navigate, Enter to select)',
-            title: 'Herdr Collie: Select & Focus Workspace'
+            placeHolder: l10n.t('Select Herdr Workspace to Focus'),
+            title: l10n.t('Select Herdr Workspace to Focus')
         });
 
         if (!selected) return;
@@ -590,7 +595,7 @@ export function activate(context: vscode.ExtensionContext) {
             displayItems = [
                 ...primaryItems,
                 {
-                    label: '$(ellipsis) その他の送信先を選択... (Other sessions / panes)',
+                    label: `$(ellipsis) ` + l10n.t('Select Other Destination... (Other sessions / panes)'),
                     description: `Browse ${otherItems.length} more target(s) across sessions`,
                     targetId: '__SHOW_ALL__',
                     isAgent: false
@@ -602,14 +607,14 @@ export function activate(context: vscode.ExtensionContext) {
             displayItems = allItems;
         } else {
             displayItems = [{
-                label: '(No targets found)',
-                description: 'Run herdr in a terminal first',
+                label: l10n.t('(No targets found)'),
+                description: l10n.t('Run herdr in a terminal first'),
                 targetId: ''
             }];
         }
 
         let selected = await vscode.window.showQuickPick(displayItems, {
-            placeHolder: 'Select target Herdr agent or terminal',
+            placeHolder: l10n.t('Select target Herdr agent or terminal'),
             title: quickPickTitle
         });
 
@@ -618,7 +623,7 @@ export function activate(context: vscode.ExtensionContext) {
         // If user chose "Other...", show full list across all sessions and panes
         if (selected.targetId === '__SHOW_ALL__') {
             selected = await vscode.window.showQuickPick(allItems, {
-                placeHolder: 'Select target across all sessions and panes',
+                placeHolder: l10n.t('Select target across all sessions and panes'),
                 title: `${quickPickTitle} (All Targets)`
             });
             if (!selected || !selected.targetId) return;
@@ -632,11 +637,11 @@ export function activate(context: vscode.ExtensionContext) {
         if (!selected.isAgent) {
             execHerdr([...sessionArgs, 'pane', 'send-text', target, richText], { cwd }, (error: any) => {
                 if (error) {
-                    vscode.window.showErrorMessage('Failed to send: ' + error.message);
+                    vscode.window.showErrorMessage(l10n.t('Failed to send: {0}', error.message));
                     return;
                 }
                 const prefix = sessionName ? `[${sessionName}] ` : '';
-                vscode.window.showInformationMessage(`${successMsg} (${prefix}Pane)`);
+                vscode.window.showInformationMessage(l10n.t('{0} ({1}Pane)', successMsg, prefix));
             });
             return;
         }
@@ -646,18 +651,18 @@ export function activate(context: vscode.ExtensionContext) {
                 if (error.message && error.message.includes('agent_not_found')) {
                     execHerdr([...sessionArgs, 'pane', 'send-text', target, richText], { cwd }, (fbError: any) => {
                         if (fbError) {
-                            vscode.window.showErrorMessage('Failed to send: ' + fbError.message);
+                            vscode.window.showErrorMessage(l10n.t('Failed to send: {0}', fbError.message));
                             return;
                         }
                         const prefix = sessionName ? `[${sessionName}] ` : '';
-                        vscode.window.showInformationMessage(`${successMsg} (${prefix}Pane)`);
+                        vscode.window.showInformationMessage(l10n.t('{0} ({1}Pane)', successMsg, prefix));
                     });
                     return;
                 }
-                vscode.window.showErrorMessage('Failed to send context: ' + error.message);
+                vscode.window.showErrorMessage(l10n.t('Failed to send context: {0}', error.message));
                 return;
             }
-            vscode.window.showInformationMessage(successMsg + ' (Agent)');
+            vscode.window.showInformationMessage(l10n.t('{0} (Agent)', successMsg));
         });
     }
 
@@ -671,7 +676,7 @@ export function activate(context: vscode.ExtensionContext) {
         const startLine = selection.start.line + 1;
         const endLine = selection.end.line + 1;
         const richText = formatSelectionContext(fileName, startLine, endLine, editor.document.languageId, text);
-        await sendToHerdr(richText, 'Context sent successfully', 'Send Selection to Herdr');
+        await sendToHerdr(richText, l10n.t('Context sent successfully'), l10n.t('Send Selection to Herdr'));
     });
 
     let sendDiagnosticsDisposable = vscode.commands.registerCommand('herdr-collie.sendDiagnostics', async () => {
@@ -679,7 +684,7 @@ export function activate(context: vscode.ExtensionContext) {
         if (!editor) return;
         const diagnostics = vscode.languages.getDiagnostics(editor.document.uri);
         if (diagnostics.length === 0) {
-            vscode.window.showInformationMessage('No errors or warnings found.');
+            vscode.window.showInformationMessage(l10n.t('No errors or warnings found.'));
             return;
         }
         const fileName = vscode.workspace.asRelativePath(editor.document.uri);
@@ -687,7 +692,7 @@ export function activate(context: vscode.ExtensionContext) {
             fileName, 
             diagnostics.map(d => ({ line: d.range.start.line + 1, message: d.message }))
         );
-        await sendToHerdr(richText, 'Diagnostics sent successfully', 'Send Diagnostics to Herdr');
+        await sendToHerdr(richText, l10n.t('Diagnostics sent successfully'), l10n.t('Send Diagnostics to Herdr'));
     });
 
     let sendStagedChangesDisposable = vscode.commands.registerCommand('herdr-collie.sendStagedChanges', async (...args) => {
@@ -704,13 +709,13 @@ export function activate(context: vscode.ExtensionContext) {
             const gitArgs = targetFile ? ['diff', '--cached', '--', targetFile] : ['diff', '--cached'];
             const stdout = await runGitCmd(gitArgs, cwd);
             if (!stdout.trim()) {
-                vscode.window.showInformationMessage(`No staged changes found${targetFile ? ' for this file' : ''}.`);
+                vscode.window.showInformationMessage(l10n.t('No staged changes found{0}.', targetFile ? l10n.t(' for this file') : ''));
                 return;
             }
             const richText = formatGitDiff(stdout, targetFile, true);
-            await sendToHerdr(richText, 'Staged Changes sent successfully', 'Send Staged Changes to Herdr');
+            await sendToHerdr(richText, l10n.t('Staged Changes sent successfully'), l10n.t('Send Staged Changes to Herdr'));
         } catch (e: any) {
-            vscode.window.showErrorMessage(`Failed to get staged changes: ${e.message}`);
+            vscode.window.showErrorMessage(l10n.t('Failed to get staged changes: {0}', e.message));
         }
     });
 
@@ -728,13 +733,13 @@ export function activate(context: vscode.ExtensionContext) {
             const gitArgs = targetFile ? ['diff', '--', targetFile] : ['diff'];
             const stdout = await runGitCmd(gitArgs, cwd);
             if (!stdout.trim()) {
-                vscode.window.showInformationMessage(`No working tree changes found${targetFile ? ' for this file' : ''}.`);
+                vscode.window.showInformationMessage(l10n.t('No working tree changes found{0}.', targetFile ? l10n.t(' for this file') : ''));
                 return;
             }
             const richText = formatGitDiff(stdout, targetFile, false);
-            await sendToHerdr(richText, 'Working Tree Changes sent successfully', 'Send Working Tree Changes to Herdr');
+            await sendToHerdr(richText, l10n.t('Working Tree Changes sent successfully'), l10n.t('Send Working Tree Changes to Herdr'));
         } catch (e: any) {
-            vscode.window.showErrorMessage(`Failed to get working tree changes: ${e.message}`);
+            vscode.window.showErrorMessage(l10n.t('Failed to get working tree changes: {0}', e.message));
         }
     });
 
@@ -766,10 +771,10 @@ export function activate(context: vscode.ExtensionContext) {
             }
             
             const richText = formatBranchContext(currentBranch, logOut);
-            await sendToHerdr(richText, 'Branch Context sent successfully', 'Send Branch Context to Herdr');
+            await sendToHerdr(richText, l10n.t('Branch Context sent successfully'), l10n.t('Send Branch Context to Herdr'));
 
         } catch (e: any) {
-            vscode.window.showErrorMessage(`Failed to get branch context: ${e.message}`);
+            vscode.window.showErrorMessage(l10n.t('Failed to get branch context: {0}', e.message));
         }
     });
 
@@ -797,17 +802,17 @@ export function activate(context: vscode.ExtensionContext) {
 
         const richText = formatWorkspaceProblems(problemsByFile);
         if (!richText) {
-            vscode.window.showInformationMessage('No workspace problems (Errors/Warnings) found.');
+            vscode.window.showInformationMessage(l10n.t('No workspace problems (Errors/Warnings) found.'));
             return;
         }
 
-        await sendToHerdr(richText, 'Workspace Problems sent successfully', 'Send Workspace Problems to Herdr');
+        await sendToHerdr(richText, l10n.t('Workspace Problems sent successfully'), l10n.t('Send Workspace Problems to Herdr'));
     });
 
     let sendHoverInfoDisposable = vscode.commands.registerCommand('herdr-collie.sendHoverInfo', async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
-            vscode.window.showInformationMessage('Please place your cursor on a symbol in the editor.');
+            vscode.window.showInformationMessage(l10n.t('Please place your cursor on a symbol in the editor.'));
             return;
         }
 
@@ -815,7 +820,7 @@ export function activate(context: vscode.ExtensionContext) {
         const hovers = await vscode.commands.executeCommand<vscode.Hover[]>('vscode.executeHoverProvider', editor.document.uri, position);
         
         if (!hovers || hovers.length === 0) {
-            vscode.window.showInformationMessage('No hover information available for this symbol.');
+            vscode.window.showInformationMessage(l10n.t('No hover information available for this symbol.'));
             return;
         }
 
@@ -834,13 +839,13 @@ export function activate(context: vscode.ExtensionContext) {
         const symbolName = wordRange ? editor.document.getText(wordRange) : 'the symbol';
 
         const richText = formatHoverInfo(symbolName, hoverContents);
-        await sendToHerdr(richText, 'Symbol Hover Info sent successfully', 'Send Symbol Info to Herdr');
+        await sendToHerdr(richText, l10n.t('Symbol Hover Info sent successfully'), l10n.t('Send Symbol Info to Herdr'));
     });
 
     let sendTerminalOutputDisposable = vscode.commands.registerCommand('herdr-collie.sendTerminalOutput', async (terminalArg?: vscode.Terminal) => {
         const terminal = terminalArg || vscode.window.activeTerminal;
         if (!terminal) {
-            vscode.window.showInformationMessage('No active terminal found.');
+            vscode.window.showInformationMessage(l10n.t('No active terminal found.'));
             return;
         }
 
@@ -880,7 +885,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         if (!outputText || !outputText.trim()) {
-            vscode.window.showInformationMessage('No terminal output or selection found.');
+            vscode.window.showInformationMessage(l10n.t('No terminal output or selection found.'));
             return;
         }
 
@@ -889,7 +894,7 @@ export function activate(context: vscode.ExtensionContext) {
         const recentText = lines.length > 200 ? lines.slice(-200).join('\n') : outputText;
 
         const richText = formatTerminalOutput(terminal.name, recentText);
-        await sendToHerdr(richText, 'Terminal Output sent successfully', 'Send Terminal Output to Herdr');
+        await sendToHerdr(richText, l10n.t('Terminal Output sent successfully'), l10n.t('Send Terminal Output to Herdr'));
     });
 
     context.subscriptions.push(
@@ -1051,8 +1056,8 @@ export function activate(context: vscode.ExtensionContext) {
     let toggleAgentSortDisposable = vscode.commands.registerCommand('herdr-collie.toggleAgentSort', () => {
         const newOrder = agentProvider.toggleSortOrder();
         updateTreeViewDescriptions();
-        const orderLabel = newOrder === 'priority' ? 'Priority (Attention Queue)' : 'Grouped by Workspace';
-        vscode.window.setStatusBarMessage(`Agent Sort: ${orderLabel}`, 3000);
+        const orderLabel = newOrder === 'priority' ? l10n.t('Priority') : l10n.t('Grouped');
+        vscode.window.setStatusBarMessage(l10n.t('Agent Sort: {0}', orderLabel), 3000);
     });
     context.subscriptions.push(toggleAgentSortDisposable);
 
@@ -1106,30 +1111,31 @@ export function activate(context: vscode.ExtensionContext) {
         updateTreeViewDescriptions();
         refreshAllProviders();
 
-        vscode.window.showInformationMessage(`Herdr Collie view switched to session "${activeSidebarSession}"`);
+        vscode.window.showInformationMessage(l10n.t('Herdr Collie view switched to session "{0}"', activeSidebarSession));
     };
 
     const performDeleteSession = async (sessionToDelete: string) => {
         if (!sessionToDelete || sessionToDelete === 'default') {
-            vscode.window.showWarningMessage('The "default" session cannot be deleted.');
+            vscode.window.showWarningMessage(l10n.t('The "default" session cannot be deleted.'));
             return;
         }
 
+        const deleteBtn = l10n.t('Delete Session');
         const answer = await vscode.window.showWarningMessage(
-            `Are you sure you want to stop and delete Herdr session "${sessionToDelete}"? All workspaces and panes inside it will be terminated.`,
+            l10n.t('Are you sure you want to delete session "{0}"? This will terminate all its workspaces and panes.', sessionToDelete),
             { modal: true },
-            'Delete'
+            deleteBtn
         );
 
-        if (answer !== 'Delete') return;
+        if (answer !== deleteBtn) return;
 
         execHerdr(['session', 'stop', sessionToDelete], () => {
             execHerdr(['session', 'delete', sessionToDelete], async (err: any) => {
                 if (err) {
-                    vscode.window.showErrorMessage(`Failed to delete session: ${err.message}`);
+                    vscode.window.showErrorMessage(l10n.t('Failed to delete session: {0}', err.message));
                     return;
                 }
-                vscode.window.showInformationMessage(`Session "${sessionToDelete}" deleted.`);
+                vscode.window.showInformationMessage(l10n.t('Session "{0}" deleted.', sessionToDelete));
 
                 if (activeSidebarSession === sessionToDelete) {
                     const fallbackSession = getSessionName() !== sessionToDelete ? getSessionName() : 'default';
@@ -1149,8 +1155,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     let createSessionDisposable = vscode.commands.registerCommand('herdr-collie.createSession', async () => {
         const input = await vscode.window.showInputBox({
-            prompt: 'Enter new Herdr session name',
-            placeHolder: 'e.g. backend, project-x, debug',
+            prompt: l10n.t('Enter name for new Herdr session'),
+            placeHolder: l10n.t('e.g. feature-dev, debug-session'),
             validateInput: validateSessionName
         });
         if (!input || !input.trim()) return;
@@ -1165,26 +1171,26 @@ export function activate(context: vscode.ExtensionContext) {
         const sessions = await fetchActiveSessions();
         const items: SessionQuickPickItem[] = sessions.map(name => ({
             label: name === activeSidebarSession ? `$(check) ${name}` : `$(server) ${name}`,
-            description: name === activeSidebarSession ? 'Current session' : '',
-            detail: name === 'default' ? 'Herdr default persistent session' : `Herdr session: ${name}`,
+            description: name === activeSidebarSession ? l10n.t('Current session') : '',
+            detail: name === 'default' ? l10n.t('Herdr default persistent session') : l10n.t('Herdr session: {0}', name),
             sessionName: name,
             buttons: name !== 'default' ? [{
                 iconPath: new vscode.ThemeIcon('trash'),
-                tooltip: `Stop and delete session "${name}"`
+                tooltip: l10n.t('Stop and delete session "{0}"', name)
             }] : []
         }));
 
         items.push({
-            label: '$(plus) Switch to custom session...',
-            description: 'Enter a custom session name',
+            label: '$(plus) ' + l10n.t('Switch to custom session...'),
+            description: l10n.t('Enter a custom session name'),
             detail: '',
             isCustom: true
         });
 
         const qp = vscode.window.createQuickPick<SessionQuickPickItem>();
         qp.items = items;
-        qp.placeholder = `Current session: ${activeSidebarSession}. Select session to switch sidebar view:`;
-        qp.title = 'Switch Herdr Session';
+        qp.placeholder = l10n.t('Current session: {0}. Select session to switch sidebar view:', activeSidebarSession);
+        qp.title = l10n.t('Switch Herdr Session');
 
         qp.onDidTriggerItemButton(async (e) => {
             qp.hide();
@@ -1200,8 +1206,8 @@ export function activate(context: vscode.ExtensionContext) {
 
             if (selected.isCustom) {
                 const input = await vscode.window.showInputBox({
-                    prompt: 'Enter session name',
-                    placeHolder: 'e.g. default, vscode, project-x',
+                    prompt: l10n.t('Enter Herdr session name to switch to'),
+                    placeHolder: l10n.t('e.g. default, project-x, session-2'),
                     validateInput: validateSessionName
                 });
                 if (!input || !input.trim()) return;
@@ -1228,12 +1234,12 @@ export function activate(context: vscode.ExtensionContext) {
         if (!sessionToDelete) {
             const sessions = (await fetchActiveSessions()).filter(s => s !== 'default');
             if (sessions.length === 0) {
-                vscode.window.showInformationMessage('No custom sessions available to delete.');
+                vscode.window.showInformationMessage(l10n.t('No custom sessions available to delete.'));
                 return;
             }
             const selected = await vscode.window.showQuickPick(sessions, {
-                placeHolder: 'Select a session to stop and delete',
-                title: 'Delete Herdr Session'
+                placeHolder: l10n.t('Select Herdr Session to delete'),
+                title: l10n.t('Delete Session')
             });
             if (!selected) return;
             sessionToDelete = selected;
@@ -1271,8 +1277,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     let createWorkspaceDisposable = vscode.commands.registerCommand('herdr-collie.createWorkspace', async () => {
         const label = await vscode.window.showInputBox({
-            prompt: 'Enter a label for the new workspace (optional)',
-            placeHolder: 'My New Workspace'
+            prompt: l10n.t('Enter label / name for the new workspace'),
+            placeHolder: l10n.t('e.g. backend, frontend, docs')
         });
         
         if (label === undefined) return;
@@ -1285,7 +1291,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         execHerdr(createArgs, (error: any) => {
             if (error) {
-                vscode.window.showErrorMessage(`Failed to create workspace: ${error.message}`);
+                vscode.window.showErrorMessage(l10n.t('Failed to create workspace: {0}', error.message));
                 return;
             }
             refreshAllProviders();
@@ -1298,7 +1304,7 @@ export function activate(context: vscode.ExtensionContext) {
         const currentLabel = item.label.replace('★ ', '').replace(/\(\d+ panes\)/, '').trim();
         
         const newLabel = await vscode.window.showInputBox({
-            prompt: `Enter new label for workspace ${item.id}`,
+            prompt: l10n.t('Enter new label for workspace "{0}"', item.id),
             value: currentLabel
         });
         
@@ -1306,7 +1312,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         execHerdr(['--session', activeSidebarSession, 'workspace', 'rename', item.id, newLabel], (error: any) => {
             if (error) {
-                vscode.window.showErrorMessage(`Failed to rename workspace: ${error.message}`);
+                vscode.window.showErrorMessage(l10n.t('Failed to rename workspace: {0}', error.message));
                 return;
             }
             refreshAllProviders();
@@ -1315,17 +1321,18 @@ export function activate(context: vscode.ExtensionContext) {
 
     let closeWorkspaceDisposable = vscode.commands.registerCommand('herdr-collie.closeWorkspace', async (item: HerdrWorkspaceTreeItem) => {
         if (!item || !item.id) return;
+        const closeBtn = l10n.t('Close Workspace');
         const confirm = await vscode.window.showWarningMessage(
-            `Are you sure you want to close workspace ${item.id}?`,
+            l10n.t('Are you sure you want to close workspace "{0}"? All running panes inside it will be terminated.', item.id),
             { modal: true },
-            'Close'
+            closeBtn
         );
         
-        if (confirm !== 'Close') return;
+        if (confirm !== closeBtn) return;
 
         execHerdr(['--session', activeSidebarSession, 'workspace', 'close', item.id], (error: any) => {
             if (error) {
-                vscode.window.showErrorMessage(`Failed to close workspace: ${error.message}`);
+                vscode.window.showErrorMessage(l10n.t('Failed to close workspace: {0}', error.message));
                 return;
             }
             refreshAllProviders();
@@ -1340,12 +1347,12 @@ export function activate(context: vscode.ExtensionContext) {
     let mergeWorktreeDisposable = vscode.commands.registerCommand('herdr-collie.mergeWorktree', async (item?: HerdrWorkspaceTreeItem) => {
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (!workspaceFolders || workspaceFolders.length === 0) {
-            vscode.window.showErrorMessage('Please open a workspace folder first.');
+            vscode.window.showErrorMessage(l10n.t('Please open a workspace folder first.'));
             return;
         }
         const repoRoot = await getRepoRoot(workspaceFolders[0].uri.fsPath);
         if (!repoRoot) {
-            vscode.window.showErrorMessage('The current workspace is not a Git repository.');
+            vscode.window.showErrorMessage(l10n.t('The current workspace is not a Git repository.'));
             return;
         }
 
@@ -1354,7 +1361,7 @@ export function activate(context: vscode.ExtensionContext) {
             const worktrees = await listGitWorktrees(repoRoot);
             const candidates = worktrees.filter(w => w.branch && w.worktree !== repoRoot);
             if (candidates.length === 0) {
-                vscode.window.showInformationMessage('No active Git worktree branches found to merge.');
+                vscode.window.showInformationMessage(l10n.t('No active Git worktree branches found to merge.'));
                 return;
             }
             const selected = await vscode.window.showQuickPick(candidates.map(c => ({
@@ -1362,26 +1369,28 @@ export function activate(context: vscode.ExtensionContext) {
                 description: c.worktree,
                 branch: c.branch!
             })), {
-                title: 'Merge Worktree Branch into Current Branch',
-                placeHolder: 'Select worktree branch to merge'
+                title: l10n.t('Merge Branch'),
+                placeHolder: l10n.t('Select Git Worktree branch to merge into current branch ({0})', path.basename(repoRoot))
             });
             if (!selected) return;
             branchToMerge = selected.branch;
         }
 
+        const mergeBtn = l10n.t('Merge Branch');
+        const cancelBtn = l10n.t('Dismiss');
         const confirm = await vscode.window.showInformationMessage(
-            `Merge branch '${branchToMerge}' into your active branch?`,
-            'Merge',
-            'Cancel'
+            l10n.t("Are you sure you want to merge worktree branch '{0}' into '{1}'?", branchToMerge, path.basename(repoRoot)),
+            mergeBtn,
+            cancelBtn
         );
-        if (confirm !== 'Merge') return;
+        if (confirm !== mergeBtn) return;
 
         try {
             const out = await mergeWorktreeBranch(repoRoot, branchToMerge);
-            vscode.window.showInformationMessage(`Merged '${branchToMerge}' successfully.\n${out.trim()}`);
+            vscode.window.showInformationMessage(l10n.t("Merged '{0}' successfully.\n{1}", branchToMerge, out.trim()));
             refreshAllProviders();
         } catch (e: any) {
-            vscode.window.showErrorMessage(`Merge failed: ${e.message || e}`);
+            vscode.window.showErrorMessage(l10n.t('Merge failed: {0}', e.message || e));
         }
     });
 
@@ -1399,7 +1408,7 @@ export function activate(context: vscode.ExtensionContext) {
             const worktrees = await listGitWorktrees(repoRoot);
             const candidates = worktrees.filter(w => w.worktree !== repoRoot);
             if (candidates.length === 0) {
-                vscode.window.showInformationMessage('No active Git worktrees found to remove.');
+                vscode.window.showInformationMessage(l10n.t('No active Git worktrees found to remove.'));
                 return;
             }
             const selected = await vscode.window.showQuickPick(candidates.map(c => ({
@@ -1408,30 +1417,31 @@ export function activate(context: vscode.ExtensionContext) {
                 worktree: c.worktree,
                 branch: c.branch
             })), {
-                title: 'Remove Git Worktree',
-                placeHolder: 'Select worktree to delete'
+                title: l10n.t('Remove Worktree'),
+                placeHolder: l10n.t('Select Git Worktree to remove')
             });
             if (!selected) return;
             targetPath = selected.worktree;
             targetLabel = selected.branch || path.basename(targetPath) || 'Worktree';
         }
 
+        const removeBtn = l10n.t('Remove Worktree');
         const confirm = await vscode.window.showWarningMessage(
-            `Are you sure you want to remove Git worktree '${targetLabel}' at '${targetPath}'?`,
+            l10n.t("Are you sure you want to remove worktree '{0}' ({1})? The directory and its Herdr workspace will be deleted.", targetLabel, targetPath),
             { modal: true },
-            'Remove Worktree'
+            removeBtn
         );
-        if (confirm !== 'Remove Worktree') return;
+        if (confirm !== removeBtn) return;
 
         try {
             if (targetId) {
                 execHerdr(['--session', getActiveSidebarSession(), 'workspace', 'close', targetId], () => {});
             }
             await removeWorktree(repoRoot, targetPath, true);
-            vscode.window.showInformationMessage(`Worktree '${targetLabel}' removed.`);
+            vscode.window.showInformationMessage(l10n.t("Worktree '{0}' removed.", targetLabel));
             refreshAllProviders();
         } catch (e: any) {
-            vscode.window.showErrorMessage(`Failed to remove worktree: ${e.message || e}`);
+            vscode.window.showErrorMessage(l10n.t('Failed to remove worktree: {0}', e.message || e));
         }
     });
 
@@ -1463,13 +1473,13 @@ class HerdrSessionTreeItem extends vscode.TreeItem {
     ) {
         super(sessionName, vscode.TreeItemCollapsibleState.None);
         this.contextValue = sessionName === 'default' ? 'defaultSession' : 'deletableSession';
-        this.description = isActive ? '(active)' : '';
+        this.description = isActive ? l10n.t('(active)') : '';
         this.iconPath = new vscode.ThemeIcon(isActive ? 'star-full' : 'symbol-event');
-        this.tooltip = isActive ? `Active Herdr Session: ${sessionName}` : `Click to switch to session: ${sessionName}`;
+        this.tooltip = isActive ? l10n.t('Active Herdr Session: {0}', sessionName) : l10n.t('Click to switch to session: {0}', sessionName);
         if (!isActive) {
             this.command = {
                 command: 'herdr-collie.switchSessionDirect',
-                title: 'Switch Session',
+                title: l10n.t('Switch Session'),
                 arguments: [sessionName]
             };
         }
@@ -1607,7 +1617,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
 
                             item.command = { 
                                 command: 'herdr-collie.attachWorkspace', 
-                                title: 'Attach', 
+                                title: l10n.t('Attach'), 
                                 arguments: [ws.id, false, ws.label, sessionName] 
                             };
                             return item;
@@ -1617,7 +1627,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                         return items;
                     }
                     this.currentItems = [];
-                    const emptyItem = new vscode.TreeItem('(No workspaces found)', vscode.TreeItemCollapsibleState.None);
+                    const emptyItem = new vscode.TreeItem(l10n.t('(No workspaces found)'), vscode.TreeItemCollapsibleState.None);
                     emptyItem.iconPath = new vscode.ThemeIcon('info');
                     return [emptyItem];
                 }
@@ -1649,7 +1659,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                             item.iconPath = new vscode.ThemeIcon(a.isBlocked ? 'alert' : 'hubot');
                             item.command = { 
                                 command: 'herdr-collie.attachWorkspace', 
-                                title: 'Attach', 
+                                title: l10n.t('Attach'), 
                                 arguments: [a.id, true, displayInfo.displayLabel, sessionName] 
                             };
                             return item;
@@ -1659,7 +1669,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                         return items;
                     }
                     this.currentItems = [];
-                    const emptyItem = new vscode.TreeItem('(No agents running)', vscode.TreeItemCollapsibleState.None);
+                    const emptyItem = new vscode.TreeItem(l10n.t('(No agents running)'), vscode.TreeItemCollapsibleState.None);
                     emptyItem.iconPath = new vscode.ThemeIcon('info');
                     return [emptyItem];
                 }
@@ -1707,7 +1717,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
 
                             item.command = { 
                                 command: 'herdr-collie.attachWorkspace', 
-                                title: 'Attach', 
+                                title: l10n.t('Attach'), 
                                 arguments: [ws.id, false, ws.label, sessionName] 
                             };
                             items.push(item);
@@ -1716,7 +1726,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                         this.currentItems = items.filter(i => i instanceof HerdrWorkspaceTreeItem) as HerdrWorkspaceTreeItem[];
                         this._onDidUpdateItems.fire();
                         if (items.length === 0) {
-                            const emptyItem = new vscode.TreeItem('(No workspaces found)', vscode.TreeItemCollapsibleState.None);
+                            const emptyItem = new vscode.TreeItem(l10n.t('(No workspaces found)'), vscode.TreeItemCollapsibleState.None);
                             emptyItem.iconPath = new vscode.ThemeIcon('info');
                             items.push(emptyItem);
                         }
@@ -1783,7 +1793,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                             item.iconPath = new vscode.ThemeIcon(a.isBlocked ? 'alert' : 'hubot');
                             item.command = { 
                                 command: 'herdr-collie.attachWorkspace', 
-                                title: 'Attach', 
+                                title: l10n.t('Attach'), 
                                 arguments: [a.id, true, displayInfo.displayLabel, sessionName] 
                             };
                             items.push(item);
@@ -1792,7 +1802,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                         this.currentItems = items.filter(i => i instanceof HerdrWorkspaceTreeItem) as HerdrWorkspaceTreeItem[];
                         this._onDidUpdateItems.fire();
                         if (items.length === 0) {
-                            const emptyItem = new vscode.TreeItem('(No agents running)', vscode.TreeItemCollapsibleState.None);
+                            const emptyItem = new vscode.TreeItem(l10n.t('(No agents running)'), vscode.TreeItemCollapsibleState.None);
                             emptyItem.iconPath = new vscode.ThemeIcon('info');
                             items.push(emptyItem);
                         }
