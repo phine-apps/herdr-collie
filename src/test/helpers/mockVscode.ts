@@ -59,11 +59,39 @@ export class MockMarkdownString {
 }
 
 export class MockThemeIcon {
-    constructor(public readonly id: string) {}
+    constructor(public readonly id: string, public readonly color?: any) {}
 }
 
 export class MockThemeColor {
     constructor(public readonly id: string) {}
+}
+
+export class MockTreeItem {
+    public description?: string;
+    public tooltip?: any;
+    public iconPath?: any;
+    public command?: any;
+    constructor(public label: string, public collapsibleState?: any) {}
+}
+
+export class MockDataTransferItem {
+    constructor(public readonly value: any) {}
+    async asString(): Promise<string> {
+        return typeof this.value === 'string' ? this.value : JSON.stringify(this.value);
+    }
+}
+
+export class MockDataTransfer {
+    private items = new Map<string, any>();
+    get(mimeType: string): any {
+        return this.items.get(mimeType);
+    }
+    set(mimeType: string, item: any): void {
+        this.items.set(mimeType, item);
+    }
+    forEach(callback: (item: any, mimeType: string) => void): void {
+        this.items.forEach(callback);
+    }
 }
 
 export const mockVscode = {
@@ -74,6 +102,14 @@ export const mockVscode = {
     ThemeIcon: MockThemeIcon,
     ThemeColor: MockThemeColor,
     MarkdownString: MockMarkdownString,
+    TreeItem: MockTreeItem,
+    TreeItemCollapsibleState: {
+        None: 0,
+        Collapsed: 1,
+        Expanded: 2
+    },
+    DataTransfer: MockDataTransfer,
+    DataTransferItem: MockDataTransferItem,
     window: {
         createStatusBarItem: (idOrAlignment?: any, alignmentOrPriority?: any, priority?: any): MockStatusBarItem => {
             const item: MockStatusBarItem = {

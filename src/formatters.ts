@@ -1,4 +1,4 @@
-import { ParsedAgent, GitWorktreeInfo } from './parsers';
+import { ParsedAgent, ParsedWorkspace, GitWorktreeInfo } from './parsers';
 
 export interface ProblemItem {
     file: string;
@@ -120,6 +120,132 @@ export function formatTerminalOutput(
     return `${header}${statusLine}\n\`\`\`\n${truncated}\n\`\`\`\n\n${instruction}`;
 }
 
+export interface WorkspaceDisplayInfo {
+    label: string;
+    description: string;
+    tooltip: string;
+    iconId: string;
+    isFocused: boolean;
+    isCurrentWindow: boolean;
+    isWorktree: boolean;
+    branchName?: string;
+    agentBadges?: string;
+    matchedAgents: ParsedAgent[];
+}
+
+/**
+ * Format workspace display information for TreeView, QuickPick, HUD, and tooltips
+ */
+export function formatWorkspaceDisplay(
+    ws: ParsedWorkspace,
+    worktrees: GitWorktreeInfo[] = [],
+    agents: ParsedAgent[] = [],
+    currentWorkspaceFolder?: string
+): WorkspaceDisplayInfo {
+    const matchedWt = ws.cwd ? worktrees.find(w => w.worktree === ws.cwd) : undefined;
+    const isWorktree = Boolean(matchedWt);
+    const branchName = matchedWt?.branch;
+
+    const isCurrentWindow = Boolean(
+        currentWorkspaceFolder && 
+        ws.cwd && 
+        (ws.cwd === currentWorkspaceFolder || ws.cwd.startsWith(currentWorkspaceFolder))
+    );
+    const isFocused = Boolean(ws.focused);
+
+    // Filter agents associated with this workspace
+    const wsAgents = agents.filter(a => 
+        a.workspaceId === ws.id || 
+        (a.workspaceLabel && a.workspaceLabel === ws.label) || 
+        (ws.cwd && a.workspaceCwd === ws.cwd)
+    );
+
+    // Build agent badges:
+    // - If 1 or 2 agents: show names and icons: "claude 🟢, cursor 🟡"
+    // - If 3 or more agents: aggregate by status count prioritizing urgency: "🔴 1, 🟢 2, 🟡 1"
+    let agentBadges = '';
+    if (wsAgents.length > 0 && wsAgents.length <= 2) {
+        agentBadges = wsAgents.map(a => `${a.name || 'Agent'} ${a.statusIcon}`).join(', ');
+    } else if (wsAgents.length > 2) {
+        const iconCounts = new Map<string, number>();
+        for (const a of wsAgents) {
+            const icon = a.statusIcon || '⚪';
+            iconCounts.set(icon, (iconCounts.get(icon) || 0) + 1);
+        }
+        const priorityOrder = ['🔴', '🟢', '🟡', '⚪'];
+        const sortedIcons = Array.from(iconCounts.keys()).sort((a, b) => {
+            const idxA = priorityOrder.indexOf(a);
+            const idxB = priorityOrder.indexOf(b);
+            const orderA = idxA === -1 ? 999 : idxA;
+            const orderB = idxB === -1 ? 999 : idxB;
+            return orderA - orderB;
+        });
+        agentBadges = sortedIcons.map(icon => `${icon} ${iconCounts.get(icon)}`).join(', ');
+    }
+
+    // Build concise description: only show branch (if worktree) and agentBadges
+    const descParts: string[] = [];
+    if (isWorktree && branchName) {
+        descParts.push(`(${branchName})`);
+    }
+    if (agentBadges) {
+        descParts.push(`[${agentBadges}]`);
+    } else if (!isWorktree && ws.cwd) {
+        descParts.push(ws.cwd);
+    } else if (!isWorktree) {
+        descParts.push(`ID: ${ws.id}`);
+    }
+
+    const description = descParts.join(' • ');
+
+    // Build rich tooltip
+    const tooltipLines: string[] = [
+        `Workspace: ${ws.label}${isFocused ? ' (Active in Herdr)' : ''}`
+    ];
+    if (ws.cwd) {
+        tooltipLines.push(`Path: ${ws.cwd}`);
+    }
+    if (branchName) {
+        tooltipLines.push(`Branch: ${branchName} (Git Worktree)`);
+    }
+    if (isCurrentWindow) {
+        tooltipLines.push(`VS Code Window: Matches current open folder`);
+    }
+    tooltipLines.push(`Workspace ID: ${ws.id}`);
+
+    if (wsAgents.length > 0) {
+        tooltipLines.push(`\nActive Agents (${wsAgents.length}):`);
+        for (const a of wsAgents) {
+            tooltipLines.push(`- ${a.statusIcon} ${a.name} (${a.status})`);
+        }
+    } else {
+        tooltipLines.push(`\nActive Agents: (None)`);
+    }
+
+    const tooltip = tooltipLines.join('\n');
+
+    // Determine icon
+    let iconId = 'window';
+    if (isWorktree) {
+        iconId = 'git-branch';
+    } else if (isCurrentWindow) {
+        iconId = 'folder-active';
+    }
+
+    return {
+        label: ws.label,
+        description,
+        tooltip,
+        iconId,
+        isFocused,
+        isCurrentWindow,
+        isWorktree,
+        branchName,
+        agentBadges: agentBadges || undefined,
+        matchedAgents: wsAgents
+    };
+}
+
 export interface AgentDisplayInfo {
     label: string;
     description: string;
@@ -140,14 +266,18 @@ export function formatAgentDisplay(
     const branchName = matchedWt?.branch;
     const wsName = agent.workspaceLabel || (agent.workspaceId ? `Workspace ${agent.workspaceId}` : '');
 
-    let wsBadge = wsName;
-    if (branchName) {
-        wsBadge = wsName ? `${wsName} (${branchName})` : branchName;
-    }
+    const branchPart = branchName ? `(${branchName})` : '';
+    const wsBadge = wsName && branchPart ? `${wsName} ${branchPart}` : (wsName || branchPart);
 
     const agentName = agent.name && agent.name !== agent.id ? agent.name : 'Agent';
-    const label = wsBadge ? `${agent.statusIcon} [${wsBadge}] ${agentName}` : `${agent.statusIcon} ${agentName}`;
-    const description = agent.isBlocked ? `⚠️ Input Needed (${agent.id})` : `(${agent.id})`;
+    const label = `${agent.statusIcon} ${agentName}`;
+
+    let description = '';
+    if (agent.isBlocked) {
+        description = wsBadge ? `⚠️ Input Needed • ${wsBadge}` : `⚠️ Input Needed (${agent.id})`;
+    } else {
+        description = wsBadge || `(${agent.id})`;
+    }
 
     const tooltipLines: string[] = [
         `Agent: ${agentName}`,

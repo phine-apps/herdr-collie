@@ -96,15 +96,42 @@ export declare interface HerdrSocketClient {
     off<K extends keyof HerdrSocketClientEvents>(event: K, listener: HerdrSocketClientEvents[K]): this;
 }
 
+export const DEFAULT_HERDR_SUBSCRIPTIONS = [
+    { type: 'workspace.created' },
+    { type: 'workspace.updated' },
+    { type: 'workspace.metadata_updated' },
+    { type: 'workspace.renamed' },
+    { type: 'workspace.moved' },
+    { type: 'workspace.reordered' },
+    { type: 'workspace.closed' },
+    { type: 'workspace.focused' },
+    { type: 'worktree.created' },
+    { type: 'worktree.opened' },
+    { type: 'worktree.removed' },
+    { type: 'tab.created' },
+    { type: 'tab.closed' },
+    { type: 'tab.focused' },
+    { type: 'tab.renamed' },
+    { type: 'tab.moved' },
+    { type: 'pane.created' },
+    { type: 'pane.closed' },
+    { type: 'pane.updated' },
+    { type: 'pane.focused' },
+    { type: 'pane.moved' },
+    { type: 'pane.exited' },
+    { type: 'pane.agent_detected' },
+    { type: 'layout.updated' }
+];
+
 export class HerdrSocketClient extends EventEmitter {
     private socket: net.Socket | null = null;
     private socketPath: string;
-    private pendingRequests: Map<string, { resolve: (res: any) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }> = new Map();
     private buffer = '';
     private requestIdCounter = 1;
     private reconnectTimer: NodeJS.Timeout | null = null;
     private isDisposed = false;
     private _isConnected = false;
+    private activeRequestCleanups: Set<() => void> = new Set();
 
     constructor(customSocketPathOrSession?: string) {
         super();
@@ -132,7 +159,12 @@ export class HerdrSocketClient extends EventEmitter {
                 this._isConnected = true;
                 this.emit('connect');
                 // Subscribe to events automatically upon connection
-                this.request('events.subscribe', {}).catch(() => {});
+                const payload = JSON.stringify({
+                    id: 'collie_sub',
+                    method: 'events.subscribe',
+                    params: { subscriptions: DEFAULT_HERDR_SUBSCRIPTIONS }
+                }) + '\n';
+                this.socket?.write(payload);
             });
 
             this.socket.on('data', (data: Buffer) => {
@@ -147,7 +179,6 @@ export class HerdrSocketClient extends EventEmitter {
             this.socket.on('close', () => {
                 this._isConnected = false;
                 this.socket = null;
-                this.rejectAllPending(new Error('Herdr socket connection closed'));
                 this.emit('disconnect');
                 this.scheduleReconnect();
             });
@@ -191,49 +222,120 @@ export class HerdrSocketClient extends EventEmitter {
     }
 
     private handleMessage(message: any): void {
-        // If message has an ID matching a pending request, resolve/reject it
-        if (message.id && this.pendingRequests.has(message.id)) {
-            const pending = this.pendingRequests.get(message.id)!;
-            clearTimeout(pending.timer);
-            this.pendingRequests.delete(message.id);
-
-            if (message.error) {
-                pending.reject(new Error(message.error.message || message.error.code || 'Herdr API error'));
-            } else {
-                pending.resolve(message.result !== undefined ? message.result : message);
-            }
-            return;
-        }
-
-        // Otherwise, it is an event or broadcast notification
+        // Pushed event or broadcast notification
         this.emit('event', message);
     }
 
     public request<T = any>(method: string, params: any = {}, timeoutMs = 5000): Promise<T> {
-        if (!this.socket || !this._isConnected) {
-            return Promise.reject(new Error('Not connected to Herdr socket'));
+        if (this.isDisposed) {
+            return Promise.reject(new Error('HerdrSocketClient disposed'));
         }
 
         const id = `collie_${this.requestIdCounter++}`;
         const payload = JSON.stringify({ id, method, params }) + '\n';
 
         return new Promise<T>((resolve, reject) => {
+            let buf = '';
+            let finished = false;
+            let reqSock: net.Socket | null = null;
+
+            const cleanup = () => {
+                this.activeRequestCleanups.delete(abort);
+                clearTimeout(timer);
+                if (reqSock) {
+                    reqSock.removeAllListeners();
+                    reqSock.destroy();
+                    reqSock = null;
+                }
+            };
+
+            const abort = () => {
+                if (!finished) {
+                    finished = true;
+                    cleanup();
+                    reject(new Error('HerdrSocketClient disposed'));
+                }
+            };
+            this.activeRequestCleanups.add(abort);
+
             const timer = setTimeout(() => {
-                if (this.pendingRequests.has(id)) {
-                    this.pendingRequests.delete(id);
+                if (!finished) {
+                    finished = true;
+                    cleanup();
                     reject(new Error(`Herdr socket request timed out for method '${method}'`));
                 }
             }, timeoutMs);
 
-            this.pendingRequests.set(id, { resolve, reject, timer });
+            try {
+                reqSock = net.createConnection(this.socketPath);
+                reqSock.on('connect', () => {
+                    reqSock!.write(payload, (err) => {
+                        if (err && !finished) {
+                            finished = true;
+                            cleanup();
+                            reject(err);
+                        }
+                    });
+                });
 
-            this.socket!.write(payload, (err) => {
-                if (err) {
-                    clearTimeout(timer);
-                    this.pendingRequests.delete(id);
-                    reject(err);
-                }
-            });
+                reqSock.on('data', (chunk: Buffer) => {
+                    buf += chunk.toString();
+                    const lines = buf.split('\n');
+                    for (const line of lines) {
+                        const trimmed = line.trim();
+                        if (!trimmed) continue;
+                        try {
+                            const msg = JSON.parse(trimmed);
+                            if (msg.id === id || msg.result !== undefined || msg.error !== undefined) {
+                                if (!finished) {
+                                    finished = true;
+                                    cleanup();
+                                    if (msg.error) {
+                                        reject(new Error(msg.error.message || msg.error.code || 'Herdr API error'));
+                                    } else {
+                                        resolve(msg.result !== undefined ? msg.result : msg);
+                                    }
+                                    return;
+                                }
+                            }
+                        } catch {
+                            // Wait for complete json line
+                        }
+                    }
+                });
+
+                reqSock.on('close', () => {
+                    if (!finished) {
+                        finished = true;
+                        cleanup();
+                        const trimmed = buf.trim();
+                        if (trimmed) {
+                            try {
+                                const msg = JSON.parse(trimmed.split('\n').pop() || '');
+                                if (msg.error) {
+                                    reject(new Error(msg.error.message || msg.error.code || 'Herdr API error'));
+                                } else {
+                                    resolve(msg.result !== undefined ? msg.result : msg);
+                                }
+                                return;
+                            } catch {}
+                        }
+                        reject(new Error(`Herdr socket closed before response received for method '${method}'`));
+                    }
+                });
+
+                reqSock.on('error', (err: Error) => {
+                    if (!finished) {
+                        finished = true;
+                        cleanup();
+                        reject(err);
+                    }
+                });
+            } catch (err: any) {
+                finished = true;
+                cleanup();
+                reject(err);
+            }
         });
     }
 
@@ -286,12 +388,14 @@ export class HerdrSocketClient extends EventEmitter {
         return await this.request('agent.prompt', { agent: agentIdOrPaneId, prompt });
     }
 
-    private rejectAllPending(err: Error): void {
-        for (const [, pending] of this.pendingRequests) {
-            clearTimeout(pending.timer);
-            pending.reject(err);
-        }
-        this.pendingRequests.clear();
+    /**
+     * Moves workspace(s) before another workspace, or to the end of the list if beforeWorkspaceId is null
+     */
+    public async moveWorkspaces(workspaceIds: string[], beforeWorkspaceId: string | null): Promise<any> {
+        return await this.request('workspace.move_block', {
+            workspace_ids: workspaceIds,
+            before_workspace_id: beforeWorkspaceId
+        });
     }
 
     public dispose(): void {
@@ -300,7 +404,10 @@ export class HerdrSocketClient extends EventEmitter {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
         }
-        this.rejectAllPending(new Error('HerdrSocketClient disposed'));
+        for (const abort of Array.from(this.activeRequestCleanups)) {
+            abort();
+        }
+        this.activeRequestCleanups.clear();
         if (this.socket) {
             this.socket.destroy();
             this.socket = null;

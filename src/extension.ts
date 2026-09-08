@@ -11,6 +11,7 @@ import {
     formatHoverInfo,
     formatTerminalOutput,
     formatAgentDisplay,
+    formatWorkspaceDisplay,
     sortAgents,
     AgentSortOrder
 } from './formatters';
@@ -18,14 +19,15 @@ import {
     parseWorkspaces, 
     parseAgents, 
     parsePanes,
-    parseSnapshotWorkspaces,
-    parseSnapshotAgents,
+    parseSnapshotWorkspaces, 
+    parseSnapshotAgents, 
     parseSessions,
     GitWorktreeInfo
 } from './parsers';
 import { HerdrSocketClient, validateSessionName } from './socketClient';
 import { setupConfigManager } from './configManager';
 import { AgentHUD } from './agentHUD';
+import { WorkspaceHUD } from './workspaceHUD';
 import { 
     launchWorktreeAgentWizard, 
     listGitWorktrees, 
@@ -33,6 +35,7 @@ import {
     removeWorktree, 
     mergeWorktreeBranch 
 } from './worktreeManager';
+import { HerdrWorkspaceTreeItem, WorkspaceDragAndDropController } from './workspaceDragAndDrop';
 
 interface TargetQuickPickItem extends vscode.QuickPickItem {
     targetId: string;
@@ -118,6 +121,8 @@ export function activate(context: vscode.ExtensionContext) {
     let socketClient = new HerdrSocketClient(activeSidebarSession);
     socketClient.connect();
 
+    let refreshAllProviders: () => void = () => {};
+
     async function openOrAttachTerminal(target: string, isAgent: boolean, displayLabel: string, targetSession: string) {
         // Manage a single unified Herdr TUI terminal per session
         const sessionLabel = targetSession ? ` (${targetSession})` : '';
@@ -151,6 +156,7 @@ export function activate(context: vscode.ExtensionContext) {
             const targetType = isAgent ? 'Agent' : 'Workspace';
             const label = displayLabel || target;
             vscode.window.showInformationMessage(`Focused ${targetType}: ${label}`);
+            refreshAllProviders();
             return;
         }
 
@@ -178,6 +184,7 @@ export function activate(context: vscode.ExtensionContext) {
         const targetType = isAgent ? 'Agent' : 'Workspace';
         const label = displayLabel || target || targetSession || 'Herdr';
         vscode.window.showInformationMessage(`Attached to Herdr${sessionLabel} (${targetType}: ${label})`);
+        refreshAllProviders();
     }
 
     // Feature 2: Native Terminal Integration & Target Selectors
@@ -415,26 +422,20 @@ export function activate(context: vscode.ExtensionContext) {
             const snapshot = await socketClient.getSnapshot();
             if (snapshot) {
                 const parsedWorkspaces = parseSnapshotWorkspaces(snapshot, os.homedir());
-                let worktrees: GitWorktreeInfo[] = [];
+                const parsedAgents = parseSnapshotAgents(snapshot, parsedWorkspaces);
+                const worktrees = await getWorktreesForCwds(parsedWorkspaces.map(w => w.cwd));
                 const currentRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-                if (currentRoot) {
-                    const repoRoot = await getRepoRoot(currentRoot);
-                    if (repoRoot) {
-                        worktrees = await listGitWorktrees(repoRoot);
-                    }
-                }
 
                 wsItems = parsedWorkspaces.map(ws => {
-                    const matchedWt = worktrees.find(w => w.worktree === ws.cwd);
-                    const isWorktree = Boolean(matchedWt);
-                    const branchName = matchedWt?.branch;
-                    const icon = isWorktree ? '$(git-branch)' : (ws.focused ? '$(star-full)' : '$(window)');
-                    const label = isWorktree ? `${ws.label} (${branchName || 'worktree'})` : ws.label;
+                    const displayInfo = formatWorkspaceDisplay(ws, worktrees, parsedAgents, currentRoot);
+                    const icon = `$(${displayInfo.iconId})`;
 
                     return {
-                        label: `${icon} ${label}`,
-                        description: ws.cwd ? ws.cwd : `ID: ${ws.id}`,
-                        detail: isWorktree ? `Git Worktree at ${ws.cwd}` : undefined,
+                        label: `${icon} ${displayInfo.label}`,
+                        description: displayInfo.description,
+                        detail: displayInfo.isWorktree 
+                            ? `Git Worktree at ${ws.cwd}${displayInfo.agentBadges ? ` • Agents: ${displayInfo.agentBadges}` : ''}`
+                            : (displayInfo.agentBadges ? `Active Agents: ${displayInfo.agentBadges}` : (ws.cwd ? `Path: ${ws.cwd}` : undefined)),
                         targetId: ws.id,
                         sessionName,
                         isAgent: false,
@@ -902,11 +903,17 @@ export function activate(context: vscode.ExtensionContext) {
         sendTerminalOutputDisposable
     );
 
-// Feature 3: GUI Sidebar Manager (Socket-driven) & Agent HUD
+// Feature 3: GUI Sidebar Manager (Socket-driven) & Agent/Workspace HUD
     const sessionProvider = new HerdrSessionProvider(getActiveSidebarSession, fetchActiveSessions);
     const workspaceProvider = new HerdrWorkspaceProvider('workspaces', socketClient, getActiveSidebarSession);
     const agentProvider = new HerdrWorkspaceProvider('agents', socketClient, getActiveSidebarSession);
     const agentHUD = new AgentHUD(socketClient, getActiveSidebarSession);
+    const workspaceHUD = new WorkspaceHUD(socketClient, getActiveSidebarSession, getWorktreesForCwds);
+    const workspaceDragAndDropController = new WorkspaceDragAndDropController(
+        () => workspaceProvider.getCurrentItems(),
+        () => socketClient,
+        () => refreshAllProviders()
+    );
 
     const initialSort = vscode.workspace.getConfiguration('herdr-collie').get<AgentSortOrder>('agentSortOrder', 'grouped') || 'grouped';
     agentProvider.setSortOrder(initialSort);
@@ -916,6 +923,7 @@ export function activate(context: vscode.ExtensionContext) {
         workspaceProvider, 
         agentProvider, 
         agentHUD, 
+        workspaceHUD,
         { dispose: () => socketClient.dispose() }
     );
 
@@ -923,12 +931,100 @@ export function activate(context: vscode.ExtensionContext) {
         treeDataProvider: sessionProvider
     });
     const workspaceTreeView = vscode.window.createTreeView('herdr-collie.workspaces', {
-        treeDataProvider: workspaceProvider
+        treeDataProvider: workspaceProvider,
+        dragAndDropController: workspaceDragAndDropController
     });
     const agentTreeView = vscode.window.createTreeView('herdr-collie.agents', {
         treeDataProvider: agentProvider
     });
     context.subscriptions.push(sessionTreeView, workspaceTreeView, agentTreeView);
+
+    // Bidirectional selection synchronization between Workspaces and Agents
+    let isSyncingSelection = false;
+
+    agentTreeView.onDidChangeSelection(async e => {
+        if (isSyncingSelection || !e.selection || e.selection.length === 0) return;
+        const selected = e.selection[0] as HerdrWorkspaceTreeItem;
+        if (!selected) return;
+
+        const allWs = workspaceProvider.getCurrentItems();
+        const matchingWs = allWs.find(ws => 
+            (selected.workspaceId && ws.id === selected.workspaceId) ||
+            (selected.cwd && ws.cwd && ws.cwd === selected.cwd)
+        );
+
+        if (matchingWs) {
+            isSyncingSelection = true;
+            try {
+                await workspaceTreeView.reveal(matchingWs, { select: true, focus: false });
+            } catch {
+                // Ignore if view is not visible or reveal not supported
+            } finally {
+                isSyncingSelection = false;
+            }
+        }
+    });
+
+    workspaceTreeView.onDidChangeSelection(async e => {
+        if (isSyncingSelection || !e.selection || e.selection.length === 0) return;
+        const selected = e.selection[0] as HerdrWorkspaceTreeItem;
+        if (!selected) return;
+
+        const allAgents = agentProvider.getCurrentItems();
+        const matchingAgent = allAgents.find(a => 
+            (a.workspaceId && a.workspaceId === selected.id) ||
+            (a.cwd && selected.cwd && a.cwd === selected.cwd)
+        );
+
+        if (matchingAgent) {
+            isSyncingSelection = true;
+            try {
+                await agentTreeView.reveal(matchingAgent, { select: true, focus: false });
+            } catch {
+                // Ignore if view is not visible or reveal not supported
+            } finally {
+                isSyncingSelection = false;
+            }
+        }
+    });
+
+    // Automatically highlight the active workspace and its agent on load / refresh
+    const syncActiveSelection = async () => {
+        if (isSyncingSelection) return;
+        const allWs = workspaceProvider.getCurrentItems();
+        if (allWs.length === 0) return;
+
+        const focusedWs = allWs.find(w => w.isFocused) || allWs[0];
+        if (focusedWs) {
+            isSyncingSelection = true;
+            try {
+                await workspaceTreeView.reveal(focusedWs, { select: true, focus: false });
+            } catch {
+            } finally {
+                isSyncingSelection = false;
+            }
+        }
+
+        const allAgents = agentProvider.getCurrentItems();
+        if (allAgents.length > 0 && focusedWs) {
+            const matchingAgent = allAgents.find(a => 
+                (a.workspaceId && a.workspaceId === focusedWs.id) ||
+                (a.cwd && focusedWs.cwd && a.cwd === focusedWs.cwd)
+            );
+            if (matchingAgent) {
+                isSyncingSelection = true;
+                try {
+                    await agentTreeView.reveal(matchingAgent, { select: true, focus: false });
+                } catch {
+                } finally {
+                    isSyncingSelection = false;
+                }
+            }
+        }
+    };
+
+    workspaceProvider.onDidUpdateItems(() => setTimeout(syncActiveSelection, 60));
+    agentProvider.onDidUpdateItems(() => setTimeout(syncActiveSelection, 60));
 
     const updateTreeViewDescriptions = () => {
         workspaceTreeView.description = undefined;
@@ -936,11 +1032,12 @@ export function activate(context: vscode.ExtensionContext) {
     };
     updateTreeViewDescriptions();
 
-    const refreshAllProviders = () => { 
+    refreshAllProviders = () => { 
         sessionProvider.refresh();
         workspaceProvider.refresh(); 
         agentProvider.refresh(); 
         agentHUD.refresh();
+        workspaceHUD.refresh();
     };
 
     const setupSocketListeners = (client: HerdrSocketClient) => {
@@ -972,6 +1069,8 @@ export function activate(context: vscode.ExtensionContext) {
                 workspaceProvider.updateSocketClient(socketClient);
                 agentProvider.updateSocketClient(socketClient);
                 agentHUD.updateSocketClient(socketClient);
+                workspaceHUD.updateSocketClient(socketClient);
+                workspaceDragAndDropController.updateSocketClient(socketClient);
                 updateTreeViewDescriptions();
                 refreshAllProviders();
             }
@@ -1002,6 +1101,8 @@ export function activate(context: vscode.ExtensionContext) {
         workspaceProvider.updateSocketClient(socketClient);
         agentProvider.updateSocketClient(socketClient);
         agentHUD.updateSocketClient(socketClient);
+        workspaceHUD.updateSocketClient(socketClient);
+        workspaceDragAndDropController.updateSocketClient(socketClient);
         updateTreeViewDescriptions();
         refreshAllProviders();
 
@@ -1411,31 +1512,27 @@ class HerdrSessionProvider implements vscode.TreeDataProvider<HerdrSessionTreeIt
     }
 }
 
-class HerdrWorkspaceTreeItem extends vscode.TreeItem {
-    constructor(
-        public readonly label: string,
-        public readonly id: string,
-        public readonly collapsibleState: vscode.TreeItemCollapsibleState,
-        public readonly contextValue: string = 'workspace',
-        public readonly cwd?: string,
-        public readonly branchName?: string,
-        public readonly isWorktree?: boolean
-    ) {
-        super(label, collapsibleState);
-        this.contextValue = contextValue;
-    }
-}
-
 class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>, vscode.Disposable {
     private _onDidChangeTreeData: vscode.EventEmitter<vscode.TreeItem | undefined | null | void> = new vscode.EventEmitter<vscode.TreeItem | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<vscode.TreeItem | undefined | null | void> = this._onDidChangeTreeData.event;
+    private _onDidUpdateItems: vscode.EventEmitter<void> = new vscode.EventEmitter<void>();
+    readonly onDidUpdateItems: vscode.Event<void> = this._onDidUpdateItems.event;
     private sortOrder: AgentSortOrder = 'grouped';
+    private currentItems: HerdrWorkspaceTreeItem[] = [];
 
     constructor(
         private readonly type: 'workspaces' | 'agents',
         private socketClient: HerdrSocketClient,
         private readonly getSessionName: () => string
     ) {}
+
+    getParent(_element: vscode.TreeItem): vscode.ProviderResult<vscode.TreeItem> {
+        return null;
+    }
+
+    getCurrentItems(): HerdrWorkspaceTreeItem[] {
+        return this.currentItems;
+    }
 
     setSortOrder(newOrder: AgentSortOrder) {
         this.sortOrder = newOrder;
@@ -1461,7 +1558,10 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
         this._onDidChangeTreeData.fire();
     }
 
-    dispose() {}
+    dispose() {
+        this._onDidChangeTreeData.dispose();
+        this._onDidUpdateItems.dispose();
+    }
 
     getTreeItem(element: vscode.TreeItem): vscode.TreeItem {
         return element;
@@ -1480,34 +1580,30 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
             if (snapshot) {
                 if (this.type === 'workspaces') {
                     const parsedWorkspaces = parseSnapshotWorkspaces(snapshot, os.homedir());
+                    const parsedAgents = parseSnapshotAgents(snapshot, parsedWorkspaces);
                     const worktrees = await getWorktreesForCwds(parsedWorkspaces.map(w => w.cwd));
+                    const currentRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
                     if (parsedWorkspaces.length > 0) {
-                        return parsedWorkspaces.map(ws => {
-                            const matchedWt = worktrees.find(w => w.worktree === ws.cwd);
-                            const isWorktree = Boolean(matchedWt);
-                            const branchName = matchedWt?.branch;
-                            const contextValue = isWorktree ? 'worktreeWorkspace' : 'workspace';
+                        const items = parsedWorkspaces.map(ws => {
+                            const displayInfo = formatWorkspaceDisplay(ws, worktrees, parsedAgents, currentRoot);
+                            const contextValue = displayInfo.isWorktree ? 'worktreeWorkspace' : 'workspace';
                             
                             const item = new HerdrWorkspaceTreeItem(
-                                ws.label, 
+                                displayInfo.label, 
                                 ws.id, 
                                 vscode.TreeItemCollapsibleState.None, 
                                 contextValue,
                                 ws.cwd,
-                                branchName,
-                                isWorktree
+                                displayInfo.branchName,
+                                displayInfo.isWorktree,
+                                displayInfo.isFocused,
+                                displayInfo.isCurrentWindow
                             );
                             
-                            if (isWorktree) {
-                                item.description = branchName || 'worktree';
-                                item.tooltip = `Git Worktree: ${ws.cwd}\nBranch: ${branchName || '(detached)'}\nWorkspace ID: ${ws.id}`;
-                                item.iconPath = new vscode.ThemeIcon('git-branch');
-                            } else {
-                                item.description = ws.cwd ? ws.cwd : `ID: ${ws.id}`;
-                                item.tooltip = ws.cwd ? `Path: ${ws.cwd}\nID: ${ws.id}` : `ID: ${ws.id}`;
-                                item.iconPath = new vscode.ThemeIcon(ws.focused ? 'star-full' : 'window');
-                            }
+                            item.description = displayInfo.description;
+                            item.tooltip = displayInfo.tooltip;
+                            item.iconPath = new vscode.ThemeIcon(displayInfo.iconId);
 
                             item.command = { 
                                 command: 'herdr-collie.attachWorkspace', 
@@ -1516,7 +1612,11 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                             };
                             return item;
                         });
+                        this.currentItems = items;
+                        this._onDidUpdateItems.fire();
+                        return items;
                     }
+                    this.currentItems = [];
                     const emptyItem = new vscode.TreeItem('(No workspaces found)', vscode.TreeItemCollapsibleState.None);
                     emptyItem.iconPath = new vscode.ThemeIcon('info');
                     return [emptyItem];
@@ -1529,7 +1629,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                     const worktrees = await getWorktreesForCwds(sortedAgents.map(a => a.workspaceCwd));
 
                     if (sortedAgents.length > 0) {
-                        return sortedAgents.map(a => {
+                        const items = sortedAgents.map(a => {
                             const displayInfo = formatAgentDisplay(a, worktrees);
 
                             const item = new HerdrWorkspaceTreeItem(
@@ -1538,7 +1638,11 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                                 vscode.TreeItemCollapsibleState.None, 
                                 a.isBlocked ? 'blockedAgent' : 'agent',
                                 a.workspaceCwd,
-                                displayInfo.branchName
+                                displayInfo.branchName,
+                                false,
+                                false,
+                                false,
+                                a.workspaceId
                             );
                             item.description = displayInfo.description;
                             item.tooltip = displayInfo.tooltip;
@@ -1550,7 +1654,11 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                             };
                             return item;
                         });
+                        this.currentItems = items;
+                        this._onDidUpdateItems.fire();
+                        return items;
                     }
+                    this.currentItems = [];
                     const emptyItem = new vscode.TreeItem('(No agents running)', vscode.TreeItemCollapsibleState.None);
                     emptyItem.iconPath = new vscode.ThemeIcon('info');
                     return [emptyItem];
@@ -1565,40 +1673,37 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
             if (this.type === 'workspaces') {
                 let rawWorkspaces = '';
                 let rawPanes = '';
-                let pending = 2;
+                let rawAgents = '';
+                let pending = 3;
 
                 const checkDone = async () => {
                     pending--;
                     if (pending === 0) {
                         const parsedPanes = parsePanes(rawPanes);
                         const parsedWorkspaces = parseWorkspaces(rawWorkspaces, parsedPanes, os.homedir());
+                        const parsedAgents = parseAgents(rawAgents, parsedWorkspaces);
                         const worktrees = await getWorktreesForCwds(parsedWorkspaces.map(w => w.cwd));
+                        const currentRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
                         let items: vscode.TreeItem[] = [];
 
                         parsedWorkspaces.forEach(ws => {
-                            const matchedWt = worktrees.find(w => w.worktree === ws.cwd);
-                            const isWorktree = Boolean(matchedWt);
-                            const branchName = matchedWt?.branch;
-                            const contextValue = isWorktree ? 'worktreeWorkspace' : 'workspace';
+                            const displayInfo = formatWorkspaceDisplay(ws, worktrees, parsedAgents, currentRoot);
+                            const contextValue = displayInfo.isWorktree ? 'worktreeWorkspace' : 'workspace';
 
                             const item = new HerdrWorkspaceTreeItem(
-                                ws.label, 
+                                displayInfo.label, 
                                 ws.id, 
                                 vscode.TreeItemCollapsibleState.None, 
                                 contextValue,
                                 ws.cwd,
-                                branchName,
-                                isWorktree
+                                displayInfo.branchName,
+                                displayInfo.isWorktree,
+                                displayInfo.isFocused,
+                                displayInfo.isCurrentWindow
                             );
-                            if (isWorktree) {
-                                item.description = branchName || 'worktree';
-                                item.tooltip = `Git Worktree: ${ws.cwd}\nBranch: ${branchName || '(detached)'}\nWorkspace ID: ${ws.id}`;
-                                item.iconPath = new vscode.ThemeIcon('git-branch');
-                            } else {
-                                item.description = ws.cwd ? ws.cwd : `ID: ${ws.id}`;
-                                item.tooltip = ws.cwd ? `Path: ${ws.cwd}\nID: ${ws.id}` : `ID: ${ws.id}`;
-                                item.iconPath = new vscode.ThemeIcon(ws.focused ? 'star-full' : 'window');
-                            }
+                            item.description = displayInfo.description;
+                            item.tooltip = displayInfo.tooltip;
+                            item.iconPath = new vscode.ThemeIcon(displayInfo.iconId);
 
                             item.command = { 
                                 command: 'herdr-collie.attachWorkspace', 
@@ -1608,6 +1713,8 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                             items.push(item);
                         });
                         
+                        this.currentItems = items.filter(i => i instanceof HerdrWorkspaceTreeItem) as HerdrWorkspaceTreeItem[];
+                        this._onDidUpdateItems.fire();
                         if (items.length === 0) {
                             const emptyItem = new vscode.TreeItem('(No workspaces found)', vscode.TreeItemCollapsibleState.None);
                             emptyItem.iconPath = new vscode.ThemeIcon('info');
@@ -1627,6 +1734,13 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                 execHerdr([...sessionArgs, 'pane', 'list'], (err: any, stdout: any) => {
                     if (!err && stdout) {
                         rawPanes = stdout;
+                    }
+                    checkDone();
+                });
+
+                execHerdr([...sessionArgs, 'agent', 'list'], (err: any, stdout: any) => {
+                    if (!err && stdout) {
+                        rawAgents = stdout;
                     }
                     checkDone();
                 });
@@ -1658,7 +1772,11 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                                 vscode.TreeItemCollapsibleState.None, 
                                 a.isBlocked ? 'blockedAgent' : 'agent',
                                 a.workspaceCwd,
-                                displayInfo.branchName
+                                displayInfo.branchName,
+                                false,
+                                false,
+                                false,
+                                a.workspaceId
                             );
                             item.description = displayInfo.description;
                             item.tooltip = displayInfo.tooltip;
@@ -1671,6 +1789,8 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                             items.push(item);
                         });
 
+                        this.currentItems = items.filter(i => i instanceof HerdrWorkspaceTreeItem) as HerdrWorkspaceTreeItem[];
+                        this._onDidUpdateItems.fire();
                         if (items.length === 0) {
                             const emptyItem = new vscode.TreeItem('(No agents running)', vscode.TreeItemCollapsibleState.None);
                             emptyItem.iconPath = new vscode.ThemeIcon('info');

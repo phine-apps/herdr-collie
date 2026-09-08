@@ -1,0 +1,156 @@
+/*
+ * Copyright (c) 2026 Herdr Collie Authors
+ * Licensed under the MIT License.
+ */
+import * as vscode from 'vscode';
+import { HerdrSocketClient } from './socketClient';
+import { 
+    ParsedWorkspace, 
+    ParsedAgent, 
+    parseSnapshotWorkspaces, 
+    parseSnapshotAgents, 
+    parseWorkspaces, 
+    parsePanes,
+    GitWorktreeInfo 
+} from './parsers';
+import { execHerdr } from './executors';
+import { formatWorkspaceDisplay, WorkspaceDisplayInfo } from './formatters';
+
+export class WorkspaceHUD implements vscode.Disposable {
+    private statusBarItem: vscode.StatusBarItem;
+    private isDisposed = false;
+    private refreshSequence = 0;
+
+    constructor(
+        private socketClient: HerdrSocketClient,
+        private getSessionName: () => string,
+        private getWorktrees: (cwds: (string | undefined)[]) => Promise<GitWorktreeInfo[]>,
+        private getCurrentWorkspaceFolder: () => string | undefined = () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+    ) {
+        this.statusBarItem = vscode.window.createStatusBarItem(
+            'herdr-collie.statusBarWorkspaceHUD',
+            vscode.StatusBarAlignment.Right,
+            101 // Positioned immediately to the left of Agent HUD (priority 100)
+        );
+        this.statusBarItem.command = 'herdr-collie.selectWorkspace';
+        this.statusBarItem.name = 'Herdr Collie Workspace HUD';
+        this.updateHUDText(undefined);
+        this.statusBarItem.show();
+
+        this.setupSocketEvents(this.socketClient);
+    }
+
+    public updateSocketClient(newSocketClient: HerdrSocketClient): void {
+        this.socketClient = newSocketClient;
+        this.setupSocketEvents(this.socketClient);
+        this.refresh();
+    }
+
+    private setupSocketEvents(client: HerdrSocketClient): void {
+        client.on('connect', () => this.refresh());
+        client.on('event', () => this.refresh());
+        client.on('disconnect', () => {
+            this.updateHUDText(undefined);
+        });
+        client.on('error', () => {});
+    }
+
+    /**
+     * Refreshes active workspace and updates status bar display
+     */
+    public async refresh(): Promise<void> {
+        if (this.isDisposed) return;
+
+        const seq = ++this.refreshSequence;
+        let workspaces: ParsedWorkspace[] = [];
+        let agents: ParsedAgent[] = [];
+
+        if (this.socketClient.isConnected) {
+            const snapshot = await this.socketClient.getSnapshot();
+            if (this.isDisposed || seq !== this.refreshSequence) return;
+            if (snapshot) {
+                workspaces = parseSnapshotWorkspaces(snapshot);
+                agents = parseSnapshotAgents(snapshot, workspaces);
+            }
+        }
+
+        // Fallback to CLI if empty or socket not connected
+        if (workspaces.length === 0 && !this.socketClient.isConnected) {
+            workspaces = await new Promise<ParsedWorkspace[]>((resolve) => {
+                const session = this.getSessionName();
+                const sessionArgs = ['--session', session];
+                let rawWorkspaces = '';
+                let rawPanes = '';
+                let pending = 2;
+
+                const checkDone = () => {
+                    pending--;
+                    if (pending === 0) {
+                        const parsedPanes = parsePanes(rawPanes);
+                        resolve(parseWorkspaces(rawWorkspaces, parsedPanes));
+                    }
+                };
+
+                execHerdr([...sessionArgs, 'workspace', 'list'], (err: any, stdout: any) => {
+                    if (!err && stdout) rawWorkspaces = stdout;
+                    checkDone();
+                });
+
+                execHerdr([...sessionArgs, 'pane', 'list'], (err: any, stdout: any) => {
+                    if (!err && stdout) rawPanes = stdout;
+                    checkDone();
+                });
+            });
+            if (this.isDisposed || seq !== this.refreshSequence) return;
+        }
+
+        const focusedWs = workspaces.find(w => w.focused) || workspaces[0];
+        if (!focusedWs) {
+            this.updateHUDText(undefined);
+            return;
+        }
+
+        const worktrees = await this.getWorktrees([focusedWs.cwd]);
+        if (this.isDisposed || seq !== this.refreshSequence) return;
+
+        const currentFolder = this.getCurrentWorkspaceFolder();
+        const displayInfo = formatWorkspaceDisplay(focusedWs, worktrees, agents, currentFolder);
+        this.updateHUDText(displayInfo);
+    }
+
+    /**
+     * Formats status bar item text and markdown tooltip
+     */
+    private updateHUDText(displayInfo?: WorkspaceDisplayInfo): void {
+        if (!displayInfo) {
+            this.statusBarItem.text = `$(window) Herdr`;
+            this.statusBarItem.tooltip = 'Herdr Collie: No workspace active\nClick to select workspace';
+            return;
+        }
+
+        const icon = displayInfo.isWorktree ? '$(git-branch)' : (displayInfo.isCurrentWindow ? '$(folder-active)' : '$(window)');
+        const label = displayInfo.branchName || displayInfo.label;
+        this.statusBarItem.text = `${icon} ${label}`;
+
+        // Build rich markdown tooltip
+        const md = new vscode.MarkdownString();
+        md.isTrusted = true;
+        md.appendMarkdown(`### Herdr Workspace: ${displayInfo.label} $(check) Active\n\n`);
+        if (displayInfo.branchName) {
+            md.appendMarkdown(`* **Branch**: \`${displayInfo.branchName}\` (Git Worktree)\n`);
+        }
+        if (displayInfo.isCurrentWindow) {
+            md.appendMarkdown(`* **VS Code Window**: Matches active project\n`);
+        }
+        if (displayInfo.agentBadges) {
+            md.appendMarkdown(`* **Active Agents**: ${displayInfo.agentBadges}\n`);
+        }
+        md.appendMarkdown(`\n*Click to switch or focus workspace (Ctrl+Alt+H W)*`);
+        this.statusBarItem.tooltip = md;
+    }
+
+    public dispose(): void {
+        this.isDisposed = true;
+        this.statusBarItem.dispose();
+    }
+}
