@@ -1033,7 +1033,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     const updateTreeViewDescriptions = () => {
         workspaceTreeView.description = undefined;
-        agentTreeView.description = agentProvider.getSortOrder();
+        const sort = agentProvider.getSortOrder();
+        agentTreeView.description = sort === 'priority' ? l10n.t('Priority') : l10n.t('Grouped');
     };
     updateTreeViewDescriptions();
 
