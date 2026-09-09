@@ -6,9 +6,11 @@ import * as vscode from 'vscode';
 import { HerdrSocketClient } from './socketClient';
 
 export class HerdrWorkspaceTreeItem extends vscode.TreeItem {
+    public readonly rawId: string;
+
     constructor(
         public readonly label: string,
-        public readonly id: string,
+        rawId: string,
         public readonly collapsibleState: vscode.TreeItemCollapsibleState,
         public readonly contextValue: string = 'workspace',
         public readonly cwd?: string,
@@ -16,10 +18,14 @@ export class HerdrWorkspaceTreeItem extends vscode.TreeItem {
         public readonly isWorktree?: boolean,
         public readonly isFocused?: boolean,
         public readonly isCurrentFolder?: boolean,
-        public readonly workspaceId?: string
+        public readonly workspaceId?: string,
+        statusSignature?: string
     ) {
         super(label, collapsibleState);
+        this.rawId = rawId;
         this.contextValue = contextValue;
+        // Include status signature in TreeItem.id so VS Code re-renders dynamic status changes
+        this.id = statusSignature ? `${rawId}:${statusSignature}` : rawId;
     }
 }
 
@@ -73,17 +79,17 @@ export class WorkspaceDragAndDropController implements vscode.TreeDragAndDropCon
         }
 
         // Filter valid source items that exist in currentItems
-        const validSourceItems = sourceItems.filter(s => currentItems.some(i => i.id === s.id));
+        const validSourceItems = sourceItems.filter(s => currentItems.some(i => (i.rawId || i.id) === (s.rawId || s.id)));
         if (validSourceItems.length === 0) {
             return;
         }
 
-        const sourceIds = validSourceItems.map(s => s.id);
+        const sourceIds = validSourceItems.map(s => s.rawId || (s.id ? s.id.split(':')[0] : ''));
 
         // If target is undefined, user dropped on empty space below the list -> move to the end
         if (!target) {
             const lastItem = currentItems[currentItems.length - 1];
-            if (validSourceItems.some(s => s.id === lastItem.id)) {
+            if (validSourceItems.some(s => (s.rawId || s.id) === (lastItem.rawId || lastItem.id))) {
                 // Already at the end
                 return;
             }
@@ -91,17 +97,19 @@ export class WorkspaceDragAndDropController implements vscode.TreeDragAndDropCon
             return;
         }
 
+        const targetRawId = target.rawId || (target.id ? target.id.split(':')[0] : '');
+
         // Cannot drop onto one of the dragged items
-        if (sourceIds.includes(target.id)) {
+        if (sourceIds.includes(targetRawId)) {
             return;
         }
 
-        const targetIndex = currentItems.findIndex(i => i.id === target.id);
+        const targetIndex = currentItems.findIndex(i => (i.rawId || i.id) === (target.rawId || target.id));
         if (targetIndex === -1) {
             return;
         }
 
-        const sourceIndices = validSourceItems.map(s => currentItems.findIndex(i => i.id === s.id));
+        const sourceIndices = validSourceItems.map(s => currentItems.findIndex(i => (i.rawId || i.id) === (s.rawId || s.id)));
         const isDownward = Math.min(...sourceIndices) < targetIndex;
 
         let beforeWorkspaceId: string | null = null;
@@ -110,15 +118,18 @@ export class WorkspaceDragAndDropController implements vscode.TreeDragAndDropCon
             // Dragged downwards: place after target, which means before the next non-source item
             let nextNonSourceItem: HerdrWorkspaceTreeItem | undefined;
             for (let i = targetIndex + 1; i < currentItems.length; i++) {
-                if (!sourceIds.includes(currentItems[i].id)) {
-                    nextNonSourceItem = currentItems[i];
+                const item = currentItems[i];
+                if (!item) continue;
+                const nextRawId = item.rawId || (item.id ? item.id.split(':')[0] : '');
+                if (!sourceIds.includes(nextRawId)) {
+                    nextNonSourceItem = item;
                     break;
                 }
             }
-            beforeWorkspaceId = nextNonSourceItem ? nextNonSourceItem.id : null;
+            beforeWorkspaceId = nextNonSourceItem ? (nextNonSourceItem.rawId || (nextNonSourceItem.id ? nextNonSourceItem.id.split(':')[0] : null)) : null;
         } else {
             // Dragged upwards: place before target
-            beforeWorkspaceId = target.id;
+            beforeWorkspaceId = targetRawId;
         }
 
         await this.executeMove(sourceIds, beforeWorkspaceId);
