@@ -1,3 +1,4 @@
+import * as l10n from '@vscode/l10n';
 import { ParsedAgent, ParsedWorkspace, GitWorktreeInfo } from './parsers';
 
 export interface ProblemItem {
@@ -274,7 +275,8 @@ export function formatAgentDisplay(
 
     let description = '';
     if (agent.isBlocked) {
-        description = wsBadge ? `⚠️ Input Needed • ${wsBadge}` : `⚠️ Input Needed (${agent.id})`;
+        const inputNeeded = l10n.t('Input Needed');
+        description = wsBadge ? `${inputNeeded} • ${wsBadge}` : `${inputNeeded} (${agent.id})`;
     } else {
         description = wsBadge || `(${agent.id})`;
     }

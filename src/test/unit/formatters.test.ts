@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 import { expect } from 'chai';
+import * as l10n from '@vscode/l10n';
 import {
     formatSelectionContext,
     formatFileDiagnostics,
@@ -218,9 +219,36 @@ describe('formatters Unit Tests', () => {
 
             const result = formatAgentDisplay(agent);
             expect(result.label).to.equal('🔴 claude');
-            expect(result.description).to.equal('⚠️ Input Needed • herdr-collie');
+            expect(result.description).to.equal('Input Needed • herdr-collie');
             expect(result.tooltip).to.include('Status: blocked');
             expect(result.tooltip).to.include('⚠️ Waiting for user confirmation');
+        });
+
+        it('localizes description when agent is blocked in non-English locale', () => {
+            const agent: ParsedAgent = {
+                id: 'w1:p1',
+                name: 'claude',
+                status: 'blocked',
+                statusType: 'blocked',
+                statusIcon: '🔴',
+                isWorking: false,
+                isBlocked: true,
+                workspaceId: 'w1',
+                workspaceLabel: 'herdr-collie'
+            };
+
+            l10n.config({
+                contents: {
+                    'Input Needed': '入力待ち'
+                }
+            });
+
+            try {
+                const result = formatAgentDisplay(agent);
+                expect(result.description).to.equal('入力待ち • herdr-collie');
+            } finally {
+                l10n.config({ contents: {} });
+            }
         });
 
         it('handles agent without resolved workspaceLabel gracefully using workspaceId', () => {

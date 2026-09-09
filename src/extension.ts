@@ -34,9 +34,19 @@ import {
     listGitWorktrees, 
     getRepoRoot, 
     removeWorktree, 
-    mergeWorktreeBranch 
+    mergeWorktreeBranch,
+    getCurrentGitBranch
 } from './worktreeManager';
 import { HerdrWorkspaceTreeItem, WorkspaceDragAndDropController } from './workspaceDragAndDrop';
+import { 
+    HerdrReviewController,
+    HerdrReviewChangesProvider,
+    ReviewChangeTreeItem,
+    prepareOriginalFileForDiff,
+    createReviewCheckpoint,
+    rollbackReviewCheckpoint,
+    listReviewCheckpoints
+} from './reviewManager';
 
 interface TargetQuickPickItem extends vscode.QuickPickItem {
     targetId: string;
@@ -923,12 +933,32 @@ export function activate(context: vscode.ExtensionContext) {
     const initialSort = vscode.workspace.getConfiguration('herdr-collie').get<AgentSortOrder>('agentSortOrder', 'grouped') || 'grouped';
     agentProvider.setSortOrder(initialSort);
 
+    // P3: Integrated Review Controller & Status Bar
+    const reviewController = new HerdrReviewController();
+    const reviewStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
+    reviewStatusBarItem.command = 'herdr-collie.submitReview';
+
+    const updateReviewStatusBar = (count: number) => {
+        if (count > 0) {
+            reviewStatusBarItem.text = `$(comment-discussion) Review (${count})`;
+            reviewStatusBarItem.tooltip = l10n.t('Review: {0} comments pending (Click to submit to agent)', count);
+            reviewStatusBarItem.show();
+        } else {
+            reviewStatusBarItem.hide();
+        }
+    };
+    if (reviewController.onDidUpdateComments) {
+        reviewController.onDidUpdateComments(comments => updateReviewStatusBar(comments.length));
+    }
+
     context.subscriptions.push(
         sessionProvider,
         workspaceProvider, 
         agentProvider, 
         agentHUD, 
         workspaceHUD,
+        reviewController,
+        reviewStatusBarItem,
         { dispose: () => socketClient.dispose() }
     );
 
@@ -942,7 +972,23 @@ export function activate(context: vscode.ExtensionContext) {
     const agentTreeView = vscode.window.createTreeView('herdr-collie.agents', {
         treeDataProvider: agentProvider
     });
-    context.subscriptions.push(sessionTreeView, workspaceTreeView, agentTreeView);
+
+    const getActiveRepoRoot = async (): Promise<string | null> => {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (!workspaceFolders || workspaceFolders.length === 0) return null;
+        try {
+            return await getRepoRoot(workspaceFolders[0].uri.fsPath);
+        } catch {
+            return null;
+        }
+    };
+
+    const reviewChangesProvider = new HerdrReviewChangesProvider(getActiveRepoRoot);
+    const reviewChangesTreeView = vscode.window.createTreeView('herdr-collie.reviewChanges', {
+        treeDataProvider: reviewChangesProvider
+    });
+
+    context.subscriptions.push(sessionTreeView, workspaceTreeView, agentTreeView, reviewChangesProvider, reviewChangesTreeView);
 
     // Bidirectional selection synchronization between Workspaces and Agents
     let isSyncingSelection = false;
@@ -1477,6 +1523,148 @@ export function activate(context: vscode.ExtensionContext) {
         await agentHUD.showHUDQuickPick();
     });
 
+    // P3: Integrated Review & Diff-to-Prompt Commands
+    let addReviewCommentDisposable = vscode.commands.registerCommand('herdr-collie.addReviewComment', async (uriArg?: vscode.Uri) => {
+        const editor = vscode.window.activeTextEditor;
+        const uri = uriArg || editor?.document.uri;
+        if (!uri) return;
+
+        let startLine = 1;
+        let endLine = 1;
+        let snippet = '';
+
+        if (editor && editor.document.uri.toString() === uri.toString()) {
+            const sel = editor.selection;
+            startLine = sel.start.line + 1;
+            endLine = sel.end.line + 1;
+            snippet = editor.document.getText(sel).trim();
+            if (!snippet && editor.document.lineCount >= startLine) {
+                snippet = editor.document.lineAt(startLine - 1).text.trim();
+            }
+        }
+
+        const lineRangeText = startLine === endLine ? `Line ${startLine}` : `Lines ${startLine}-${endLine}`;
+        const comment = await vscode.window.showInputBox({
+            title: l10n.t('Add Review Comment'),
+            prompt: `${l10n.t('Enter review feedback for selected lines')} (${lineRangeText})`,
+            placeHolder: l10n.t('e.g. Handle error with custom exception, remove console.log')
+        });
+
+        if (!comment || !comment.trim()) return;
+
+        reviewController.addCommentFromEditor(uri, startLine, endLine, comment.trim(), snippet || undefined);
+        vscode.window.showInformationMessage(l10n.t('Added review comment on {0} ({1})', path.basename(uri.fsPath), lineRangeText));
+    });
+
+    let submitReviewDisposable = vscode.commands.registerCommand('herdr-collie.submitReview', async () => {
+        const count = reviewController.commentCount;
+        if (count === 0) {
+            vscode.window.showInformationMessage(l10n.t('No pending review comments to submit'));
+            return;
+        }
+
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        let currentBranch: string | undefined;
+        let repoRoot: string | null = null;
+        if (workspaceFolders && workspaceFolders.length > 0) {
+            try {
+                repoRoot = await getRepoRoot(workspaceFolders[0].uri.fsPath);
+                if (repoRoot) {
+                    currentBranch = await getCurrentGitBranch(repoRoot);
+                    await createReviewCheckpoint(repoRoot, 'pre-review-submit');
+                }
+            } catch {}
+        }
+
+        const prompt = reviewController.formatPrompt({ branchName: currentBranch });
+        await sendToHerdr(
+            prompt,
+            l10n.t('Submitted review ({0} comments)', count),
+            l10n.t('Select agent to receive review feedback:')
+        );
+        reviewController.clearAll();
+    });
+
+    let clearReviewDisposable = vscode.commands.registerCommand('herdr-collie.clearReview', async () => {
+        const count = reviewController.commentCount;
+        if (count === 0) {
+            vscode.window.showInformationMessage(l10n.t('No pending review comments to submit'));
+            return;
+        }
+        reviewController.clearAll();
+        vscode.window.showInformationMessage(l10n.t('Cleared {0} pending review comments', count));
+    });
+
+    let openDiffDisposable = vscode.commands.registerCommand('herdr-collie.openDiff', async (item?: ReviewChangeTreeItem) => {
+        if (!item) return;
+        try {
+            const tempOriginalPath = await prepareOriginalFileForDiff(item.repoRoot, item.change.filePath);
+            const originalUri = vscode.Uri.file(tempOriginalPath);
+            const workingUri = vscode.Uri.file(item.change.fullPath);
+            const title = `${item.change.fileName} (HEAD ↔ Working Tree)`;
+            await vscode.commands.executeCommand('vscode.diff', originalUri, workingUri, title);
+        } catch (err: any) {
+            vscode.window.showErrorMessage(err?.message || String(err));
+        }
+    });
+
+    let refreshReviewChangesDisposable = vscode.commands.registerCommand('herdr-collie.refreshReviewChanges', () => {
+        reviewChangesProvider.refresh();
+    });
+
+    let createReviewCheckpointDisposable = vscode.commands.registerCommand('herdr-collie.createReviewCheckpoint', async () => {
+        const repoRoot = await getActiveRepoRoot();
+        if (!repoRoot) {
+            vscode.window.showWarningMessage(l10n.t('The current workspace is not a Git repository.'));
+            return;
+        }
+        const checkpoint = await createReviewCheckpoint(repoRoot);
+        if (checkpoint) {
+            vscode.window.showInformationMessage(l10n.t('Created review checkpoint: {0}', checkpoint.id));
+        } else {
+            vscode.window.showErrorMessage(l10n.t('Failed to create review checkpoint: {0}', 'error'));
+        }
+    });
+
+    let rollbackReviewCheckpointDisposable = vscode.commands.registerCommand('herdr-collie.rollbackReviewCheckpoint', async () => {
+        const repoRoot = await getActiveRepoRoot();
+        if (!repoRoot) {
+            vscode.window.showWarningMessage(l10n.t('The current workspace is not a Git repository.'));
+            return;
+        }
+        const checkpoints = await listReviewCheckpoints(repoRoot);
+        if (checkpoints.length === 0) {
+            vscode.window.showInformationMessage(l10n.t('No checkpoints found for this repository'));
+            return;
+        }
+        const items = checkpoints.map(c => ({
+            label: `$(bookmark) ${c.id}`,
+            description: new Date(c.timestamp).toLocaleString(),
+            detail: c.hash.slice(0, 8),
+            checkpoint: c
+        }));
+        const picked = await vscode.window.showQuickPick(items, {
+            placeHolder: l10n.t('Select checkpoint to rollback to:')
+        });
+        if (!picked) return;
+
+        const confirm = await vscode.window.showWarningMessage(
+            l10n.t("Are you sure you want to rollback to checkpoint '{0}'? Any uncommitted changes will be lost.", picked.checkpoint.id),
+            { modal: true },
+            l10n.t('Rollback'),
+            l10n.t('Cancel')
+        );
+        if (confirm !== l10n.t('Rollback')) return;
+
+        const success = await rollbackReviewCheckpoint(repoRoot, picked.checkpoint.hash);
+        if (success) {
+            vscode.window.showInformationMessage(l10n.t('Rolled back to checkpoint: {0}', picked.checkpoint.id));
+            reviewChangesProvider.refresh();
+        } else {
+            vscode.window.showErrorMessage(l10n.t('Failed to rollback to checkpoint: {0}', picked.checkpoint.id));
+        }
+    });
+
     context.subscriptions.push(switchSessionDisposable);
     context.subscriptions.push(switchSessionDirectDisposable);
     context.subscriptions.push(createSessionDisposable);
@@ -1490,6 +1678,13 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(mergeWorktreeDisposable);
     context.subscriptions.push(removeWorktreeDisposable);
     context.subscriptions.push(showAgentHUDDisposable);
+    context.subscriptions.push(addReviewCommentDisposable);
+    context.subscriptions.push(submitReviewDisposable);
+    context.subscriptions.push(clearReviewDisposable);
+    context.subscriptions.push(openDiffDisposable);
+    context.subscriptions.push(refreshReviewChangesDisposable);
+    context.subscriptions.push(createReviewCheckpointDisposable);
+    context.subscriptions.push(rollbackReviewCheckpointDisposable);
 }
 
 

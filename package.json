@@ -141,6 +141,40 @@
         "command": "herdr-collie.toggleAgentSort",
         "title": "%command.toggleAgentSort%",
         "icon": "$(list-ordered)"
+      },
+      {
+        "command": "herdr-collie.addReviewComment",
+        "title": "%command.addReviewComment%",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "herdr-collie.submitReview",
+        "title": "%command.submitReview%",
+        "icon": "$(send)"
+      },
+      {
+        "command": "herdr-collie.clearReview",
+        "title": "%command.clearReview%",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "herdr-collie.openDiff",
+        "title": "%command.openDiff%"
+      },
+      {
+        "command": "herdr-collie.refreshReviewChanges",
+        "title": "%command.refreshReviewChanges%",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "herdr-collie.createReviewCheckpoint",
+        "title": "%command.createReviewCheckpoint%",
+        "icon": "$(bookmark)"
+      },
+      {
+        "command": "herdr-collie.rollbackReviewCheckpoint",
+        "title": "%command.rollbackReviewCheckpoint%",
+        "icon": "$(history)"
       }
     ],
     "menus": {
@@ -212,9 +246,36 @@
         {
           "command": "herdr-collie.sendTerminalOutput",
           "when": "terminalIsOpen"
+        },
+        {
+          "command": "herdr-collie.addReviewComment",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "herdr-collie.submitReview"
+        },
+        {
+          "command": "herdr-collie.clearReview"
+        },
+        {
+          "command": "herdr-collie.openDiff",
+          "when": "false"
+        },
+        {
+          "command": "herdr-collie.refreshReviewChanges"
+        },
+        {
+          "command": "herdr-collie.createReviewCheckpoint"
+        },
+        {
+          "command": "herdr-collie.rollbackReviewCheckpoint"
         }
       ],
       "editor/context": [
+        {
+          "command": "herdr-collie.addReviewComment",
+          "group": "herdr@0"
+        },
         {
           "command": "herdr-collie.sendContext",
           "group": "herdr@1"
@@ -274,6 +335,26 @@
           "command": "herdr-collie.toggleAgentSort",
           "when": "view == herdr-collie.agents",
           "group": "navigation@0"
+        },
+        {
+          "command": "herdr-collie.createReviewCheckpoint",
+          "when": "view == herdr-collie.reviewChanges",
+          "group": "navigation@1"
+        },
+        {
+          "command": "herdr-collie.rollbackReviewCheckpoint",
+          "when": "view == herdr-collie.reviewChanges",
+          "group": "navigation@2"
+        },
+        {
+          "command": "herdr-collie.submitReview",
+          "when": "view == herdr-collie.reviewChanges",
+          "group": "navigation@3"
+        },
+        {
+          "command": "herdr-collie.refreshReviewChanges",
+          "when": "view == herdr-collie.reviewChanges",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -360,6 +441,10 @@
         {
           "id": "herdr-collie.agents",
           "name": "%view.agents%"
+        },
+        {
+          "id": "herdr-collie.reviewChanges",
+          "name": "%view.reviewChanges%"
         }
       ]
     },
@@ -444,6 +529,17 @@
         "key": "ctrl+alt+h l",
         "mac": "ctrl+alt+h l",
         "when": "gitOpenRepositoryCount > 0"
+      },
+      {
+        "command": "herdr-collie.addReviewComment",
+        "key": "ctrl+alt+h c",
+        "mac": "ctrl+alt+h c",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "herdr-collie.submitReview",
+        "key": "ctrl+alt+h r",
+        "mac": "ctrl+alt+h r"
       }
     ]
   },
