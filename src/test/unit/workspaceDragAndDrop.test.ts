@@ -235,4 +235,72 @@ describe('WorkspaceDragAndDropController Unit Tests', () => {
         await controller.handleDrop(mockItems[1], dataTransfer as any, {} as any);
         expect(newClientCall).to.be.true;
     });
+
+    describe('HerdrWorkspaceTreeItem statusSignature & ID generation', () => {
+        it('assigns rawId and uses it as default id when statusSignature is omitted', () => {
+            const item = new HerdrWorkspaceTreeItem('WS 1', 'ws-1', mockVscode.TreeItemCollapsibleState.None);
+            expect(item.rawId).to.equal('ws-1');
+            expect(item.id).to.equal('ws-1');
+        });
+
+        it('incorporates statusSignature into id for dynamic re-rendering', () => {
+            const idleItem = new HerdrWorkspaceTreeItem(
+                '🟡 agy',
+                'w2:p1',
+                mockVscode.TreeItemCollapsibleState.None,
+                'agent',
+                undefined,
+                undefined,
+                false,
+                false,
+                false,
+                'w2',
+                'idle:🟡:normal'
+            );
+            expect(idleItem.rawId).to.equal('w2:p1');
+            expect(idleItem.id).to.equal('w2:p1:idle:🟡:normal');
+
+            const workingItem = new HerdrWorkspaceTreeItem(
+                '🟢 agy',
+                'w2:p1',
+                mockVscode.TreeItemCollapsibleState.None,
+                'agent',
+                undefined,
+                undefined,
+                false,
+                false,
+                false,
+                'w2',
+                'working:🟢:normal'
+            );
+            expect(workingItem.rawId).to.equal('w2:p1');
+            expect(workingItem.id).to.equal('w2:p1:working:🟢:normal');
+            expect(idleItem.id).to.not.equal(workingItem.id);
+        });
+
+        it('reorders workspaces cleanly passing clean rawId to Herdr even with statusSignature in id', async () => {
+            const statusItems = [
+                new HerdrWorkspaceTreeItem('WS 1', 'ws-1', mockVscode.TreeItemCollapsibleState.None, 'workspace', undefined, undefined, false, true, false, undefined, 'agy 🟢:1'),
+                new HerdrWorkspaceTreeItem('WS 2', 'ws-2', mockVscode.TreeItemCollapsibleState.None, 'workspace', undefined, undefined, false, false, false, undefined, 'none:0'),
+                new HerdrWorkspaceTreeItem('WS 3', 'ws-3', mockVscode.TreeItemCollapsibleState.None, 'workspace', undefined, undefined, false, false, false, undefined, 'none:0')
+            ];
+
+            const controller = new WorkspaceDragAndDropController(
+                () => statusItems,
+                createMockSocketClient(),
+                () => { reorderCallbackCalled = true; }
+            );
+
+            const dataTransfer = new mockVscode.DataTransfer();
+            dataTransfer.set('application/vnd.code.tree.herdr-collie.workspaces', new mockVscode.DataTransferItem([statusItems[0]]));
+
+            await controller.handleDrop(statusItems[1], dataTransfer as any, {} as any);
+
+            expect(lastMoveCall).to.deep.equal({
+                workspaceIds: ['ws-1'],
+                beforeWorkspaceId: 'ws-3'
+            });
+            expect(reorderCallbackCalled).to.be.true;
+        });
+    });
 });

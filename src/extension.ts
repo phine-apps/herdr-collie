@@ -953,12 +953,17 @@ export function activate(context: vscode.ExtensionContext) {
         if (!selected) return;
 
         const allWs = workspaceProvider.getCurrentItems();
+        const selectedWsId = selected.workspaceId;
         const matchingWs = allWs.find(ws => 
-            (selected.workspaceId && ws.id === selected.workspaceId) ||
+            (selectedWsId && (ws.rawId || ws.id) === selectedWsId) ||
             (selected.cwd && ws.cwd && ws.cwd === selected.cwd)
         );
 
         if (matchingWs) {
+            const currentSelected = workspaceTreeView.selection[0] as HerdrWorkspaceTreeItem | undefined;
+            if (currentSelected && (currentSelected.rawId || currentSelected.id) === (matchingWs.rawId || matchingWs.id)) {
+                return;
+            }
             isSyncingSelection = true;
             try {
                 await workspaceTreeView.reveal(matchingWs, { select: true, focus: false });
@@ -976,12 +981,17 @@ export function activate(context: vscode.ExtensionContext) {
         if (!selected) return;
 
         const allAgents = agentProvider.getCurrentItems();
+        const selectedId = selected.rawId || selected.id;
         const matchingAgent = allAgents.find(a => 
-            (a.workspaceId && a.workspaceId === selected.id) ||
+            (a.workspaceId && a.workspaceId === selectedId) ||
             (a.cwd && selected.cwd && a.cwd === selected.cwd)
         );
 
         if (matchingAgent) {
+            const currentSelected = agentTreeView.selection[0] as HerdrWorkspaceTreeItem | undefined;
+            if (currentSelected && (currentSelected.rawId || currentSelected.id) === (matchingAgent.rawId || matchingAgent.id)) {
+                return;
+            }
             isSyncingSelection = true;
             try {
                 await agentTreeView.reveal(matchingAgent, { select: true, focus: false });
@@ -1001,28 +1011,35 @@ export function activate(context: vscode.ExtensionContext) {
 
         const focusedWs = allWs.find(w => w.isFocused) || allWs[0];
         if (focusedWs) {
-            isSyncingSelection = true;
-            try {
-                await workspaceTreeView.reveal(focusedWs, { select: true, focus: false });
-            } catch {
-            } finally {
-                isSyncingSelection = false;
+            const currentSelected = workspaceTreeView.selection[0] as HerdrWorkspaceTreeItem | undefined;
+            if (!currentSelected || currentSelected.id !== focusedWs.id) {
+                isSyncingSelection = true;
+                try {
+                    await workspaceTreeView.reveal(focusedWs, { select: true, focus: false });
+                } catch {
+                } finally {
+                    isSyncingSelection = false;
+                }
             }
         }
 
         const allAgents = agentProvider.getCurrentItems();
         if (allAgents.length > 0 && focusedWs) {
+            const focusedId = focusedWs.rawId || focusedWs.id;
             const matchingAgent = allAgents.find(a => 
-                (a.workspaceId && a.workspaceId === focusedWs.id) ||
+                (a.workspaceId && a.workspaceId === focusedId) ||
                 (a.cwd && focusedWs.cwd && a.cwd === focusedWs.cwd)
             );
             if (matchingAgent) {
-                isSyncingSelection = true;
-                try {
-                    await agentTreeView.reveal(matchingAgent, { select: true, focus: false });
-                } catch {
-                } finally {
-                    isSyncingSelection = false;
+                const currentAgentSelected = agentTreeView.selection[0] as HerdrWorkspaceTreeItem | undefined;
+                if (!currentAgentSelected || currentAgentSelected.id !== matchingAgent.id) {
+                    isSyncingSelection = true;
+                    try {
+                        await agentTreeView.reveal(matchingAgent, { select: true, focus: false });
+                    } catch {
+                    } finally {
+                        isSyncingSelection = false;
+                    }
                 }
             }
         }
@@ -1053,6 +1070,15 @@ export function activate(context: vscode.ExtensionContext) {
         client.on('error', () => {});
     };
     setupSocketListeners(socketClient);
+    refreshAllProviders();
+
+    // Periodic status polling to guarantee real-time sync across UI tabs
+    const statusPollInterval = setInterval(() => {
+        if (socketClient && socketClient.isConnected) {
+            refreshAllProviders();
+        }
+    }, 1200);
+    context.subscriptions.push({ dispose: () => clearInterval(statusPollInterval) });
 
     let toggleAgentSortDisposable = vscode.commands.registerCommand('herdr-collie.toggleAgentSort', () => {
         const newOrder = agentProvider.toggleSortOrder();
@@ -1586,95 +1612,104 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
         const sessionName = this.getSessionName();
 
         // 1. Try fetching via fast Unix Domain Socket snapshot (Zero process execution)
-        if (this.socketClient.isConnected) {
-            const snapshot = await this.socketClient.getSnapshot();
-            if (snapshot) {
-                if (this.type === 'workspaces') {
-                    const parsedWorkspaces = parseSnapshotWorkspaces(snapshot, os.homedir());
-                    const parsedAgents = parseSnapshotAgents(snapshot, parsedWorkspaces);
-                    const worktrees = await getWorktreesForCwds(parsedWorkspaces.map(w => w.cwd));
-                    const currentRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        try {
+            if (this.socketClient.isConnected) {
+                const snapshot = await this.socketClient.getSnapshot();
+                if (snapshot) {
+                    if (this.type === 'workspaces') {
+                        const parsedWorkspaces = parseSnapshotWorkspaces(snapshot, os.homedir());
+                        const parsedAgents = parseSnapshotAgents(snapshot, parsedWorkspaces);
+                        const worktrees = await getWorktreesForCwds(parsedWorkspaces.map(w => w.cwd));
+                        const currentRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
-                    if (parsedWorkspaces.length > 0) {
-                        const items = parsedWorkspaces.map(ws => {
-                            const displayInfo = formatWorkspaceDisplay(ws, worktrees, parsedAgents, currentRoot);
-                            const contextValue = displayInfo.isWorktree ? 'worktreeWorkspace' : 'workspace';
-                            
-                            const item = new HerdrWorkspaceTreeItem(
-                                displayInfo.label, 
-                                ws.id, 
-                                vscode.TreeItemCollapsibleState.None, 
-                                contextValue,
-                                ws.cwd,
-                                displayInfo.branchName,
-                                displayInfo.isWorktree,
-                                displayInfo.isFocused,
-                                displayInfo.isCurrentWindow
-                            );
-                            
-                            item.description = displayInfo.description;
-                            item.tooltip = displayInfo.tooltip;
-                            item.iconPath = new vscode.ThemeIcon(displayInfo.iconId);
+                        if (parsedWorkspaces.length > 0) {
+                            const items = parsedWorkspaces.map(ws => {
+                                const displayInfo = formatWorkspaceDisplay(ws, worktrees, parsedAgents, currentRoot);
+                                const contextValue = displayInfo.isWorktree ? 'worktreeWorkspace' : 'workspace';
+                                const statusSignature = `${displayInfo.agentBadges || 'none'}:${ws.focused ? '1' : '0'}`;
+                                
+                                const item = new HerdrWorkspaceTreeItem(
+                                    displayInfo.label, 
+                                    ws.id, 
+                                    vscode.TreeItemCollapsibleState.None, 
+                                    contextValue,
+                                    ws.cwd,
+                                    displayInfo.branchName,
+                                    displayInfo.isWorktree,
+                                    displayInfo.isFocused,
+                                    displayInfo.isCurrentWindow,
+                                    undefined,
+                                    statusSignature
+                                );
+                                
+                                item.description = displayInfo.description;
+                                item.tooltip = displayInfo.tooltip;
+                                item.iconPath = new vscode.ThemeIcon(displayInfo.iconId);
 
-                            item.command = { 
-                                command: 'herdr-collie.attachWorkspace', 
-                                title: l10n.t('Attach'), 
-                                arguments: [ws.id, false, ws.label, sessionName] 
-                            };
-                            return item;
-                        });
-                        this.currentItems = items;
-                        this._onDidUpdateItems.fire();
-                        return items;
+                                item.command = { 
+                                    command: 'herdr-collie.attachWorkspace', 
+                                    title: l10n.t('Attach'), 
+                                    arguments: [ws.id, false, ws.label, sessionName] 
+                                };
+                                return item;
+                            });
+                            this.currentItems = items;
+                            this._onDidUpdateItems.fire();
+                            return items;
+                        }
+                        this.currentItems = [];
+                        const emptyItem = new vscode.TreeItem(l10n.t('(No workspaces found)'), vscode.TreeItemCollapsibleState.None);
+                        emptyItem.iconPath = new vscode.ThemeIcon('info');
+                        return [emptyItem];
                     }
-                    this.currentItems = [];
-                    const emptyItem = new vscode.TreeItem(l10n.t('(No workspaces found)'), vscode.TreeItemCollapsibleState.None);
-                    emptyItem.iconPath = new vscode.ThemeIcon('info');
-                    return [emptyItem];
-                }
 
-                if (this.type === 'agents') {
-                    const parsedWorkspaces = parseSnapshotWorkspaces(snapshot, os.homedir());
-                    const parsedAgents = parseSnapshotAgents(snapshot, parsedWorkspaces);
-                    const sortedAgents = sortAgents(parsedAgents, this.sortOrder);
-                    const worktrees = await getWorktreesForCwds(sortedAgents.map(a => a.workspaceCwd));
+                    if (this.type === 'agents') {
+                        const parsedWorkspaces = parseSnapshotWorkspaces(snapshot, os.homedir());
+                        const parsedAgents = parseSnapshotAgents(snapshot, parsedWorkspaces);
+                        const sortedAgents = sortAgents(parsedAgents, this.sortOrder);
+                        const worktrees = await getWorktreesForCwds(sortedAgents.map(a => a.workspaceCwd));
 
-                    if (sortedAgents.length > 0) {
-                        const items = sortedAgents.map(a => {
-                            const displayInfo = formatAgentDisplay(a, worktrees);
+                        if (sortedAgents.length > 0) {
+                            const items = sortedAgents.map(a => {
+                                const displayInfo = formatAgentDisplay(a, worktrees);
+                                const statusSignature = `${a.status}:${a.statusIcon}:${a.isBlocked ? 'blocked' : 'normal'}`;
 
-                            const item = new HerdrWorkspaceTreeItem(
-                                displayInfo.label, 
-                                a.id, 
-                                vscode.TreeItemCollapsibleState.None, 
-                                a.isBlocked ? 'blockedAgent' : 'agent',
-                                a.workspaceCwd,
-                                displayInfo.branchName,
-                                false,
-                                false,
-                                false,
-                                a.workspaceId
-                            );
-                            item.description = displayInfo.description;
-                            item.tooltip = displayInfo.tooltip;
-                            item.iconPath = new vscode.ThemeIcon(a.isBlocked ? 'alert' : 'hubot');
-                            item.command = { 
-                                command: 'herdr-collie.attachWorkspace', 
-                                title: l10n.t('Attach'), 
-                                arguments: [a.id, true, displayInfo.displayLabel, sessionName] 
-                            };
-                            return item;
-                        });
-                        this.currentItems = items;
-                        this._onDidUpdateItems.fire();
-                        return items;
+                                const item = new HerdrWorkspaceTreeItem(
+                                    displayInfo.label, 
+                                    a.id, 
+                                    vscode.TreeItemCollapsibleState.None, 
+                                    a.isBlocked ? 'blockedAgent' : 'agent',
+                                    a.workspaceCwd,
+                                    displayInfo.branchName,
+                                    false,
+                                    false,
+                                    false,
+                                    a.workspaceId,
+                                    statusSignature
+                                );
+                                item.description = displayInfo.description;
+                                item.tooltip = displayInfo.tooltip;
+                                item.iconPath = new vscode.ThemeIcon(a.isBlocked ? 'alert' : 'hubot');
+                                item.command = { 
+                                    command: 'herdr-collie.attachWorkspace', 
+                                    title: l10n.t('Attach'), 
+                                    arguments: [a.id, true, displayInfo.displayLabel, sessionName] 
+                                };
+                                return item;
+                            });
+                            this.currentItems = items;
+                            this._onDidUpdateItems.fire();
+                            return items;
+                        }
+                        this.currentItems = [];
+                        const emptyItem = new vscode.TreeItem(l10n.t('(No agents running)'), vscode.TreeItemCollapsibleState.None);
+                        emptyItem.iconPath = new vscode.ThemeIcon('info');
+                        return [emptyItem];
                     }
-                    this.currentItems = [];
-                    const emptyItem = new vscode.TreeItem(l10n.t('(No agents running)'), vscode.TreeItemCollapsibleState.None);
-                    emptyItem.iconPath = new vscode.ThemeIcon('info');
-                    return [emptyItem];
                 }
             }
+        } catch (err) {
+            console.error(`[herdr-collie] Error loading ${this.type} from socket snapshot:`, err);
         }
 
         // 2. CLI Fallback if socket is not connected
@@ -1700,6 +1735,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                         parsedWorkspaces.forEach(ws => {
                             const displayInfo = formatWorkspaceDisplay(ws, worktrees, parsedAgents, currentRoot);
                             const contextValue = displayInfo.isWorktree ? 'worktreeWorkspace' : 'workspace';
+                            const statusSignature = `${displayInfo.agentBadges || 'none'}:${ws.focused ? '1' : '0'}`;
 
                             const item = new HerdrWorkspaceTreeItem(
                                 displayInfo.label, 
@@ -1710,7 +1746,9 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                                 displayInfo.branchName,
                                 displayInfo.isWorktree,
                                 displayInfo.isFocused,
-                                displayInfo.isCurrentWindow
+                                displayInfo.isCurrentWindow,
+                                undefined,
+                                statusSignature
                             );
                             item.description = displayInfo.description;
                             item.tooltip = displayInfo.tooltip;
@@ -1776,6 +1814,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                         let items: vscode.TreeItem[] = [];
                         sortedAgents.forEach(a => {
                             const displayInfo = formatAgentDisplay(a, worktrees);
+                            const statusSignature = `${a.status}:${a.statusIcon}:${a.isBlocked ? 'blocked' : 'normal'}`;
 
                             const item = new HerdrWorkspaceTreeItem(
                                 displayInfo.label, 
@@ -1787,7 +1826,8 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                                 false,
                                 false,
                                 false,
-                                a.workspaceId
+                                a.workspaceId,
+                                statusSignature
                             );
                             item.description = displayInfo.description;
                             item.tooltip = displayInfo.tooltip;

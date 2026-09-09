@@ -67,6 +67,7 @@ export class MockThemeColor {
 }
 
 export class MockTreeItem {
+    public id?: string;
     public description?: string;
     public tooltip?: any;
     public iconPath?: any;
