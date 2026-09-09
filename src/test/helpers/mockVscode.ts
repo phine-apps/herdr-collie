@@ -95,6 +95,32 @@ export class MockDataTransfer {
     }
 }
 
+export class MockRange {
+    constructor(
+        public readonly startLine: number,
+        public readonly startCharacter: number,
+        public readonly endLine: number,
+        public readonly endCharacter: number
+    ) {}
+}
+
+export class MockEventEmitter<T> {
+    private listeners: ((e: T) => any)[] = [];
+    public event = (listener: (e: T) => any) => {
+        this.listeners.push(listener);
+        return { dispose: () => {
+            const idx = this.listeners.indexOf(listener);
+            if (idx >= 0) this.listeners.splice(idx, 1);
+        }};
+    };
+    public fire(data: T): void {
+        this.listeners.forEach(l => l(data));
+    }
+    public dispose(): void {
+        this.listeners = [];
+    }
+}
+
 import * as l10n from '@vscode/l10n';
 
 export const mockVscode = {
@@ -117,6 +143,26 @@ export const mockVscode = {
         None: 0,
         Collapsed: 1,
         Expanded: 2
+    },
+    Range: MockRange,
+    EventEmitter: MockEventEmitter,
+    comments: {
+        createCommentController: (id: string, label: string) => {
+            return {
+                id,
+                label,
+                commentingRangeProvider: undefined,
+                createCommentThread: (uri: any, range: any, comments: any[]) => {
+                    return {
+                        uri,
+                        range,
+                        comments,
+                        dispose: () => {}
+                    };
+                },
+                dispose: () => {}
+            };
+        }
     },
     DataTransfer: MockDataTransfer,
     DataTransferItem: MockDataTransferItem,
