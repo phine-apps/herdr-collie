@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 import * as vscode from 'vscode';
+import * as l10n from '@vscode/l10n';
 import { HerdrSocketClient } from './socketClient';
 import { 
     ParsedWorkspace, 
@@ -124,7 +125,7 @@ export class WorkspaceHUD implements vscode.Disposable {
     private updateHUDText(displayInfo?: WorkspaceDisplayInfo): void {
         if (!displayInfo) {
             this.statusBarItem.text = `$(window) Herdr`;
-            this.statusBarItem.tooltip = 'Herdr Collie: No workspace active\nClick to select workspace';
+            this.statusBarItem.tooltip = l10n.t('Herdr Collie: No workspace active\nClick to select workspace');
             return;
         }
 
@@ -135,17 +136,17 @@ export class WorkspaceHUD implements vscode.Disposable {
         // Build rich markdown tooltip
         const md = new vscode.MarkdownString();
         md.isTrusted = true;
-        md.appendMarkdown(`### Herdr Workspace: ${displayInfo.label} $(check) Active\n\n`);
+        md.appendMarkdown(`### ` + l10n.t('Herdr Workspace: {0} Active', `${displayInfo.label} $(check)`) + `\n\n`);
         if (displayInfo.branchName) {
-            md.appendMarkdown(`* **Branch**: \`${displayInfo.branchName}\` (Git Worktree)\n`);
+            md.appendMarkdown(`* ` + l10n.t('**Branch**: `{0}` (Git Worktree)', displayInfo.branchName) + `\n`);
         }
         if (displayInfo.isCurrentWindow) {
-            md.appendMarkdown(`* **VS Code Window**: Matches active project\n`);
+            md.appendMarkdown(`* ` + l10n.t('**VS Code Window**: Matches active project') + `\n`);
         }
         if (displayInfo.agentBadges) {
-            md.appendMarkdown(`* **Active Agents**: ${displayInfo.agentBadges}\n`);
+            md.appendMarkdown(`* ` + l10n.t('**Active Agents**: {0}', displayInfo.agentBadges) + `\n`);
         }
-        md.appendMarkdown(`\n*Click to switch or focus workspace (Ctrl+Alt+H W)*`);
+        md.appendMarkdown(`\n*` + l10n.t('Click to switch or focus workspace (Ctrl+Alt+H W)') + `*`);
         this.statusBarItem.tooltip = md;
     }
 

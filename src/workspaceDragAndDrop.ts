@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 import * as vscode from 'vscode';
+import * as l10n from '@vscode/l10n';
 import { HerdrSocketClient } from './socketClient';
 
 export class HerdrWorkspaceTreeItem extends vscode.TreeItem {
@@ -138,7 +139,7 @@ export class WorkspaceDragAndDropController implements vscode.TreeDragAndDropCon
     private async executeMove(workspaceIds: string[], beforeWorkspaceId: string | null): Promise<void> {
         const client = this.client;
         if (!client || !client.isConnected) {
-            vscode.window.showWarningMessage('Herdr socket is not connected. Unable to reorder workspaces.');
+            vscode.window.showWarningMessage(l10n.t('Herdr socket is not connected. Unable to reorder workspaces.'));
             return;
         }
 
@@ -146,7 +147,7 @@ export class WorkspaceDragAndDropController implements vscode.TreeDragAndDropCon
             await client.moveWorkspaces(workspaceIds, beforeWorkspaceId);
             this.onDidReorder?.();
         } catch (err: any) {
-            vscode.window.showErrorMessage(`Failed to reorder workspace: ${err.message || String(err)}`);
+            vscode.window.showErrorMessage(l10n.t('Failed to reorder workspace: {0}', err.message || String(err)));
         }
     }
 }
