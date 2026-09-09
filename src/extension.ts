@@ -973,6 +973,20 @@ export function activate(context: vscode.ExtensionContext) {
         treeDataProvider: agentProvider
     });
 
+    const updateAgentBadge = (count: number) => {
+        if (count > 0) {
+            agentTreeView.badge = {
+                value: count,
+                tooltip: l10n.t('{0} agents waiting for confirmation', count)
+            };
+        } else {
+            agentTreeView.badge = undefined;
+        }
+    };
+
+    updateAgentBadge(agentHUD.getBlockedCount());
+    context.subscriptions.push(agentHUD.onDidChangeBlockedCount(updateAgentBadge));
+
     const getActiveRepoRoot = async (): Promise<string | null> => {
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (!workspaceFolders || workspaceFolders.length === 0) return null;

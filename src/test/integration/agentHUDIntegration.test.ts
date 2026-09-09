@@ -10,7 +10,7 @@ import * as os from 'os';
 import * as fs from 'fs';
 import { HerdrSocketClient } from '../../socketClient';
 import { AgentHUD } from '../../agentHUD';
-import { mockState, resetMockState } from '../helpers/mockVscode';
+import { mockState, resetMockState, mockVscode } from '../helpers/mockVscode';
 
 describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05, H-09, A-01)', function() {
     this.timeout(10000);
@@ -308,6 +308,64 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
         expect(lastAttach.args[1]).to.be.true; // isAgent
         expect(lastAttach.args[2]).to.include('agy');
         expect(lastAttach.args[3]).to.equal('test-session');
+
+        hud.dispose();
+        client.dispose();
+    });
+
+    it('updates onDidChangeBlockedCount and Activity Bar treeView badge when agent blocks and resumes', async () => {
+        const client = new HerdrSocketClient(tempSockPath);
+        client.on('error', () => {});
+        client.connect();
+
+        const hud = new AgentHUD(client, () => 'test-session');
+        const treeView = mockVscode.window.createTreeView('herdr-collie.agents');
+
+        let lastEventCount = -1;
+        hud.onDidChangeBlockedCount((count: number) => {
+            lastEventCount = count;
+            if (count > 0) {
+                treeView.badge = {
+                    value: count,
+                    tooltip: `${count} agents waiting for confirmation`
+                };
+            } else {
+                treeView.badge = undefined;
+            }
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        // Initially no agents are blocked
+        expect(hud.getBlockedCount()).to.equal(0);
+        expect(treeView.badge).to.be.undefined;
+
+        // Change server mock to have 2 blocked agents
+        currentMockAgents = [
+            { id: 'agent-1', name: 'Claude-Worker', status: 'blocked' },
+            { id: 'agent-2', name: 'Agy-Worker', status: 'waiting' }
+        ];
+
+        // Trigger refresh
+        await hud.refresh();
+
+        expect(hud.getBlockedCount()).to.equal(2);
+        expect(lastEventCount).to.equal(2);
+        expect(treeView.badge).to.not.be.undefined;
+        expect(treeView.badge?.value).to.equal(2);
+        expect(treeView.badge?.tooltip).to.include('2 agents waiting');
+
+        // Resume agents (e.g. approved)
+        currentMockAgents = [
+            { id: 'agent-1', name: 'Claude-Worker', status: 'running' },
+            { id: 'agent-2', name: 'Agy-Worker', status: 'idle' }
+        ];
+
+        await hud.refresh();
+
+        expect(hud.getBlockedCount()).to.equal(0);
+        expect(lastEventCount).to.equal(0);
+        expect(treeView.badge).to.be.undefined;
 
         hud.dispose();
         client.dispose();

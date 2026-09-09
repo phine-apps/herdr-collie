@@ -208,5 +208,6 @@
   "Failed to rollback to checkpoint: {0}": "Failed to rollback to checkpoint: {0}",
   "Are you sure you want to rollback to checkpoint '{0}'? Any uncommitted changes will be lost.": "Are you sure you want to rollback to checkpoint '{0}'? Any uncommitted changes will be lost.",
   "Rollback": "Rollback",
-  "Cancel": "Cancel"
+  "Cancel": "Cancel",
+  "{0} agents waiting for confirmation": "{0} agents waiting for confirmation"
 }

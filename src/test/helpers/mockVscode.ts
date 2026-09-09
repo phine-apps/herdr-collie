@@ -18,6 +18,15 @@ export interface MockStatusBarItem {
     dispose(): void;
 }
 
+export interface MockTreeView {
+    badge?: { value: number; tooltip: string };
+    visible: boolean;
+    selection: any[];
+    onDidChangeSelection: any;
+    onDidChangeVisibility: any;
+    dispose(): void;
+}
+
 export interface MockVscodeState {
     lastWarningMessage?: { message: string; items: string[] };
     lastInformationMessage?: { message: string; items: string[] };
@@ -25,12 +34,14 @@ export interface MockVscodeState {
     informationMessageResponse?: string;
     inputBoxResponse?: string;
     statusBarItems: MockStatusBarItem[];
+    treeViews: Map<string, MockTreeView>;
     configurations: Map<string, any>;
     executedCommands: { command: string; args: any[] }[];
 }
 
 export const mockState: MockVscodeState = {
     statusBarItems: [],
+    treeViews: new Map(),
     configurations: new Map(),
     executedCommands: []
 };
@@ -42,6 +53,7 @@ export function resetMockState(): void {
     mockState.informationMessageResponse = undefined;
     mockState.inputBoxResponse = undefined;
     mockState.statusBarItems = [];
+    mockState.treeViews = new Map();
     mockState.configurations.clear();
     mockState.executedCommands = [];
 }
@@ -211,6 +223,18 @@ export const mockVscode = {
                 hide: () => {},
                 dispose: () => {}
             };
+        },
+        createTreeView: (viewId: string, _options?: any): MockTreeView => {
+            const view: MockTreeView = {
+                badge: undefined,
+                visible: true,
+                selection: [],
+                onDidChangeSelection: () => ({ dispose: () => {} }),
+                onDidChangeVisibility: () => ({ dispose: () => {} }),
+                dispose: () => {}
+            };
+            mockState.treeViews.set(viewId, view);
+            return view;
         }
     },
     workspace: {

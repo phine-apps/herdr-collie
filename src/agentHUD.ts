@@ -14,6 +14,9 @@ export class AgentHUD implements vscode.Disposable {
     private isDisposed = false;
     private notifiedBlockedAgents: Set<string> = new Set();
     private refreshSequence = 0;
+    private _onDidChangeBlockedCount = new vscode.EventEmitter<number>();
+    public readonly onDidChangeBlockedCount = this._onDidChangeBlockedCount.event;
+    private currentBlockedCount = 0;
 
     constructor(
         private socketClient: HerdrSocketClient,
@@ -266,10 +269,20 @@ export class AgentHUD implements vscode.Disposable {
         });
     }
 
+    public getBlockedCount(): number {
+        return this.currentBlockedCount;
+    }
+
     /**
      * Formats status bar item text and tooltip
      */
     private updateHUDText(agents: ParsedAgent[]): void {
+        const blockedCount = agents.filter(a => a.isBlocked).length;
+        if (this.currentBlockedCount !== blockedCount) {
+            this.currentBlockedCount = blockedCount;
+            this._onDidChangeBlockedCount.fire(blockedCount);
+        }
+
         if (agents.length === 0) {
             this.statusBarItem.text = `$(hubot) Herdr`;
             this.statusBarItem.tooltip = l10n.t('Herdr Collie: No active agents');
@@ -277,7 +290,6 @@ export class AgentHUD implements vscode.Disposable {
             return;
         }
 
-        const blockedCount = agents.filter(a => a.isBlocked).length;
         const workingCount = agents.filter(a => a.isWorking).length;
         const idleCount = agents.length - blockedCount - workingCount;
 
@@ -435,6 +447,7 @@ export class AgentHUD implements vscode.Disposable {
 
     public dispose(): void {
         this.isDisposed = true;
+        this._onDidChangeBlockedCount.dispose();
         this.statusBarItem.dispose();
     }
 }
