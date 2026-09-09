@@ -30,6 +30,10 @@
   "command.refreshReviewChanges": "Herdr Collie: Refresh Review Changes",
   "command.createReviewCheckpoint": "Herdr Collie: Create Review Checkpoint",
   "command.rollbackReviewCheckpoint": "Herdr Collie: Rollback to Review Checkpoint",
+  "command.fixDiagnosticWithAgent": "Herdr Collie: Delegate Diagnostic Fix to Agent",
+  "command.fixTestWithAgent": "Herdr Collie: Fix Test / Generate Edge Cases with Agent",
+  "command.completeTodoWithAgent": "Herdr Collie: Complete TODO with Agent",
+  "command.dispatchContextTask": "Herdr Collie: Smart Context Dispatch to Agent",
   "viewsContainers.activitybar.title": "Herdr Collie",
   "view.sessions": "Sessions",
   "view.workspaces": "Workspaces",
@@ -41,5 +45,7 @@
   "config.worktreeLocation": "Where to create Git worktrees when launching swarm agents ('sibling' directory or '.worktrees' subfolder)",
   "config.agentHUD.enableNotifications": "Show interactive notifications when an agent requires approval or completes a task",
   "config.defaultAgentCommand": "Default AI agent command to launch in worktrees (e.g. 'claude', 'agy', 'cursor', 'gh copilot')",
-  "config.agentSortOrder": "Sort order for active agents in the Agents sidebar: 'grouped' (by workspace) or 'priority' (by urgency/attention queue)"
+  "config.agentSortOrder": "Sort order for active agents in the Agents sidebar: 'grouped' (by workspace) or 'priority' (by urgency/attention queue)",
+  "config.codeLens.enable": "Show inline CodeLens above test definitions and TODO comments to trigger AI agent assistance",
+  "config.quickFix.enable": "Show 'Delegate Fix to Herdr Agent' Quick-Fix action in Lightbulb menu for compiler/linter diagnostics"
 }

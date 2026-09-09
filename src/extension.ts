@@ -45,8 +45,18 @@ import {
     prepareOriginalFileForDiff,
     createReviewCheckpoint,
     rollbackReviewCheckpoint,
-    listReviewCheckpoints
+    listReviewCheckpoints,
+    extractSnippet
 } from './reviewManager';
+import {
+    HerdrQuickFixProvider,
+    HerdrCodeLensProvider,
+    promptAndDispatchTask,
+    handleContextTaskDispatch,
+    formatDiagnosticPrompt,
+    formatTestPrompt,
+    formatTodoPrompt
+} from './microTaskManager';
 
 interface TargetQuickPickItem extends vscode.QuickPickItem {
     targetId: string;
@@ -1679,6 +1689,103 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+    // P4: Micro-Task CodeLens & Quick-Fix (コードレンズ & インライン即時委譲)
+    const quickFixProvider = new HerdrQuickFixProvider();
+    const quickFixDisposable = vscode.languages.registerCodeActionsProvider(
+        { scheme: 'file' },
+        quickFixProvider,
+        {
+            providedCodeActionKinds: HerdrQuickFixProvider.providedCodeActionKinds
+        }
+    );
+
+    const codeLensProvider = new HerdrCodeLensProvider();
+    const codeLensDisposable = vscode.languages.registerCodeLensProvider(
+        { scheme: 'file' },
+        codeLensProvider
+    );
+
+    const configChangeDisposable = vscode.workspace.onDidChangeConfiguration(e => {
+        if (e.affectsConfiguration('herdr-collie.codeLens') || e.affectsConfiguration('herdr-collie.quickFix')) {
+            codeLensProvider.refresh();
+        }
+    });
+
+    let fixDiagnosticDisposable = vscode.commands.registerCommand('herdr-collie.fixDiagnosticWithAgent', async (uriArg?: vscode.Uri, diagArg?: any) => {
+        const editor = vscode.window.activeTextEditor;
+        const uri = uriArg || editor?.document.uri;
+        if (!uri) return;
+        const doc = await vscode.workspace.openTextDocument(uri);
+        const fileRelPath = vscode.workspace.asRelativePath(uri);
+        let diag = diagArg;
+        if (!diag) {
+            const diags = vscode.languages.getDiagnostics(uri);
+            if (diags.length > 0) diag = diags[0];
+        }
+        if (!diag) {
+            vscode.window.showInformationMessage(l10n.t('No errors or warnings found.'));
+            return;
+        }
+        const lineNum = (diag.range?.start?.line ?? 0) + 1;
+        const snippet = extractSnippet(doc.getText(), Math.max(1, lineNum - 5), Math.min(doc.lineCount, lineNum + 5));
+        const prompt = Array.isArray(diag)
+            ? diag.map(d => formatDiagnosticPrompt(fileRelPath, (d.range?.start?.line ?? 0) + 1, d, snippet)).join('\n\n---\n\n')
+            : formatDiagnosticPrompt(fileRelPath, lineNum, diag, snippet);
+        await promptAndDispatchTask(prompt, l10n.t('Fix Issue in {0}', path.basename(fileRelPath)), {
+            socketClient,
+            sessionName: getActiveSidebarSession()
+        });
+    });
+
+    let fixTestDisposable = vscode.commands.registerCommand('herdr-collie.fixTestWithAgent', async (uriArg?: vscode.Uri, testNameArg?: string, lineArg?: number, modeArg?: 'fix' | 'edge-cases') => {
+        const editor = vscode.window.activeTextEditor;
+        const uri = uriArg || editor?.document.uri;
+        if (!uri) return;
+        const doc = await vscode.workspace.openTextDocument(uri);
+        const fileRelPath = vscode.workspace.asRelativePath(uri);
+        const line = lineArg ?? ((editor?.selection.active.line ?? 0) + 1);
+        const testName = testNameArg || 'test';
+        const mode = modeArg || 'fix';
+        const snippet = extractSnippet(doc.getText(), Math.max(1, line - 2), Math.min(doc.lineCount, line + 25));
+        const prompt = formatTestPrompt(fileRelPath, testName, line, snippet, mode);
+        const taskTitle = mode === 'fix'
+            ? l10n.t('Fix Test "{0}"', testName)
+            : l10n.t('Generate Edge Cases for "{0}"', testName);
+        await promptAndDispatchTask(prompt, taskTitle, {
+            socketClient,
+            sessionName: getActiveSidebarSession()
+        });
+    });
+
+    let completeTodoDisposable = vscode.commands.registerCommand('herdr-collie.completeTodoWithAgent', async (uriArg?: vscode.Uri, todoTypeArg?: string, todoTextArg?: string, lineArg?: number) => {
+        const editor = vscode.window.activeTextEditor;
+        const uri = uriArg || editor?.document.uri;
+        if (!uri) return;
+        const doc = await vscode.workspace.openTextDocument(uri);
+        const fileRelPath = vscode.workspace.asRelativePath(uri);
+        const line = lineArg ?? ((editor?.selection.active.line ?? 0) + 1);
+        const todoType = todoTypeArg || 'TODO';
+        const todoText = todoTextArg || '';
+        const snippet = extractSnippet(doc.getText(), Math.max(1, line - 6), Math.min(doc.lineCount, line + 10));
+        const prompt = formatTodoPrompt(fileRelPath, todoType, todoText, line, snippet);
+        await promptAndDispatchTask(prompt, l10n.t('Complete {0} in {1}', todoType, path.basename(fileRelPath)), {
+            socketClient,
+            sessionName: getActiveSidebarSession()
+        });
+    });
+
+    let dispatchContextTaskDisposable = vscode.commands.registerCommand('herdr-collie.dispatchContextTask', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showInformationMessage(l10n.t('Please open a file in the editor first.'));
+            return;
+        }
+        await handleContextTaskDispatch(editor, {
+            socketClient,
+            sessionName: getActiveSidebarSession()
+        });
+    });
+
     context.subscriptions.push(switchSessionDisposable);
     context.subscriptions.push(switchSessionDirectDisposable);
     context.subscriptions.push(createSessionDisposable);
@@ -1699,6 +1806,15 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(refreshReviewChangesDisposable);
     context.subscriptions.push(createReviewCheckpointDisposable);
     context.subscriptions.push(rollbackReviewCheckpointDisposable);
+    context.subscriptions.push(
+        quickFixDisposable,
+        codeLensDisposable,
+        configChangeDisposable,
+        fixDiagnosticDisposable,
+        fixTestDisposable,
+        completeTodoDisposable,
+        dispatchContextTaskDisposable
+    );
 }
 
 

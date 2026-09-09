@@ -175,6 +175,22 @@
         "command": "herdr-collie.rollbackReviewCheckpoint",
         "title": "%command.rollbackReviewCheckpoint%",
         "icon": "$(history)"
+      },
+      {
+        "command": "herdr-collie.fixDiagnosticWithAgent",
+        "title": "%command.fixDiagnosticWithAgent%"
+      },
+      {
+        "command": "herdr-collie.fixTestWithAgent",
+        "title": "%command.fixTestWithAgent%"
+      },
+      {
+        "command": "herdr-collie.completeTodoWithAgent",
+        "title": "%command.completeTodoWithAgent%"
+      },
+      {
+        "command": "herdr-collie.dispatchContextTask",
+        "title": "%command.dispatchContextTask%"
       }
     ],
     "menus": {
@@ -269,16 +285,36 @@
         },
         {
           "command": "herdr-collie.rollbackReviewCheckpoint"
+        },
+        {
+          "command": "herdr-collie.fixDiagnosticWithAgent",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "herdr-collie.fixTestWithAgent",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "herdr-collie.completeTodoWithAgent",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "herdr-collie.dispatchContextTask",
+          "when": "editorTextFocus"
         }
       ],
       "editor/context": [
         {
-          "command": "herdr-collie.addReviewComment",
+          "command": "herdr-collie.dispatchContextTask",
           "group": "herdr@0"
         },
         {
-          "command": "herdr-collie.sendContext",
+          "command": "herdr-collie.addReviewComment",
           "group": "herdr@1"
+        },
+        {
+          "command": "herdr-collie.sendContext",
+          "group": "herdr@2"
         },
         {
           "command": "herdr-collie.sendDiagnostics",
@@ -488,10 +524,26 @@
           ],
           "default": "grouped",
           "description": "%config.agentSortOrder%"
+        },
+        "herdr-collie.codeLens.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.codeLens.enable%"
+        },
+        "herdr-collie.quickFix.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.quickFix.enable%"
         }
       }
     },
     "keybindings": [
+      {
+        "command": "herdr-collie.dispatchContextTask",
+        "key": "ctrl+alt+h enter",
+        "mac": "ctrl+alt+h enter",
+        "when": "editorTextFocus"
+      },
       {
         "command": "herdr-collie.sendContext",
         "key": "ctrl+alt+h s",
