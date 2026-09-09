@@ -158,6 +158,24 @@ describe('microTaskManager Unit Tests', () => {
             });
         });
 
+        it('detects and trims HTML comment closures including --> and --!>', () => {
+            const htmlTodo = detectTodoAtLine('<!-- TODO: add accessibility ARIA attributes -->');
+            expect(htmlTodo).to.deep.equal({
+                isTodo: true,
+                type: 'TODO',
+                text: 'add accessibility ARIA attributes',
+                tag: undefined
+            });
+
+            const htmlBangTodo = detectTodoAtLine('<!-- TODO: support legacy parser --!>');
+            expect(htmlBangTodo).to.deep.equal({
+                isTodo: true,
+                type: 'TODO',
+                text: 'support legacy parser',
+                tag: undefined
+            });
+        });
+
         it('returns null for regular lines without TODO or FIXME', () => {
             expect(detectTodoAtLine('const total = price * 1.1;')).to.be.null;
             expect(detectTodoAtLine('// This is just a regular comment')).to.be.null;

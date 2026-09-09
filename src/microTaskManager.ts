@@ -101,8 +101,8 @@ export function detectTodoAtLine(lineText: string): TodoDetectionResult | null {
     const type: 'TODO' | 'FIXME' = rawType === 'FIXME' ? 'FIXME' : 'TODO';
     const tag = match[2]?.trim();
     let text = match[3]?.trim() || '';
-    // Strip trailing comment closures like */ or -->
-    text = text.replace(/(?:\*\/|-->)\s*$/, '').trim();
+    // Strip trailing comment closures like */, -->, or --!>
+    text = text.replace(/(?:\*\/|--!?>)\s*$/, '').trim();
 
     return {
         isTodo: true,
