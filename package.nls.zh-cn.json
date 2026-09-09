@@ -30,6 +30,10 @@
   "command.refreshReviewChanges": "Herdr Collie: 刷新审查变更",
   "command.createReviewCheckpoint": "Herdr Collie: 创建审查检查点",
   "command.rollbackReviewCheckpoint": "Herdr Collie: 回滚至审查检查点",
+  "command.fixDiagnosticWithAgent": "Herdr Collie: 委派智能体修复错误/警告",
+  "command.fixTestWithAgent": "Herdr Collie: 使用智能体修复测试/生成边界用例",
+  "command.completeTodoWithAgent": "Herdr Collie: 使用智能体实现 TODO",
+  "command.dispatchContextTask": "Herdr Collie: 智能上下文即时委派给智能体",
   "viewsContainers.activitybar.title": "Herdr Collie",
   "view.sessions": "会话",
   "view.workspaces": "工作区",
@@ -41,5 +45,7 @@
   "config.worktreeLocation": "启动集群智能体时创建 Git worktree 的位置 ('sibling' 同级目录或 '.worktrees' 子目录)",
   "config.agentHUD.enableNotifications": "当智能体需要批准或完成任务时显示交互式通知",
   "config.defaultAgentCommand": "在 worktree 中启动的默认 AI 智能体命令 (例如 'claude', 'agy', 'cursor', 'gh copilot')",
-  "config.agentSortOrder": "智能体侧边栏中活跃智能体的排序方式: 'grouped' (按工作区) 或 'priority' (按紧急程度/等待队列)"
+  "config.agentSortOrder": "智能体侧边栏中活跃智能体的排序方式: 'grouped' (按工作区) 或 'priority' (按紧急程度/等待队列)",
+  "config.codeLens.enable": "在测试定义和 TODO 注释上方显示内联 CodeLens，以便触发智能体协助",
+  "config.quickFix.enable": "在编译器/代码检查诊断的灯泡菜单中显示“委派 Herdr 智能体修复”快速修复操作"
 }

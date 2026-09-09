@@ -30,6 +30,10 @@
   "command.refreshReviewChanges": "Herdr Collie: レビュー変更を更新",
   "command.createReviewCheckpoint": "Herdr Collie: レビューチェックポイントを作成",
   "command.rollbackReviewCheckpoint": "Herdr Collie: チェックポイントへロールバック",
+  "command.fixDiagnosticWithAgent": "Herdr Collie: エラー/警告の修正をエージェントに委派",
+  "command.fixTestWithAgent": "Herdr Collie: テスト修正 / エッジケース生成をエージェントに依頼",
+  "command.completeTodoWithAgent": "Herdr Collie: TODO の実装をエージェントに依頼",
+  "command.dispatchContextTask": "Herdr Collie: コンテキストに応じたスマート即時委派",
   "viewsContainers.activitybar.title": "Herdr Collie",
   "view.sessions": "セッション",
   "view.workspaces": "ワークスペース",
@@ -41,5 +45,7 @@
   "config.worktreeLocation": "エージェント起動時に Git worktree を作成する場所 ('sibling' 同階層ディレクトリ または '.worktrees' サブフォルダ)",
   "config.agentHUD.enableNotifications": "エージェントが承認を必要とする場合やタスクを完了した際に対話的な通知を表示する",
   "config.defaultAgentCommand": "Worktree で起動するデフォルトの AI エージェントコマンド (例: 'claude', 'agy', 'cursor', 'gh copilot')",
-  "config.agentSortOrder": "エージェントサイドバーでの並び順: 'grouped' (ワークスペース別) または 'priority' (緊急度/対応待ち優先)"
+  "config.agentSortOrder": "エージェントサイドバーでの並び順: 'grouped' (ワークスペース別) または 'priority' (緊急度/対応待ち優先)",
+  "config.codeLens.enable": "テスト定義や TODO コメントの上にインライン CodeLens を表示し、エージェントへの委派をトリガーできるようにする",
+  "config.quickFix.enable": "コンパイラ/リンターのエラー・警告の電球メニューに「Herdr エージェントに修正を依頼」クイックフィックスを表示する"
 }

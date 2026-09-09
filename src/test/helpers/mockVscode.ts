@@ -2,6 +2,7 @@
  * Copyright (c) 2026 Herdr Collie Authors
  * Licensed under the MIT License.
  */
+import * as path from 'path';
 
 export interface MockStatusBarItem {
     id: string;
@@ -107,14 +108,73 @@ export class MockDataTransfer {
     }
 }
 
-export class MockRange {
-    constructor(
-        public readonly startLine: number,
-        public readonly startCharacter: number,
-        public readonly endLine: number,
-        public readonly endCharacter: number
-    ) {}
+export class MockPosition {
+    constructor(public readonly line: number, public readonly character: number) {}
 }
+
+export class MockRange {
+    public readonly start: MockPosition;
+    public readonly end: MockPosition;
+
+    constructor(
+        startLineOrPos: number | MockPosition,
+        startCharacterOrEndPos: number | MockPosition,
+        endLine?: number,
+        endCharacter?: number
+    ) {
+        if (typeof startLineOrPos === 'object' && typeof startCharacterOrEndPos === 'object') {
+            this.start = startLineOrPos;
+            this.end = startCharacterOrEndPos;
+        } else {
+            const sLine = typeof startLineOrPos === 'number' ? startLineOrPos : 0;
+            const sChar = typeof startCharacterOrEndPos === 'number' ? startCharacterOrEndPos : 0;
+            const eLine = endLine !== undefined ? endLine : sLine;
+            const eChar = endCharacter !== undefined ? endCharacter : sChar;
+            this.start = new MockPosition(sLine, sChar);
+            this.end = new MockPosition(eLine, eChar);
+        }
+    }
+
+    get startLine(): number { return this.start.line; }
+    get startCharacter(): number { return this.start.character; }
+    get endLine(): number { return this.end.line; }
+    get endCharacter(): number { return this.end.character; }
+
+    contains(positionOrRange: any): boolean {
+        const line = positionOrRange.line !== undefined ? positionOrRange.line : positionOrRange.start?.line;
+        return line >= this.start.line && line <= this.end.line;
+    }
+}
+
+export class MockCodeAction {
+    public command?: any;
+    public isPreferred?: boolean;
+    public diagnostics?: any[];
+    constructor(public title: string, public kind?: any) {}
+}
+
+export class MockCodeLens {
+    constructor(public range: MockRange, public command?: any) {}
+}
+
+export class MockDiagnostic {
+    public code?: string | number;
+    public source?: string;
+    constructor(public range: MockRange, public message: string, public severity: number = 0) {}
+}
+
+export const MockDiagnosticSeverity = {
+    Error: 0,
+    Warning: 1,
+    Information: 2,
+    Hint: 3
+};
+
+export const MockCodeActionKind = {
+    QuickFix: { value: 'quickfix' },
+    Refactor: { value: 'refactor' },
+    Source: { value: 'source' }
+};
 
 export class MockEventEmitter<T> {
     private listeners: ((e: T) => any)[] = [];
@@ -156,8 +216,19 @@ export const mockVscode = {
         Collapsed: 1,
         Expanded: 2
     },
+    Position: MockPosition,
     Range: MockRange,
+    CodeAction: MockCodeAction,
+    CodeLens: MockCodeLens,
+    Diagnostic: MockDiagnostic,
+    DiagnosticSeverity: MockDiagnosticSeverity,
+    CodeActionKind: MockCodeActionKind,
     EventEmitter: MockEventEmitter,
+    languages: {
+        registerCodeActionsProvider: (selector: any, provider: any, metadata?: any) => ({ dispose: () => {} }),
+        registerCodeLensProvider: (selector: any, provider: any) => ({ dispose: () => {} }),
+        getDiagnostics: (uri?: any): any[] => []
+    },
     comments: {
         createCommentController: (id: string, label: string) => {
             return {
@@ -238,6 +309,10 @@ export const mockVscode = {
         }
     },
     workspace: {
+        asRelativePath: (pathOrUri: any, _includeWorkspaceFolder?: boolean): string => {
+            const p = typeof pathOrUri === 'string' ? pathOrUri : (pathOrUri?.fsPath || pathOrUri?.path || '');
+            return path.basename(p);
+        },
         getConfiguration: (section?: string) => {
             return {
                 get: <T>(key: string, defaultValue?: T): T => {
