@@ -208,5 +208,6 @@
   "Failed to rollback to checkpoint: {0}": "回滚至检查点失败: {0}",
   "Are you sure you want to rollback to checkpoint '{0}'? Any uncommitted changes will be lost.": "确定要回滚至检查点 '{0}' 吗？任何未提交的更改都将丢失。",
   "Rollback": "回滚",
-  "Cancel": "取消"
+  "Cancel": "取消",
+  "{0} agents waiting for confirmation": "{0} 个智能体等待确认"
 }
