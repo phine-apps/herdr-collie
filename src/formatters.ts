@@ -9,6 +9,23 @@ export interface ProblemItem {
 }
 
 /**
+ * Safely generates a markdown code block by calculating a fence that exceeds
+ * any internal backtick sequence, preventing prompt injection or fence breakout.
+ */
+export function formatCodeFence(code: string, lang: string = ''): string {
+    const text = code ?? '';
+    const backtickMatches = text.match(/`+/g) || [];
+    let maxBackticks = 2;
+    for (const match of backtickMatches) {
+        if (match.length > maxBackticks) {
+            maxBackticks = match.length;
+        }
+    }
+    const fence = '`'.repeat(Math.max(3, maxBackticks + 1));
+    return `${fence}${lang}\n${text}\n${fence}`;
+}
+
+/**
  * Format active code selection context into Markdown
  */
 export function formatSelectionContext(
@@ -19,7 +36,7 @@ export function formatSelectionContext(
     codeText: string
 ): string {
     const lineInfo = startLine === endLine ? `Line ${startLine}` : `Lines ${startLine}-${endLine}`;
-    return `\`${fileName}\` (${lineInfo}):\n\`\`\`${languageId}\n${codeText}\n\`\`\``;
+    return `\`${fileName}\` (${lineInfo}):\n${formatCodeFence(codeText, languageId)}`;
 }
 
 /**
@@ -33,7 +50,7 @@ export function formatFileDiagnostics(
         return '';
     }
     const errorLines = diagnostics.map(d => `Line ${d.line}: ${d.message}`).join('\n');
-    return `The following errors are present in \`${fileName}\`:\n\`\`\`\n${errorLines}\n\`\`\`\nPlease fix them.`;
+    return `The following errors are present in \`${fileName}\`:\n${formatCodeFence(errorLines)}\nPlease fix them.`;
 }
 
 /**
@@ -68,14 +85,14 @@ export function formatGitDiff(diffText: string, targetFile?: string, isStaged = 
     const diffType = isStaged ? 'staged git diff' : 'working tree (unstaged) git diff';
     const fileSpecifier = targetFile ? ` for \`${targetFile}\`` : '';
     const action = isStaged ? 'Please review these staged changes.' : 'Please review these changes.';
-    return `Here is the ${diffType}${fileSpecifier}:\n\`\`\`diff\n${truncatedDiff}\n\`\`\`\n${action}`;
+    return `Here is the ${diffType}${fileSpecifier}:\n${formatCodeFence(truncatedDiff, 'diff')}\n${action}`;
 }
 
 /**
  * Format branch context information
  */
 export function formatBranchContext(branchName: string, recentCommits: string): string {
-    return `Here is the context for the current Git branch:\n\n**Current Branch:** \`${branchName}\`\n\n**Recent Commits:**\n\`\`\`\n${recentCommits.trim()}\n\`\`\`\n\nPlease keep this context in mind.`;
+    return `Here is the context for the current Git branch:\n\n**Current Branch:** \`${branchName}\`\n\n**Recent Commits:**\n${formatCodeFence(recentCommits.trim())}\n\nPlease keep this context in mind.`;
 }
 
 /**
@@ -118,7 +135,7 @@ export function formatTerminalOutput(
         }
     }
 
-    return `${header}${statusLine}\n\`\`\`\n${truncated}\n\`\`\`\n\n${instruction}`;
+    return `${header}${statusLine}\n${formatCodeFence(truncated)}\n\n${instruction}`;
 }
 
 export interface WorkspaceDisplayInfo {

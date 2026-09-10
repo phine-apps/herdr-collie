@@ -249,6 +249,25 @@ describe('microTaskManager Unit Tests', () => {
             expect(prompt).to.include('`src/utils.ts` (around Line 10)');
             expect(prompt).to.include('**Instruction:** Refactor to use reduce instead of for loop');
         });
+
+        it('prevents markdown code fence breakout when snippets contain triple backticks', () => {
+            const maliciousSnippet = 'const a = "```";\nconsole.log(a);';
+            const diagPrompt = formatDiagnosticPrompt(
+                'src/exploit.ts',
+                5,
+                { message: 'Inject error', severity: 'Error' },
+                maliciousSnippet
+            );
+            expect(diagPrompt).to.include('````typescript\nconst a = "```";');
+
+            const taskPrompt = formatContextTaskPrompt(
+                'src/exploit.ts',
+                5,
+                'Fix this snippet',
+                maliciousSnippet
+            );
+            expect(taskPrompt).to.include('````typescript\nconst a = "```";');
+        });
     });
 
     describe('sortAgentsForDispatch', () => {

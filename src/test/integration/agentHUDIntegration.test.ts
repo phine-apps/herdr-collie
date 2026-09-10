@@ -110,10 +110,43 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
 
         // Check rich markdown tooltip
         expect(statusBarItem.tooltip).to.not.be.undefined;
-        const tooltipText = (statusBarItem.tooltip as any).value || '';
+        const tooltip = statusBarItem.tooltip as any;
+        expect(tooltip.isTrusted).to.be.false;
+        const tooltipText = tooltip.value || '';
         expect(tooltipText).to.include('Herdr Agents (2 active)');
         expect(tooltipText).to.include('Claude-Worker');
         expect(tooltipText).to.include('Agy-Worker');
+
+        hud.dispose();
+        client.dispose();
+    });
+
+    it('sanitizes malicious agent names and status text in tooltip (CRIT-01)', async () => {
+        currentMockAgents = [
+            { 
+                id: 'agent-malicious', 
+                name: 'Evil | Agent\n[Click Me](command:workbench.action.terminal.sendSequence)', 
+                status: 'waiting | `malicious`' 
+            }
+        ];
+
+        const client = new HerdrSocketClient(tempSockPath);
+        client.on('error', () => {});
+        client.connect();
+
+        const hud = new AgentHUD(client, () => 'test-session');
+        await new Promise((resolve) => setTimeout(resolve, 150));
+
+        const statusBarItem = mockState.statusBarItems[0];
+        const tooltip = statusBarItem.tooltip as any;
+        expect(tooltip.isTrusted).to.be.false;
+        const tooltipText = tooltip.value || '';
+
+        // Verify pipes are escaped and newlines / command brackets removed
+        expect(tooltipText).to.include('Evil \\| Agent');
+        expect(tooltipText).to.not.include('\n[Click Me]');
+        expect(tooltipText).to.include("'malicious'");
+        expect(tooltipText).to.not.include('`malicious`');
 
         hud.dispose();
         client.dispose();

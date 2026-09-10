@@ -8,6 +8,20 @@ import { HerdrSocketClient } from './socketClient';
 import { ParsedAgent, AgentStatusType, parseSnapshotAgents, parseAgents } from './parsers';
 import { execHerdr } from './executors';
 
+/**
+ * Safely escapes markdown characters and eliminates newlines for markdown table cells
+ */
+export function escapeMarkdownTableCell(str: string): string {
+    if (!str) return '-';
+    return str
+        .replace(/[\r\n]+/g, ' ')
+        .replace(/\\/g, '\\\\')
+        .replace(/\|/g, '\\|')
+        .replace(/`/g, "'")
+        .replace(/[\[\]]/g, '')
+        .trim() || '-';
+}
+
 export class AgentHUD implements vscode.Disposable {
     private statusBarItem: vscode.StatusBarItem;
     private previousAgentStates: Map<string, { status: string; statusType: AgentStatusType; name: string; isWorking: boolean; isBlocked: boolean; workspaceId?: string }> = new Map();
@@ -17,6 +31,9 @@ export class AgentHUD implements vscode.Disposable {
     private _onDidChangeBlockedCount = new vscode.EventEmitter<number>();
     public readonly onDidChangeBlockedCount = this._onDidChangeBlockedCount.event;
     private currentBlockedCount = 0;
+    private connectListener?: () => void;
+    private eventListener?: (event: any) => void;
+    private disconnectListener?: () => void;
 
     constructor(
         private socketClient: HerdrSocketClient,
@@ -36,21 +53,43 @@ export class AgentHUD implements vscode.Disposable {
     }
 
     public updateSocketClient(newSocketClient: HerdrSocketClient): void {
+        this.cleanupSocketEvents();
         this.socketClient = newSocketClient;
         this.setupSocketEvents(this.socketClient);
         this.refresh();
     }
 
     private setupSocketEvents(client: HerdrSocketClient): void {
-        client.on('connect', () => this.refresh());
-        client.on('event', (event: any) => {
+        this.connectListener = () => this.refresh();
+        this.eventListener = (event: any) => {
             this.handleSocketEvent(event);
             this.refresh();
-        });
-        client.on('disconnect', () => {
+        };
+        this.disconnectListener = () => {
             this.updateHUDText([]);
-        });
+        };
+
+        client.on('connect', this.connectListener);
+        client.on('event', this.eventListener);
+        client.on('disconnect', this.disconnectListener);
         client.on('error', () => {});
+    }
+
+    private cleanupSocketEvents(): void {
+        if (this.socketClient && typeof (this.socketClient as any).off === 'function') {
+            if (this.connectListener) {
+                this.socketClient.off('connect', this.connectListener);
+                this.connectListener = undefined;
+            }
+            if (this.eventListener) {
+                this.socketClient.off('event', this.eventListener);
+                this.eventListener = undefined;
+            }
+            if (this.disconnectListener) {
+                this.socketClient.off('disconnect', this.disconnectListener);
+                this.disconnectListener = undefined;
+            }
+        }
     }
 
     private handleSocketEvent(event: any): void {
@@ -306,13 +345,17 @@ export class AgentHUD implements vscode.Disposable {
 
         // Build rich markdown tooltip
         const md = new vscode.MarkdownString();
-        md.isTrusted = true;
+        // Do not enable isTrusted to prevent command URI injection attacks
         md.appendMarkdown(`### ` + l10n.t('Herdr Agents ({0} active)', agents.length) + `\n\n`);
         md.appendMarkdown(`| ${l10n.t('Agent')} | ${l10n.t('Workspace')} | ${l10n.t('Status')} | ${l10n.t('Pane ID')} |\n`);
         md.appendMarkdown(`| :--- | :--- | :--- | :--- |\n`);
         for (const a of agents) {
             const wsBadge = a.workspaceLabel || (a.workspaceId ? `Workspace ${a.workspaceId}` : '-');
-            md.appendMarkdown(`| ${a.statusIcon} **${a.name}** | \`${wsBadge}\` | \`${a.status}\` | \`${a.id}\` |\n`);
+            const safeName = escapeMarkdownTableCell(a.name);
+            const safeWs = escapeMarkdownTableCell(wsBadge);
+            const safeStatus = escapeMarkdownTableCell(a.status);
+            const safeId = escapeMarkdownTableCell(a.id);
+            md.appendMarkdown(`| ${a.statusIcon} **${safeName}** | \`${safeWs}\` | \`${safeStatus}\` | \`${safeId}\` |\n`);
         }
         md.appendMarkdown(`\n*` + l10n.t('Click to open Agent Command Palette') + `*`);
         this.statusBarItem.tooltip = md;
@@ -447,6 +490,7 @@ export class AgentHUD implements vscode.Disposable {
 
     public dispose(): void {
         this.isDisposed = true;
+        this.cleanupSocketEvents();
         this._onDidChangeBlockedCount.dispose();
         this.statusBarItem.dispose();
     }

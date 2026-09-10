@@ -164,6 +164,9 @@ describe('Localization (l10n) Unit Tests', () => {
             expect(l10n.t('Deny (n)')).to.equal('拒否 (n)');
             expect(l10n.t('Session "{0}" deleted.', 'backend')).to.equal('セッション「backend」を削除しました。');
             expect(l10n.t('Failed to send: {0}', 'socket error')).to.equal('送信に失敗しました: socket error');
+            expect(l10n.t('Submitted review ({0} comments)', 3)).to.equal('レビュー（3件の指摘）');
+            expect(l10n.t("Herdr Collie: No workspace active\nClick to select workspace")).to.equal("Herdr Collie: アクティブなワークスペースがありません\nクリックして選択");
+            expect(l10n.t("Merged '{0}' successfully.\n{1}", 'feat', 'up to date')).to.equal("「feat」を正常にマージしました。\nup to date");
         });
 
         it('loads Simplified Chinese bundle and translates with argument interpolation', () => {
@@ -172,6 +175,9 @@ describe('Localization (l10n) Unit Tests', () => {
             expect(l10n.t('Deny (n)')).to.equal('拒绝 (n)');
             expect(l10n.t('Session "{0}" deleted.', 'backend')).to.equal('会话 "backend" 已删除。');
             expect(l10n.t('Failed to send: {0}', 'socket error')).to.equal('发送失败: socket error');
+            expect(l10n.t('Submitted review ({0} comments)', 3)).to.equal('已提交审查（3 条评论）');
+            expect(l10n.t("Herdr Collie: No workspace active\nClick to select workspace")).to.equal("Herdr Collie: 没有活跃的工作区\n点击选择工作区");
+            expect(l10n.t("Merged '{0}' successfully.\n{1}", 'feat', 'up to date')).to.equal("已成功合并 'feat'。\nup to date");
         });
     });
 });

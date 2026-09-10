@@ -3,7 +3,10 @@
  * Licensed under the MIT License.
  */
 import { expect } from 'chai';
+import '../helpers/mockVscode';
 import { classifyAgentStatus, ParsedAgent } from '../../parsers';
+import { AgentHUD, escapeMarkdownTableCell } from '../../agentHUD';
+import { HerdrSocketClient } from '../../socketClient';
 
 describe('AgentHUD & Status Classification Unit Tests', () => {
     describe('classifyAgentStatus', () => {
@@ -56,6 +59,73 @@ describe('AgentHUD & Status Classification Unit Tests', () => {
             const r2 = classifyAgentStatus('some_random_state');
             expect(r2.statusType).to.equal('idle');
             expect(r2.statusIcon).to.equal('🟡');
+        });
+    });
+
+    describe('escapeMarkdownTableCell', () => {
+        it('replaces newlines and carriage returns with spaces', () => {
+            const input = 'Agent\nLine 2\r\nLine 3';
+            expect(escapeMarkdownTableCell(input)).to.equal('Agent Line 2 Line 3');
+        });
+
+        it('escapes pipes and backslashes to preserve markdown table formatting', () => {
+            const input = 'Worker | Injected | Cell';
+            expect(escapeMarkdownTableCell(input)).to.equal('Worker \\| Injected \\| Cell');
+
+            const backslashInput = 'Worker \\ Subpath | Injected';
+            expect(escapeMarkdownTableCell(backslashInput)).to.equal('Worker \\\\ Subpath \\| Injected');
+        });
+
+        it('sanitizes backticks and brackets', () => {
+            const input = '`Dangerous` [Click](command:action)';
+            expect(escapeMarkdownTableCell(input)).to.equal("'Dangerous' Click(command:action)");
+        });
+
+        it('handles empty and whitespace strings gracefully', () => {
+            expect(escapeMarkdownTableCell('')).to.equal('-');
+            expect(escapeMarkdownTableCell('   ')).to.equal('-');
+            expect(escapeMarkdownTableCell(undefined as any)).to.equal('-');
+        });
+    });
+
+    describe('Socket Event Listener Lifecycle', () => {
+        it('cleans up old socket listeners on updateSocketClient and dispose', () => {
+            const registeredListeners: { [event: string]: Function[] } = {};
+            const removedListeners: { [event: string]: Function[] } = {};
+
+            const client1: any = {
+                on: (event: string, fn: Function) => {
+                    registeredListeners[event] = registeredListeners[event] || [];
+                    registeredListeners[event].push(fn);
+                },
+                off: (event: string, fn: Function) => {
+                    removedListeners[event] = removedListeners[event] || [];
+                    removedListeners[event].push(fn);
+                },
+                getSnapshot: async () => null,
+                isConnected: false
+            };
+
+            const client2: any = {
+                on: () => {},
+                off: () => {},
+                getSnapshot: async () => null,
+                isConnected: false
+            };
+
+            const hud = new AgentHUD(client1 as unknown as HerdrSocketClient, () => 'default');
+            expect(registeredListeners['connect']).to.have.lengthOf(1);
+            expect(registeredListeners['event']).to.have.lengthOf(1);
+            expect(registeredListeners['disconnect']).to.have.lengthOf(1);
+
+            // Update to new client
+            hud.updateSocketClient(client2 as unknown as HerdrSocketClient);
+            expect(removedListeners['connect']).to.have.lengthOf(1);
+            expect(removedListeners['event']).to.have.lengthOf(1);
+            expect(removedListeners['disconnect']).to.have.lengthOf(1);
+
+            // Dispose
+            hud.dispose();
         });
     });
 });
