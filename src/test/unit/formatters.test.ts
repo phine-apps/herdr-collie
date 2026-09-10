@@ -14,7 +14,8 @@ import {
     formatTerminalOutput,
     formatAgentDisplay,
     formatWorkspaceDisplay,
-    sortAgents
+    sortAgents,
+    formatCodeFence
 } from '../../formatters';
 import { ParsedAgent, ParsedWorkspace, GitWorktreeInfo } from '../../parsers';
 
@@ -529,6 +530,35 @@ describe('formatters Unit Tests', () => {
             const copy = [...sampleAgents];
             sortAgents(sampleAgents, 'priority');
             expect(sampleAgents.map(a => a.id)).to.deep.equal(copy.map(a => a.id));
+        });
+    });
+
+    describe('formatCodeFence (Prompt Injection & Breakout Prevention)', () => {
+        it('uses standard 3 backticks when content does not contain backticks', () => {
+            const result = formatCodeFence('const a = 1;', 'ts');
+            expect(result).to.equal('```ts\nconst a = 1;\n```');
+        });
+
+        it('expands to 4 backticks when content contains 3 backticks', () => {
+            const maliciousCode = '```\nconsole.log("breakout");\n```';
+            const result = formatCodeFence(maliciousCode, 'javascript');
+            expect(result.startsWith('````javascript\n')).to.be.true;
+            expect(result.endsWith('\n````')).to.be.true;
+            expect(result).to.equal('````javascript\n```\nconsole.log("breakout");\n```\n````');
+        });
+
+        it('expands to 6 backticks when content contains 5 consecutive backticks', () => {
+            const nestedFences = '`````markdown\ninner code\n`````';
+            const result = formatCodeFence(nestedFences);
+            expect(result.startsWith('``````\n')).to.be.true;
+            expect(result.endsWith('\n``````')).to.be.true;
+        });
+
+        it('handles formatSelectionContext with backtick breakout attempts', () => {
+            const breakoutSnippet = 'const x = "```";\nconsole.log(x);';
+            const result = formatSelectionContext('src/inject.ts', 1, 2, 'typescript', breakoutSnippet);
+            expect(result.startsWith('`src/inject.ts` (Lines 1-2):\n````typescript\n')).to.be.true;
+            expect(result.endsWith('\n````')).to.be.true;
         });
     });
 });

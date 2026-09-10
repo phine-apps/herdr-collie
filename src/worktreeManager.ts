@@ -178,8 +178,8 @@ export async function createWorktree(
     const branchExists = branches.includes(branchName);
 
     const args = branchExists
-        ? ['worktree', 'add', worktreePath, branchName]
-        : ['worktree', 'add', '-b', branchName, worktreePath, baseBranch || 'HEAD'];
+        ? ['worktree', 'add', '--', worktreePath, branchName]
+        : ['worktree', 'add', '-b', branchName, '--', worktreePath, baseBranch || 'HEAD'];
 
     await runGitCmd(args, repoRoot);
 }
@@ -193,8 +193,8 @@ export async function removeWorktree(
     force = false
 ): Promise<void> {
     const args = force 
-        ? ['worktree', 'remove', '--force', worktreePath] 
-        : ['worktree', 'remove', worktreePath];
+        ? ['worktree', 'remove', '--force', '--', worktreePath] 
+        : ['worktree', 'remove', '--', worktreePath];
     await runGitCmd(args, repoRoot);
 }
 

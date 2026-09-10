@@ -4,6 +4,8 @@
  */
 import { expect } from 'chai';
 import '../helpers/mockVscode';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
     detectLanguage,
     extractSnippet,
@@ -11,7 +13,9 @@ import {
     HerdrReviewController,
     ReviewCommentItem,
     parseGitStatusPorcelain,
-    validateCheckpointRef
+    validateCheckpointRef,
+    cleanDiffCache,
+    getDiffCacheDir
 } from '../../reviewManager';
 
 describe('reviewManager Unit Tests', () => {
@@ -230,6 +234,7 @@ describe('reviewManager Unit Tests', () => {
             expect(parseGitStatusPorcelain('   \n  ', '/repo')).to.deep.equal([]);
         });
     });
+
     describe('validateCheckpointRef', () => {
         it('accepts valid git commit hashes and ref names', () => {
             expect(validateCheckpointRef('a1b2c3d4e5f6')).to.be.true;
@@ -257,5 +262,51 @@ describe('reviewManager Unit Tests', () => {
         });
     });
 
+    describe('cleanDiffCache', () => {
+        it('cleans files older than maxAgeMs and preserves fresh files', () => {
+            const cacheDir = getDiffCacheDir();
+            if (!fs.existsSync(cacheDir)) {
+                fs.mkdirSync(cacheDir, { recursive: true });
+            }
 
+            const oldFile = path.join(cacheDir, `test_old_${Date.now()}.tmp`);
+            const newFile = path.join(cacheDir, `test_new_${Date.now()}.tmp`);
+
+            fs.writeFileSync(oldFile, 'old content', 'utf8');
+            fs.writeFileSync(newFile, 'new content', 'utf8');
+
+            // Artificially change mtime of oldFile to 2 hours ago
+            const twoHoursAgo = (Date.now() - 7200000) / 1000;
+            fs.utimesSync(oldFile, twoHoursAgo, twoHoursAgo);
+
+            // Run cleanup with 1 hour threshold (3600000ms)
+            cleanDiffCache(3600000);
+
+            expect(fs.existsSync(oldFile)).to.be.false;
+            expect(fs.existsSync(newFile)).to.be.true;
+
+            // Clean up newFile
+            cleanDiffCache(0);
+            expect(fs.existsSync(newFile)).to.be.false;
+        });
+    });
+
+    describe('formatReviewFeedback (Adversarial Breakout Prevention)', () => {
+        it('safely wraps snippets containing triple backticks without breaking markdown fence', () => {
+            const comments: ReviewCommentItem[] = [{
+                id: 'c1',
+                filePath: 'src/exploit.ts',
+                fileName: 'exploit.ts',
+                startLine: 10,
+                endLine: 10,
+                commentText: 'Needs refactoring',
+                codeSnippet: 'const inject = "```";\nconsole.log(inject);',
+                createdAt: Date.now()
+            }];
+
+            const feedback = formatReviewFeedback(comments);
+            expect(feedback).to.include('````typescript');
+            expect(feedback).to.include('const inject = "```";');
+        });
+    });
 });

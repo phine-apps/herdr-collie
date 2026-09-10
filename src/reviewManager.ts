@@ -8,6 +8,7 @@ import * as os from 'os';
 import * as vscode from 'vscode';
 import * as l10n from '@vscode/l10n';
 import { runGitCmd } from './executors';
+import { formatCodeFence } from './formatters';
 
 export interface ReviewCommentItem {
     id: string;
@@ -155,9 +156,7 @@ export function formatReviewFeedback(
 
             if (comment.codeSnippet && comment.codeSnippet.trim()) {
                 const lang = detectLanguage(filePath);
-                lines.push(`\`\`\`${lang}`);
-                lines.push(comment.codeSnippet);
-                lines.push('```');
+                lines.push(formatCodeFence(comment.codeSnippet, lang));
             }
 
             // Format user's feedback as blockquote
@@ -400,10 +399,40 @@ export async function getRepoChangedFiles(repoRoot: string): Promise<ChangedFile
 }
 
 /**
+ * Resolves the temporary directory used for caching original HEAD files
+ */
+export function getDiffCacheDir(): string {
+    return path.join(os.tmpdir(), 'herdr-collie-diff-cache');
+}
+
+/**
+ * Cleans up temporary diff cache files older than maxAgeMs (default: 1 hour)
+ */
+export function cleanDiffCache(maxAgeMs = 3600000): void {
+    try {
+        const cacheDir = getDiffCacheDir();
+        if (!fs.existsSync(cacheDir)) return;
+        const now = Date.now();
+        const entries = fs.readdirSync(cacheDir);
+        for (const entry of entries) {
+            const fullPath = path.join(cacheDir, entry);
+            try {
+                const stats = fs.statSync(fullPath);
+                if (maxAgeMs === 0 || now - stats.mtimeMs > maxAgeMs) {
+                    fs.unlinkSync(fullPath);
+                }
+            } catch {}
+        }
+    } catch {}
+}
+
+/**
  * Prepares the HEAD version of a file in a temporary location for VS Code diffing
  */
 export async function prepareOriginalFileForDiff(repoRoot: string, filePath: string): Promise<string> {
-    const cacheDir = path.join(os.tmpdir(), 'herdr-collie-diff-cache');
+    cleanDiffCache(); // Purge stale temp files periodically
+
+    const cacheDir = getDiffCacheDir();
     if (!fs.existsSync(cacheDir)) {
         fs.mkdirSync(cacheDir, { recursive: true });
     }
@@ -411,8 +440,11 @@ export async function prepareOriginalFileForDiff(repoRoot: string, filePath: str
     const safeFileName = `${Date.now()}_${path.basename(filePath)}`;
     const tempFilePath = path.join(cacheDir, safeFileName);
 
+    // Normalize Windows backslashes to POSIX slashes for Git CLI compatibility
+    const posixPath = filePath.replace(/\\/g, '/');
+
     try {
-        const headContent = await runGitCmd(['show', `HEAD:${filePath}`], repoRoot);
+        const headContent = await runGitCmd(['show', `HEAD:${posixPath}`], repoRoot);
         fs.writeFileSync(tempFilePath, headContent, 'utf8');
     } catch {
         // If file is newly added or not in HEAD, write empty file

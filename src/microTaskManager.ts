@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import * as l10n from '@vscode/l10n';
 import * as path from 'path';
 import { detectLanguage, extractSnippet } from './reviewManager';
+import { formatCodeFence } from './formatters';
 import { HerdrSocketClient } from './socketClient';
 import { parseSnapshotAgents, parseSnapshotWorkspaces, parseAgents } from './parsers';
 import { execHerdr } from './executors';
@@ -147,9 +148,7 @@ export function formatDiagnosticPrompt(
         `- **Message:** ${diagnostic.message}`,
         '',
         '**Surrounding Code:**',
-        `\`\`\`${lang}`,
-        codeSnippet,
-        `\`\`\``,
+        formatCodeFence(codeSnippet, lang),
         '',
         `Please analyze this error and implement the fix directly in \`${fileRelPath}\`.`
     ].filter(line => line !== undefined && line !== '').join('\n');
@@ -171,9 +170,7 @@ export function formatTestPrompt(
             `Please help me fix failing test "${testName}" in \`${fileRelPath}\` (Line ${line}):`,
             '',
             '**Test Implementation:**',
-            `\`\`\`${lang}`,
-            codeSnippet,
-            `\`\`\``,
+            formatCodeFence(codeSnippet, lang),
             '',
             `Please inspect the test logic, identify why it might fail, and propose or implement the fix in \`${fileRelPath}\`.`
         ].join('\n');
@@ -183,9 +180,7 @@ export function formatTestPrompt(
         `Please help me generate additional edge-case tests for "${testName}" in \`${fileRelPath}\` (Line ${line}):`,
         '',
         '**Target Test / Suite:**',
-        `\`\`\`${lang}`,
-        codeSnippet,
-        `\`\`\``,
+        formatCodeFence(codeSnippet, lang),
         '',
         `Please analyze the inputs and assertions, and generate comprehensive edge-case tests (e.g. boundary conditions, invalid inputs, error handling) in \`${fileRelPath}\`.`
     ].join('\n');
@@ -208,9 +203,7 @@ export function formatTodoPrompt(
         `> **${todoType}**: ${todoText}`,
         '',
         '**Surrounding Context:**',
-        `\`\`\`${lang}`,
-        codeSnippet,
-        `\`\`\``,
+        formatCodeFence(codeSnippet, lang),
         '',
         `Please implement this task directly in \`${fileRelPath}\`.`
     ].join('\n');
@@ -232,9 +225,7 @@ export function formatContextTaskPrompt(
         `**Instruction:** ${instruction}`,
         '',
         '**Target Code:**',
-        `\`\`\`${lang}`,
-        codeSnippet,
-        `\`\`\``,
+        formatCodeFence(codeSnippet, lang),
         '',
         `Please implement the requested changes.`
     ].join('\n');
