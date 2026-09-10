@@ -58,4 +58,28 @@ describe('AgentHUD & Status Classification Unit Tests', () => {
             expect(r2.statusIcon).to.equal('🟡');
         });
     });
+    describe('escapeMarkdownTableCell', () => {
+        it('replaces newlines and carriage returns with spaces', () => {
+            const input = 'Agent\nLine 2\r\nLine 3';
+            expect(escapeMarkdownTableCell(input)).to.equal('Agent Line 2 Line 3');
+        });
+
+        it('escapes pipes to preserve markdown table formatting', () => {
+            const input = 'Worker | Injected | Cell';
+            expect(escapeMarkdownTableCell(input)).to.equal('Worker \\| Injected \\| Cell');
+        });
+
+        it('sanitizes backticks and brackets', () => {
+            const input = '`Dangerous` [Click](command:action)';
+            expect(escapeMarkdownTableCell(input)).to.equal("'Dangerous' Click(command:action)");
+        });
+
+        it('handles empty and whitespace strings gracefully', () => {
+            expect(escapeMarkdownTableCell('')).to.equal('-');
+            expect(escapeMarkdownTableCell('   ')).to.equal('-');
+            expect(escapeMarkdownTableCell(undefined as any)).to.equal('-');
+        });
+    });
+
+
 });

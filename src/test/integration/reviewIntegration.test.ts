@@ -175,20 +175,29 @@ describe('Integrated Review & Diff-to-Prompt Integration Tests (P3)', function()
         expect(checkpoints.length).to.be.greaterThan(0);
         expect(checkpoints[0].id).to.equal(cp!.id);
 
-        // Mutate working tree (e.g. agent makes bad edits and creates temp files)
+        // Mutate working tree (e.g. agent makes bad edits, creates temp files, and developer has .env)
         fs.writeFileSync(authFile, 'corrupted code\n', 'utf8');
         const badFile = path.join(tempRepoDir, 'bad.tmp');
         fs.writeFileSync(badFile, 'temporary garbage\n', 'utf8');
+        const envFile = path.join(tempRepoDir, '.env');
+        fs.writeFileSync(envFile, 'SECRET_API_KEY=supersecret\n', 'utf8');
 
         expect(fs.readFileSync(authFile, 'utf8')).to.equal('corrupted code\n');
         expect(fs.existsSync(badFile)).to.be.true;
+        expect(fs.existsSync(envFile)).to.be.true;
+
+        // Verify invalid checkpoint ref is rejected
+        const invalidSuccess = await rollbackReviewCheckpoint(tempRepoDir, '--dangerous-flag');
+        expect(invalidSuccess).to.be.false;
 
         // Rollback
         const success = await rollbackReviewCheckpoint(tempRepoDir, cp!.hash);
         expect(success).to.be.true;
 
-        // Verify restoration
+        // Verify restoration: auth.ts restored, bad.tmp removed, but critical .env preserved
         expect(fs.readFileSync(authFile, 'utf8')).to.equal('initial auth code\n');
         expect(fs.existsSync(badFile)).to.be.false;
+        expect(fs.existsSync(envFile)).to.be.true;
+        expect(fs.readFileSync(envFile, 'utf8')).to.equal('SECRET_API_KEY=supersecret\n');
     });
 });

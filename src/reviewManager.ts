@@ -490,12 +490,28 @@ export interface ReviewCheckpoint {
 }
 
 /**
+ * Validates checkpoint ref or commit hash to prevent flag/option injection and path traversal
+ */
+export function validateCheckpointRef(ref: string): boolean {
+    if (!ref || typeof ref !== 'string') return false;
+    const trimmed = ref.trim();
+    if (!trimmed || trimmed.startsWith('-')) return false;
+    return /^[a-zA-Z0-9_.\-\/]+$/.test(trimmed) && !trimmed.includes('..') && !trimmed.includes('//');
+}
+
+export interface RollbackOptions {
+    cleanUntracked?: boolean;
+    excludePatterns?: string[];
+}
+
+/**
  * Creates a git checkpoint before applying review feedback or running agent tasks
  */
 export async function createReviewCheckpoint(repoRoot: string, label: string = 'pre-review'): Promise<ReviewCheckpoint | null> {
     try {
         const timestamp = Date.now();
-        const checkpointId = `checkpoint_${timestamp}_${label}`;
+        const safeLabel = (label || 'pre-review').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const checkpointId = `checkpoint_${timestamp}_${safeLabel}`;
         
         // Try creating a stash commit if dirty
         let commitHash = '';
@@ -522,7 +538,7 @@ export async function createReviewCheckpoint(repoRoot: string, label: string = '
             id: checkpointId,
             hash: commitHash,
             timestamp,
-            description: label
+            description: safeLabel
         };
     } catch {
         return null;
@@ -532,10 +548,26 @@ export async function createReviewCheckpoint(repoRoot: string, label: string = '
 /**
  * Rolls back the repository state to a previously saved checkpoint
  */
-export async function rollbackReviewCheckpoint(repoRoot: string, checkpointHashOrRef: string): Promise<boolean> {
+export async function rollbackReviewCheckpoint(
+    repoRoot: string, 
+    checkpointHashOrRef: string,
+    options: RollbackOptions = {}
+): Promise<boolean> {
+    if (!validateCheckpointRef(checkpointHashOrRef)) {
+        return false;
+    }
+
     try {
         await runGitCmd(['checkout', checkpointHashOrRef, '--', '.'], repoRoot);
-        await runGitCmd(['clean', '-fd'], repoRoot);
+        if (options.cleanUntracked !== false) {
+            const cleanArgs = ['clean', '-fd', '-e', '.env*', '-e', '.vscode/*'];
+            if (options.excludePatterns && options.excludePatterns.length > 0) {
+                for (const pat of options.excludePatterns) {
+                    cleanArgs.push('-e', pat);
+                }
+            }
+            await runGitCmd(cleanArgs, repoRoot);
+        }
         return true;
     } catch {
         return false;

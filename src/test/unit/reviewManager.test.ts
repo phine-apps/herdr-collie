@@ -10,7 +10,8 @@ import {
     formatReviewFeedback,
     HerdrReviewController,
     ReviewCommentItem,
-    parseGitStatusPorcelain
+    parseGitStatusPorcelain,
+    validateCheckpointRef
 } from '../../reviewManager';
 
 describe('reviewManager Unit Tests', () => {
@@ -229,4 +230,32 @@ describe('reviewManager Unit Tests', () => {
             expect(parseGitStatusPorcelain('   \n  ', '/repo')).to.deep.equal([]);
         });
     });
+    describe('validateCheckpointRef', () => {
+        it('accepts valid git commit hashes and ref names', () => {
+            expect(validateCheckpointRef('a1b2c3d4e5f6')).to.be.true;
+            expect(validateCheckpointRef('refs/herdr/checkpoints/checkpoint_123_test')).to.be.true;
+            expect(validateCheckpointRef('HEAD')).to.be.true;
+            expect(validateCheckpointRef('main')).to.be.true;
+        });
+
+        it('rejects refs starting with a hyphen to prevent option injection', () => {
+            expect(validateCheckpointRef('-f')).to.be.false;
+            expect(validateCheckpointRef('--ours')).to.be.false;
+            expect(validateCheckpointRef('--patch')).to.be.false;
+        });
+
+        it('rejects empty, null, or whitespace-only inputs', () => {
+            expect(validateCheckpointRef('')).to.be.false;
+            expect(validateCheckpointRef('   ')).to.be.false;
+            expect(validateCheckpointRef(undefined as any)).to.be.false;
+        });
+
+        it('rejects path traversal or invalid characters', () => {
+            expect(validateCheckpointRef('../../etc/passwd')).to.be.false;
+            expect(validateCheckpointRef('refs/heads//main')).to.be.false;
+            expect(validateCheckpointRef('commit; rm -rf /')).to.be.false;
+        });
+    });
+
+
 });
