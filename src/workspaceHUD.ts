@@ -150,7 +150,7 @@ export class WorkspaceHUD implements vscode.Disposable {
     private updateHUDText(displayInfo?: WorkspaceDisplayInfo): void {
         if (!displayInfo) {
             this.statusBarItem.text = `$(window) Herdr`;
-            this.statusBarItem.tooltip = l10n.t('Herdr Collie: No workspace active\nClick to select workspace');
+            this.statusBarItem.tooltip = l10n.t("Herdr Collie: No workspace active\nClick to select workspace");
             return;
         }
 

@@ -196,6 +196,7 @@
   "No running agents found to receive review feedback": "レビュー指摘を受信できる実行中のエージェントが見つかりません",
   "Select agent to receive review feedback:": "レビュー指摘を送信するエージェントを選択:",
   "Submitted review ({0} comments) to '{1}'": "レビュー（{0}件の指摘）を '{1}' に送信しました",
+  "Submitted review ({0} comments)": "レビュー（{0}件の指摘）",
   "Cleared {0} pending review comments": "{0} 件の保留中レビューコメントを破棄しました",
   "Review: {0} comments pending (Click to submit to agent)": "レビュー: {0}件の保留中コメント（クリックでエージェントに送信）",
   "Open Diff": "差分を開く",
