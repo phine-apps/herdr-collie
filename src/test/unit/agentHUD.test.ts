@@ -68,9 +68,12 @@ describe('AgentHUD & Status Classification Unit Tests', () => {
             expect(escapeMarkdownTableCell(input)).to.equal('Agent Line 2 Line 3');
         });
 
-        it('escapes pipes to preserve markdown table formatting', () => {
+        it('escapes pipes and backslashes to preserve markdown table formatting', () => {
             const input = 'Worker | Injected | Cell';
             expect(escapeMarkdownTableCell(input)).to.equal('Worker \\| Injected \\| Cell');
+
+            const backslashInput = 'Worker \\ Subpath | Injected';
+            expect(escapeMarkdownTableCell(backslashInput)).to.equal('Worker \\\\ Subpath \\| Injected');
         });
 
         it('sanitizes backticks and brackets', () => {
