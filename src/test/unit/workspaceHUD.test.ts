@@ -16,6 +16,7 @@ describe('WorkspaceHUD Unit Tests', () => {
         mockClient = {
             isConnected: false,
             on: () => {},
+            off: () => {},
             getSnapshot: async () => null,
             dispose: () => {}
         };
@@ -87,6 +88,45 @@ describe('WorkspaceHUD Unit Tests', () => {
         expect(item.text).to.equal('$(folder-active) collie-core');
         expect(item.tooltip.value).to.include('**VS Code Window**: Matches active project');
 
+        hud.dispose();
+    });
+
+    it('cleans up socket event listeners on updateSocketClient and dispose', () => {
+        const registeredListeners: { [event: string]: Function[] } = {};
+        const removedListeners: { [event: string]: Function[] } = {};
+
+        const client1: any = {
+            on: (event: string, fn: Function) => {
+                registeredListeners[event] = registeredListeners[event] || [];
+                registeredListeners[event].push(fn);
+            },
+            off: (event: string, fn: Function) => {
+                removedListeners[event] = removedListeners[event] || [];
+                removedListeners[event].push(fn);
+            },
+            getSnapshot: async () => null,
+            isConnected: false
+        };
+
+        const client2: any = {
+            on: (event: string, fn: Function) => {},
+            off: () => {},
+            getSnapshot: async () => null,
+            isConnected: false
+        };
+
+        const hud = new WorkspaceHUD(client1 as unknown as HerdrSocketClient, () => 'default', async () => []);
+        expect(registeredListeners['connect']).to.have.lengthOf(1);
+        expect(registeredListeners['event']).to.have.lengthOf(1);
+        expect(registeredListeners['disconnect']).to.have.lengthOf(1);
+
+        // Update socket client
+        hud.updateSocketClient(client2 as unknown as HerdrSocketClient);
+        expect(removedListeners['connect']).to.have.lengthOf(1);
+        expect(removedListeners['event']).to.have.lengthOf(1);
+        expect(removedListeners['disconnect']).to.have.lengthOf(1);
+
+        // Dispose
         hud.dispose();
     });
 });

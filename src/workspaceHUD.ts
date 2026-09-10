@@ -21,6 +21,9 @@ export class WorkspaceHUD implements vscode.Disposable {
     private statusBarItem: vscode.StatusBarItem;
     private isDisposed = false;
     private refreshSequence = 0;
+    private connectListener?: () => void;
+    private eventListener?: () => void;
+    private disconnectListener?: () => void;
 
     constructor(
         private socketClient: HerdrSocketClient,
@@ -42,18 +45,40 @@ export class WorkspaceHUD implements vscode.Disposable {
     }
 
     public updateSocketClient(newSocketClient: HerdrSocketClient): void {
+        this.cleanupSocketEvents();
         this.socketClient = newSocketClient;
         this.setupSocketEvents(this.socketClient);
         this.refresh();
     }
 
     private setupSocketEvents(client: HerdrSocketClient): void {
-        client.on('connect', () => this.refresh());
-        client.on('event', () => this.refresh());
-        client.on('disconnect', () => {
+        this.connectListener = () => this.refresh();
+        this.eventListener = () => this.refresh();
+        this.disconnectListener = () => {
             this.updateHUDText(undefined);
-        });
+        };
+
+        client.on('connect', this.connectListener);
+        client.on('event', this.eventListener);
+        client.on('disconnect', this.disconnectListener);
         client.on('error', () => {});
+    }
+
+    private cleanupSocketEvents(): void {
+        if (this.socketClient && typeof (this.socketClient as any).off === 'function') {
+            if (this.connectListener) {
+                this.socketClient.off('connect', this.connectListener);
+                this.connectListener = undefined;
+            }
+            if (this.eventListener) {
+                this.socketClient.off('event', this.eventListener);
+                this.eventListener = undefined;
+            }
+            if (this.disconnectListener) {
+                this.socketClient.off('disconnect', this.disconnectListener);
+                this.disconnectListener = undefined;
+            }
+        }
     }
 
     /**
@@ -152,6 +177,7 @@ export class WorkspaceHUD implements vscode.Disposable {
 
     public dispose(): void {
         this.isDisposed = true;
+        this.cleanupSocketEvents();
         this.statusBarItem.dispose();
     }
 }

@@ -8,7 +8,6 @@ import { HerdrSocketClient } from './socketClient';
 import { ParsedAgent, AgentStatusType, parseSnapshotAgents, parseAgents } from './parsers';
 import { execHerdr } from './executors';
 
-
 /**
  * Safely escapes markdown characters and eliminates newlines for markdown table cells
  */
@@ -31,6 +30,9 @@ export class AgentHUD implements vscode.Disposable {
     private _onDidChangeBlockedCount = new vscode.EventEmitter<number>();
     public readonly onDidChangeBlockedCount = this._onDidChangeBlockedCount.event;
     private currentBlockedCount = 0;
+    private connectListener?: () => void;
+    private eventListener?: (event: any) => void;
+    private disconnectListener?: () => void;
 
     constructor(
         private socketClient: HerdrSocketClient,
@@ -50,21 +52,43 @@ export class AgentHUD implements vscode.Disposable {
     }
 
     public updateSocketClient(newSocketClient: HerdrSocketClient): void {
+        this.cleanupSocketEvents();
         this.socketClient = newSocketClient;
         this.setupSocketEvents(this.socketClient);
         this.refresh();
     }
 
     private setupSocketEvents(client: HerdrSocketClient): void {
-        client.on('connect', () => this.refresh());
-        client.on('event', (event: any) => {
+        this.connectListener = () => this.refresh();
+        this.eventListener = (event: any) => {
             this.handleSocketEvent(event);
             this.refresh();
-        });
-        client.on('disconnect', () => {
+        };
+        this.disconnectListener = () => {
             this.updateHUDText([]);
-        });
+        };
+
+        client.on('connect', this.connectListener);
+        client.on('event', this.eventListener);
+        client.on('disconnect', this.disconnectListener);
         client.on('error', () => {});
+    }
+
+    private cleanupSocketEvents(): void {
+        if (this.socketClient && typeof (this.socketClient as any).off === 'function') {
+            if (this.connectListener) {
+                this.socketClient.off('connect', this.connectListener);
+                this.connectListener = undefined;
+            }
+            if (this.eventListener) {
+                this.socketClient.off('event', this.eventListener);
+                this.eventListener = undefined;
+            }
+            if (this.disconnectListener) {
+                this.socketClient.off('disconnect', this.disconnectListener);
+                this.disconnectListener = undefined;
+            }
+        }
     }
 
     private handleSocketEvent(event: any): void {
@@ -465,6 +489,7 @@ export class AgentHUD implements vscode.Disposable {
 
     public dispose(): void {
         this.isDisposed = true;
+        this.cleanupSocketEvents();
         this._onDidChangeBlockedCount.dispose();
         this.statusBarItem.dispose();
     }

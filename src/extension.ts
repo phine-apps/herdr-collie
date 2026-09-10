@@ -1125,6 +1125,17 @@ export function activate(context: vscode.ExtensionContext) {
     };
     updateTreeViewDescriptions();
 
+    let refreshDebounceTimer: NodeJS.Timeout | null = null;
+    const scheduleRefreshAllProviders = (delayMs = 120) => {
+        if (refreshDebounceTimer) {
+            clearTimeout(refreshDebounceTimer);
+        }
+        refreshDebounceTimer = setTimeout(() => {
+            refreshDebounceTimer = null;
+            refreshAllProviders();
+        }, delayMs);
+    };
+
     refreshAllProviders = () => { 
         sessionProvider.refresh();
         workspaceProvider.refresh(); 
@@ -1134,21 +1145,35 @@ export function activate(context: vscode.ExtensionContext) {
     };
 
     const setupSocketListeners = (client: HerdrSocketClient) => {
-        client.on('connect', () => refreshAllProviders());
-        client.on('event', () => refreshAllProviders());
-        client.on('disconnect', () => refreshAllProviders());
+        client.on('connect', () => scheduleRefreshAllProviders(50));
+        client.on('event', () => scheduleRefreshAllProviders(120));
+        client.on('disconnect', () => scheduleRefreshAllProviders(50));
         client.on('error', () => {});
     };
     setupSocketListeners(socketClient);
     refreshAllProviders();
 
-    // Periodic status polling to guarantee real-time sync across UI tabs
+    // Background safety net polling (relaxed from 1.2s to 10s to prevent socket FD exhaustion)
     const statusPollInterval = setInterval(() => {
         if (socketClient && socketClient.isConnected) {
-            refreshAllProviders();
+            scheduleRefreshAllProviders(50);
         }
-    }, 1200);
-    context.subscriptions.push({ dispose: () => clearInterval(statusPollInterval) });
+    }, 10000);
+    context.subscriptions.push({ 
+        dispose: () => {
+            clearInterval(statusPollInterval);
+            if (refreshDebounceTimer) clearTimeout(refreshDebounceTimer);
+        } 
+    });
+
+    // Instant sync when user refocuses the VS Code window
+    context.subscriptions.push(
+        vscode.window.onDidChangeWindowState((state) => {
+            if (state.focused) {
+                scheduleRefreshAllProviders(50);
+            }
+        })
+    );
 
     let toggleAgentSortDisposable = vscode.commands.registerCommand('herdr-collie.toggleAgentSort', () => {
         const newOrder = agentProvider.toggleSortOrder();
