@@ -4,7 +4,7 @@
  */
 import { expect } from 'chai';
 import * as cp from 'child_process';
-import { execHerdr, runGitCmd, getSessionSocketPath, ensureSessionServerRunning, isCommandAvailable } from '../../executors';
+import { execHerdr, runGitCmd, getSessionSocketPath, ensureSessionServerRunning, isCommandAvailable, isProcessDescendantRunning } from '../../executors';
 
 describe('executors Unit Tests', () => {
     let originalExecFile: any;
@@ -191,6 +191,72 @@ describe('executors Unit Tests', () => {
             expect(available).to.be.true;
             expect(recordedCalls[0].file).to.equal('gh');
             expect(recordedCalls[0].args).to.deep.equal(['copilot', '--help']);
+        });
+    });
+
+    describe('isProcessDescendantRunning', () => {
+        it('returns false for invalid rootPid or empty process name', async () => {
+            expect(await isProcessDescendantRunning(0, 'herdr')).to.be.false;
+            expect(await isProcessDescendantRunning(-1, 'herdr')).to.be.false;
+            expect(await isProcessDescendantRunning(1234, '')).to.be.false;
+        });
+
+        it('returns false when ps command fails or returns error', async () => {
+            mockError = new Error('ps failed');
+            mockStdout = '';
+            const result = await isProcessDescendantRunning(1000, 'herdr');
+            expect(result).to.be.false;
+        });
+
+        it('returns true when target process is a direct child of rootPid', async () => {
+            mockStdout = [
+                'PPID   PID COMM',
+                '   1   100 /bin/zsh',
+                ' 100   101 /opt/homebrew/bin/herdr',
+                '   1   200 other-process'
+            ].join('\n');
+            const result = await isProcessDescendantRunning(100, 'herdr');
+            expect(result).to.be.true;
+        });
+
+        it('returns true when target process is a nested descendant of rootPid', async () => {
+            mockStdout = [
+                'PPID   PID COMM',
+                '   1   100 /bin/zsh',
+                ' 100   101 /bin/sh',
+                ' 101   102 herdr',
+                '   1   200 other-process'
+            ].join('\n');
+            const result = await isProcessDescendantRunning(100, 'herdr');
+            expect(result).to.be.true;
+        });
+
+        it('returns false when targetProcessName contains malicious or invalid characters', async () => {
+            expect(await isProcessDescendantRunning(100, "herdr'; rm -rf /;")).to.be.false;
+            expect(await isProcessDescendantRunning(100, "herdr$(whoami)")).to.be.false;
+            expect(await isProcessDescendantRunning(100, "herdr*")).to.be.false;
+        });
+
+        it('returns true when target process path contains spaces', async () => {
+            mockStdout = [
+                'PPID   PID COMM',
+                '   1   100 /bin/zsh',
+                ' 100   101 /opt/custom path/bin/herdr'
+            ].join('\n');
+            const result = await isProcessDescendantRunning(100, 'herdr');
+            expect(result).to.be.true;
+        });
+
+        it('returns false when target process is not a descendant of rootPid', async () => {
+            mockStdout = [
+                'PPID   PID COMM',
+                '   1   100 /bin/zsh',
+                ' 100   101 /bin/ls',
+                '   1   500 herdr',
+                ' 500   501 python'
+            ].join('\n');
+            const result = await isProcessDescendantRunning(100, 'herdr');
+            expect(result).to.be.false;
         });
     });
 });

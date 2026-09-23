@@ -4,6 +4,7 @@
  */
 import * as cp from 'child_process';
 import * as net from 'net';
+import * as path from 'path';
 import { getSessionSocketPath } from './socketClient';
 
 export { getSessionSocketPath };
@@ -197,3 +198,130 @@ export async function isCommandAvailable(binary: string, args?: string[]): Promi
         });
     });
 }
+
+/**
+ * Recursively checks if a process with name `targetProcessName` is running
+ * as `rootPid` itself or as a child/descendant of `rootPid`.
+ */
+export async function isProcessDescendantRunning(rootPid: number, targetProcessName: string): Promise<boolean> {
+    if (!rootPid || rootPid <= 0 || !targetProcessName || typeof rootPid !== 'number') {
+        return false;
+    }
+
+    // Sanitize targetProcessName to prevent command or script injection
+    const cleanProcessName = targetProcessName.trim();
+    if (!cleanProcessName || !/^[a-zA-Z0-9_.-]+$/.test(cleanProcessName)) {
+        return false;
+    }
+
+    return new Promise<boolean>((resolve) => {
+        if (process.platform === 'win32') {
+            const safeTarget = cleanProcessName.toLowerCase().replace(/\.exe$/, '');
+            const psScript = `
+$target = '${safeTarget}';
+$procs = Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name;
+$childrenMap = @{};
+$names = @{};
+foreach ($p in $procs) {
+    $ppid = $p.ParentProcessId;
+    if (-not $childrenMap.ContainsKey($ppid)) { $childrenMap[$ppid] = @(); }
+    $childrenMap[$ppid] += $p.ProcessId;
+    $names[$p.ProcessId] = $p.Name;
+}
+$queue = New-Object System.Collections.Generic.Queue[int];
+$queue.Enqueue(${rootPid});
+$visited = New-Object System.Collections.Generic.HashSet[int];
+$found = $false;
+while ($queue.Count -gt 0) {
+    $cur = $queue.Dequeue();
+    if ($visited.Contains($cur)) { continue; }
+    [void]$visited.Add($cur);
+    $n = $names[$cur];
+    if ($n) {
+        $base = [System.IO.Path]::GetFileNameWithoutExtension($n).ToLower();
+        if ($base -eq $target) { $found = $true; break; }
+    }
+    if ($childrenMap.ContainsKey($cur)) {
+        foreach ($c in $childrenMap[$cur]) { $queue.Enqueue($c); }
+    }
+}
+if ($found) { Write-Output '1'; }
+            `.trim();
+
+            cp.execFile('powershell', [
+                '-NoProfile',
+                '-NonInteractive',
+                '-Command',
+                psScript
+            ], { timeout: 3000 }, (err, stdout) => {
+                if (!err && stdout && stdout.trim() === '1') {
+                    resolve(true);
+                } else {
+                    resolve(false);
+                }
+            });
+            return;
+        }
+
+        // Unix (macOS / Linux): ps -A -o ppid,pid,comm
+        cp.execFile('ps', ['-A', '-o', 'ppid,pid,comm'], { timeout: 2000 }, (err, stdout) => {
+            if (err || !stdout) {
+                resolve(false);
+                return;
+            }
+
+            const childrenMap = new Map<number, number[]>();
+            const commMap = new Map<number, string>();
+
+            const lines = stdout.split('\n');
+            for (let i = 1; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
+                const match = line.match(/^(\d+)\s+(\d+)\s+(.+)$/);
+                if (match) {
+                    const ppid = parseInt(match[1], 10);
+                    const pid = parseInt(match[2], 10);
+                    const comm = match[3].trim();
+                    commMap.set(pid, comm);
+                    if (!childrenMap.has(ppid)) {
+                        childrenMap.set(ppid, []);
+                    }
+                    childrenMap.get(ppid)!.push(pid);
+                }
+            }
+
+            // Traverse rootPid and all descendants
+            const queue = [rootPid, ...(childrenMap.get(rootPid) || [])];
+            const visited = new Set<number>();
+
+            while (queue.length > 0) {
+                const curPid = queue.shift()!;
+                if (visited.has(curPid)) continue;
+                visited.add(curPid);
+
+                const comm = commMap.get(curPid) || '';
+                // Handle both full path (which may contain spaces) and tokenized arguments
+                const fullBasename = path.basename(comm);
+                const firstBasename = path.basename(comm.split(' ')[0]);
+                if (
+                    fullBasename === cleanProcessName || 
+                    fullBasename === `${cleanProcessName}.exe` ||
+                    firstBasename === cleanProcessName || 
+                    firstBasename === `${cleanProcessName}.exe`
+                ) {
+                    resolve(true);
+                    return;
+                }
+
+                const nextChildren = childrenMap.get(curPid);
+                if (nextChildren) {
+                    queue.push(...nextChildren);
+                }
+            }
+
+            resolve(false);
+        });
+    });
+}
+
+

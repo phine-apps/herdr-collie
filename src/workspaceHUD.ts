@@ -155,13 +155,14 @@ export class WorkspaceHUD implements vscode.Disposable {
         }
 
         const icon = displayInfo.isWorktree ? '$(git-branch)' : (displayInfo.isCurrentWindow ? '$(folder-active)' : '$(window)');
-        const label = displayInfo.branchName || displayInfo.label;
+        const label = displayInfo.branchName || displayInfo.displayLabel || displayInfo.label;
         this.statusBarItem.text = `${icon} ${label}`;
 
         // Build rich markdown tooltip
         const md = new vscode.MarkdownString();
         md.isTrusted = true;
-        md.appendMarkdown(`### ` + l10n.t('Herdr Workspace: {0} Active', `${displayInfo.label} $(check)`) + `\n\n`);
+        const wsTitle = displayInfo.displayLabel || displayInfo.label;
+        md.appendMarkdown(`### ` + l10n.t('Herdr Workspace: {0} Active', `${wsTitle} $(check)`) + `\n\n`);
         if (displayInfo.branchName) {
             md.appendMarkdown(`* ` + l10n.t('**Branch**: `{0}` (Git Worktree)', displayInfo.branchName) + `\n`);
         }

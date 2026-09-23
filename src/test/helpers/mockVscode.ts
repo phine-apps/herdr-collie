@@ -108,6 +108,18 @@ export class MockDataTransfer {
     }
 }
 
+export class MockUri {
+    constructor(public readonly fsPath: string) {}
+    get path(): string { return this.fsPath; }
+    get scheme(): string { return 'file'; }
+    static file(fsPath: string): MockUri {
+        return new MockUri(fsPath);
+    }
+    static joinPath(base: MockUri, ...pathSegments: string[]): MockUri {
+        return new MockUri(path.join(base.fsPath, ...pathSegments));
+    }
+}
+
 export class MockPosition {
     constructor(public readonly line: number, public readonly character: number) {}
 }
@@ -209,6 +221,7 @@ export const mockVscode = {
     },
     ThemeIcon: MockThemeIcon,
     ThemeColor: MockThemeColor,
+    Uri: MockUri,
     MarkdownString: MockMarkdownString,
     TreeItem: MockTreeItem,
     TreeItemCollapsibleState: {

@@ -401,18 +401,21 @@ detached
             expect(result[0]).to.deep.equal({
                 worktree: '/path/to/herdr-collie',
                 head: 'a1b2c3d4e5f6',
-                branch: 'main'
+                branch: 'main',
+                isMain: true
             });
             expect(result[1]).to.deep.equal({
                 worktree: '/path/to/herdr-collie-feat-auth',
                 head: '123456789abc',
                 branch: 'feat/auth',
-                locked: true
+                locked: true,
+                isMain: false
             });
             expect(result[2]).to.deep.equal({
                 worktree: '/path/to/herdr-collie-detached',
                 head: '987654321def',
-                detached: true
+                detached: true,
+                isMain: false
             });
         });
     });

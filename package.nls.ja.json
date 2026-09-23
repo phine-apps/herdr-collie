@@ -47,5 +47,6 @@
   "config.defaultAgentCommand": "Worktree で起動するデフォルトの AI エージェントコマンド (例: 'claude', 'agy', 'cursor', 'gh copilot')",
   "config.agentSortOrder": "エージェントサイドバーでの並び順: 'grouped' (ワークスペース別) または 'priority' (緊急度/対応待ち優先)",
   "config.codeLens.enable": "テスト定義や TODO コメントの上にインライン CodeLens を表示し、エージェントへの委派をトリガーできるようにする",
-  "config.quickFix.enable": "コンパイラ/リンターのエラー・警告の電球メニューに「Herdr エージェントに修正を依頼」クイックフィックスを表示する"
+  "config.quickFix.enable": "コンパイラ/リンターのエラー・警告の電球メニューに「Herdr エージェントに修正を依頼」クイックフィックスを表示する",
+  "config.autoRestoreTerminal": "VS Code 再起動時に復元されたターミナル上で Herdr を自動的に再開・再アタッチする"
 }

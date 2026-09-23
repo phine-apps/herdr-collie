@@ -1,3 +1,4 @@
+import * as path from 'path';
 import * as l10n from '@vscode/l10n';
 import { ParsedAgent, ParsedWorkspace, GitWorktreeInfo } from './parsers';
 
@@ -138,8 +139,110 @@ export function formatTerminalOutput(
     return `${header}${statusLine}\n${formatCodeFence(truncated)}\n\n${instruction}`;
 }
 
+export interface StatusThemeIcon {
+    id: string;
+    color?: string;
+}
+
+/**
+ * Maps rolled-up agent status to VS Code ThemeIcon id and color for workspaces:
+ * - 🔴 Blocked: circle-filled with charts.red
+ * - 🟡 Idle/Waiting: circle-filled with charts.yellow
+ * - 🟢 Working: circle-filled with charts.green
+ * - ⚪ Done/Other: circle-filled with charts.gray
+ * - None: circle-outline with disabledForeground (consistent alignment for inactive workspaces)
+ */
+export function getWorkspaceStatusThemeIcon(statusIcon?: string): StatusThemeIcon {
+    switch (statusIcon) {
+        case '🔴':
+            return { id: 'circle-filled', color: 'charts.red' };
+        case '🟡':
+            return { id: 'circle-filled', color: 'charts.yellow' };
+        case '🟢':
+            return { id: 'circle-filled', color: 'charts.green' };
+        case '⚪':
+            return { id: 'circle-filled', color: 'charts.gray' };
+        default:
+            return { id: 'circle-outline', color: 'disabledForeground' };
+    }
+}
+
+/**
+ * Maps agent status to VS Code ThemeIcon id and color:
+ * - Blocked / 🔴: circle-filled with charts.red
+ * - 🟡 Idle: circle-filled with charts.yellow
+ * - 🟢 Working: circle-filled with charts.green
+ * - ⚪ Done/Other: circle-filled with charts.gray
+ */
+export function getAgentStatusThemeIcon(statusIcon?: string, isBlocked?: boolean): StatusThemeIcon {
+    if (isBlocked || statusIcon === '🔴') {
+        return { id: 'circle-filled', color: 'charts.red' };
+    }
+    switch (statusIcon) {
+        case '🟡':
+            return { id: 'circle-filled', color: 'charts.yellow' };
+        case '🟢':
+            return { id: 'circle-filled', color: 'charts.green' };
+        case '⚪':
+            return { id: 'circle-filled', color: 'charts.gray' };
+        default:
+            return { id: 'circle-outline', color: 'disabledForeground' };
+    }
+}
+
+/**
+ * Maps rolled-up agent status to SVG icon filename in media/icons/:
+ * - 🔴 Blocked: status-red.svg
+ * - 🟡 Idle/Waiting: status-yellow.svg
+ * - 🟢 Working: status-green.svg
+ * - ⚪ Done/Other: status-gray.svg
+ * - None: status-none.svg
+ */
+export function getWorkspaceStatusIconFile(statusIcon?: string): string {
+    switch (statusIcon) {
+        case '🔴':
+            return 'status-red.svg';
+        case '🟡':
+            return 'status-yellow.svg';
+        case '🟢':
+            return 'status-green.svg';
+        case '⚪':
+            return 'status-gray.svg';
+        default:
+            return 'status-none.svg';
+    }
+}
+
+/**
+ * Maps agent status to SVG icon filename in media/icons/:
+ * - Blocked / 🔴: status-red.svg
+ * - 🟡 Idle: status-yellow.svg
+ * - 🟢 Working: status-green.svg
+ * - ⚪ Done/Other: status-gray.svg
+ * - None: status-none.svg
+ */
+export function getAgentStatusIconFile(statusIcon?: string, isBlocked?: boolean): string {
+    if (isBlocked || statusIcon === '🔴') {
+        return 'status-red.svg';
+    }
+    switch (statusIcon) {
+        case '🟡':
+            return 'status-yellow.svg';
+        case '🟢':
+            return 'status-green.svg';
+        case '⚪':
+            return 'status-gray.svg';
+        default:
+            return 'status-none.svg';
+    }
+}
+
 export interface WorkspaceDisplayInfo {
     label: string;
+    displayLabel: string;
+    statusIcon?: string;
+    statusThemeIcon: StatusThemeIcon;
+    statusIconFile: string;
     description: string;
     tooltip: string;
     iconId: string;
@@ -152,6 +255,35 @@ export interface WorkspaceDisplayInfo {
 }
 
 /**
+ * Returns the highest priority status icon for a group of agents, matching Herdr's attention priority:
+ * 1. 🔴 Blocked (attention needed immediately)
+ * 2. 🟡 Idle / Waiting (ready for prompt / finished task)
+ * 3. 🟢 Working (actively running)
+ * 4. ⚪ Done / other
+ */
+export function getAggregateStatusIcon(agents: ParsedAgent[]): string | undefined {
+    if (!agents || agents.length === 0) {
+        return undefined;
+    }
+    const priorityOrder: ('🔴' | '🟡' | '🟢' | '⚪')[] = ['🔴', '🟡', '🟢', '⚪'];
+    for (const icon of priorityOrder) {
+        if (agents.some(a => a.statusIcon === icon)) {
+            return icon;
+        }
+    }
+    return agents[0]?.statusIcon || '⚪';
+}
+
+function normalizePathForComparison(p?: string): string {
+    if (!p) return '';
+    let normalized = path.normalize(p).replace(/[\/\\]+$/, '');
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+        normalized = normalized.toLowerCase();
+    }
+    return normalized;
+}
+
+/**
  * Format workspace display information for TreeView, QuickPick, HUD, and tooltips
  */
 export function formatWorkspaceDisplay(
@@ -160,14 +292,16 @@ export function formatWorkspaceDisplay(
     agents: ParsedAgent[] = [],
     currentWorkspaceFolder?: string
 ): WorkspaceDisplayInfo {
-    const matchedWt = ws.cwd ? worktrees.find(w => w.worktree === ws.cwd) : undefined;
-    const isWorktree = Boolean(matchedWt);
+    const wsCwdNorm = normalizePathForComparison(ws.cwd);
+    const matchedWt = wsCwdNorm ? worktrees.find(w => normalizePathForComparison(w.worktree) === wsCwdNorm) : undefined;
+    const isWorktree = Boolean(matchedWt && !matchedWt.isMain);
     const branchName = matchedWt?.branch;
 
+    const curFolderNorm = normalizePathForComparison(currentWorkspaceFolder);
     const isCurrentWindow = Boolean(
-        currentWorkspaceFolder && 
-        ws.cwd && 
-        (ws.cwd === currentWorkspaceFolder || ws.cwd.startsWith(currentWorkspaceFolder))
+        curFolderNorm && 
+        wsCwdNorm && 
+        (wsCwdNorm === curFolderNorm || wsCwdNorm.startsWith(curFolderNorm))
     );
     const isFocused = Boolean(ws.focused);
 
@@ -175,8 +309,13 @@ export function formatWorkspaceDisplay(
     const wsAgents = agents.filter(a => 
         a.workspaceId === ws.id || 
         (a.workspaceLabel && a.workspaceLabel === ws.label) || 
-        (ws.cwd && a.workspaceCwd === ws.cwd)
+        (wsCwdNorm && a.workspaceCwd && normalizePathForComparison(a.workspaceCwd) === wsCwdNorm)
     );
+
+    // Roll-up agent status to workspace
+    const statusIcon = getAggregateStatusIcon(wsAgents);
+    const statusThemeIcon = getWorkspaceStatusThemeIcon(statusIcon);
+    const label = ws.label;
 
     // Build agent badges:
     // - If 1 or 2 agents: show names and icons: "claude 🟢, cursor 🟡"
@@ -224,7 +363,7 @@ export function formatWorkspaceDisplay(
         tooltipLines.push(`Path: ${ws.cwd}`);
     }
     if (branchName) {
-        tooltipLines.push(`Branch: ${branchName} (Git Worktree)`);
+        tooltipLines.push(`Branch: ${branchName}${isWorktree ? ' (Git Worktree)' : ''}`);
     }
     if (isCurrentWindow) {
         tooltipLines.push(`VS Code Window: Matches current open folder`);
@@ -250,8 +389,14 @@ export function formatWorkspaceDisplay(
         iconId = 'folder-active';
     }
 
+    const statusIconFile = getWorkspaceStatusIconFile(statusIcon);
+
     return {
-        label: ws.label,
+        label,
+        displayLabel: ws.label,
+        statusIcon,
+        statusThemeIcon,
+        statusIconFile,
         description,
         tooltip,
         iconId,
@@ -266,6 +411,9 @@ export function formatWorkspaceDisplay(
 
 export interface AgentDisplayInfo {
     label: string;
+    agentName: string;
+    statusThemeIcon: StatusThemeIcon;
+    statusIconFile: string;
     description: string;
     tooltip: string;
     displayLabel: string;
@@ -289,6 +437,8 @@ export function formatAgentDisplay(
 
     const agentName = agent.name && agent.name !== agent.id ? agent.name : 'Agent';
     const label = `${agent.statusIcon} ${agentName}`;
+    const statusThemeIcon = getAgentStatusThemeIcon(agent.statusIcon, agent.isBlocked);
+    const statusIconFile = getAgentStatusIconFile(agent.statusIcon, agent.isBlocked);
 
     let description = '';
     if (agent.isBlocked) {
@@ -316,6 +466,9 @@ export function formatAgentDisplay(
 
     return {
         label,
+        agentName,
+        statusThemeIcon,
+        statusIconFile,
         description,
         tooltip,
         displayLabel,
