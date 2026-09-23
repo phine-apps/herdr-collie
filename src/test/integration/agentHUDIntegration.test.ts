@@ -326,7 +326,8 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
                     event: 'agent.blocked',
                     pane_id: 'pane-1',
                     name: 'agy',
-                    agent_status: 'blocked'
+                    agent_status: 'blocked',
+                    workspace_id: 'ws-1'
                 }) + '\n');
             }
         }
@@ -341,6 +342,7 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
         expect(lastAttach.args[1]).to.be.true; // isAgent
         expect(lastAttach.args[2]).to.include('agy');
         expect(lastAttach.args[3]).to.equal('test-session');
+        expect(lastAttach.args[4]).to.equal('ws-1');
 
         hud.dispose();
         client.dispose();

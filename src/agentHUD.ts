@@ -98,6 +98,7 @@ export class AgentHUD implements vscode.Disposable {
         if (event.event === 'agent.blocked' || (event.agent_status && (event.agent_status === 'blocked' || event.agent_status === 'waiting'))) {
             const agentId = event.pane_id || event.id || event.agent;
             const agentName = event.name || agentId;
+            const workspaceId = event.workspace_id || event.workspaceId || event.workspace || this.previousAgentStates.get(agentId)?.workspaceId;
             if (agentId && !this.notifiedBlockedAgents.has(agentId)) {
                 this.notifiedBlockedAgents.add(agentId);
                 const config = vscode.workspace.getConfiguration('herdr-collie');
@@ -109,7 +110,8 @@ export class AgentHUD implements vscode.Disposable {
                         statusType: 'blocked',
                         statusIcon: '🔴',
                         isWorking: false,
-                        isBlocked: true
+                        isBlocked: true,
+                        workspaceId: workspaceId
                     });
                 }
             }
@@ -235,7 +237,7 @@ export class AgentHUD implements vscode.Disposable {
                 vscode.window.showInformationMessage(l10n.t("Sent reply to '{0}'", agent.name));
             }
         } else if (action === focusBtn) {
-            vscode.commands.executeCommand('herdr-collie.attachWorkspace', agent.id, true, this.getAgentDisplayName(agent), sessionName);
+            vscode.commands.executeCommand('herdr-collie.attachWorkspace', agent.id, true, this.getAgentDisplayName(agent), sessionName, agent.workspaceId);
         }
     }
 
@@ -263,7 +265,7 @@ export class AgentHUD implements vscode.Disposable {
         );
 
         if (action === focusBtn) {
-            vscode.commands.executeCommand('herdr-collie.attachWorkspace', agent.id, true, this.getAgentDisplayName(agent), sessionName);
+            vscode.commands.executeCommand('herdr-collie.attachWorkspace', agent.id, true, this.getAgentDisplayName(agent), sessionName, agent.workspaceId);
         }
     }
 
@@ -464,7 +466,7 @@ export class AgentHUD implements vscode.Disposable {
                     });
                 }
             } else {
-                vscode.commands.executeCommand('herdr-collie.attachWorkspace', targetAgent.id, true, this.getAgentDisplayName(targetAgent), sessionName);
+                vscode.commands.executeCommand('herdr-collie.attachWorkspace', targetAgent.id, true, this.getAgentDisplayName(targetAgent), sessionName, targetAgent.workspaceId);
             }
         });
 
@@ -477,7 +479,7 @@ export class AgentHUD implements vscode.Disposable {
             if (agent.isBlocked) {
                 await this.triggerBlockedNotification(agent);
             } else {
-                vscode.commands.executeCommand('herdr-collie.attachWorkspace', agent.id, true, this.getAgentDisplayName(agent), sessionName);
+                vscode.commands.executeCommand('herdr-collie.attachWorkspace', agent.id, true, this.getAgentDisplayName(agent), sessionName, agent.workspaceId);
             }
         });
 

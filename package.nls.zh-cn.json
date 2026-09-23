@@ -47,5 +47,6 @@
   "config.defaultAgentCommand": "在 worktree 中启动的默认 AI 智能体命令 (例如 'claude', 'agy', 'cursor', 'gh copilot')",
   "config.agentSortOrder": "智能体侧边栏中活跃智能体的排序方式: 'grouped' (按工作区) 或 'priority' (按紧急程度/等待队列)",
   "config.codeLens.enable": "在测试定义和 TODO 注释上方显示内联 CodeLens，以便触发智能体协助",
-  "config.quickFix.enable": "在编译器/代码检查诊断的灯泡菜单中显示“委派 Herdr 智能体修复”快速修复操作"
+  "config.quickFix.enable": "在编译器/代码检查诊断的灯泡菜单中显示“委派 Herdr 智能体修复”快速修复操作",
+  "config.autoRestoreTerminal": "在 VS Code 重启后自动在恢复的终端中恢复并重新附加 Herdr"
 }

@@ -43,6 +43,7 @@ export interface GitWorktreeInfo {
     detached?: boolean;
     locked?: boolean;
     prunable?: boolean;
+    isMain?: boolean;
 }
 
 export interface ParsedPane {
@@ -370,6 +371,7 @@ export function parseGitWorktrees(stdout: string): GitWorktreeInfo[] {
         }
 
         if (current.worktree && current.head) {
+            current.isMain = (worktrees.length === 0);
             worktrees.push(current as GitWorktreeInfo);
         }
     }

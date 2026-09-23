@@ -14,6 +14,11 @@ import {
     formatTerminalOutput,
     formatAgentDisplay,
     formatWorkspaceDisplay,
+    getAggregateStatusIcon,
+    getWorkspaceStatusThemeIcon,
+    getAgentStatusThemeIcon,
+    getWorkspaceStatusIconFile,
+    getAgentStatusIconFile,
     sortAgents,
     formatCodeFence
 } from '../../formatters';
@@ -165,6 +170,9 @@ describe('formatters Unit Tests', () => {
 
             const result = formatAgentDisplay(agent);
             expect(result.label).to.equal('🟡 cursor');
+            expect(result.agentName).to.equal('cursor');
+            expect(result.statusThemeIcon).to.deep.equal({ id: 'circle-filled', color: 'charts.yellow' });
+            expect(result.statusIconFile).to.equal('status-yellow.svg');
             expect(result.description).to.equal('herdr-collie');
             expect(result.displayLabel).to.equal('cursor [herdr-collie]');
             expect(result.tooltip).to.include('Agent: cursor');
@@ -220,6 +228,7 @@ describe('formatters Unit Tests', () => {
 
             const result = formatAgentDisplay(agent);
             expect(result.label).to.equal('🔴 claude');
+            expect(result.statusIconFile).to.equal('status-red.svg');
             expect(result.description).to.equal('Input Needed • herdr-collie');
             expect(result.tooltip).to.include('Status: blocked');
             expect(result.tooltip).to.include('⚠️ Waiting for user confirmation');
@@ -266,6 +275,7 @@ describe('formatters Unit Tests', () => {
 
             const result = formatAgentDisplay(agent);
             expect(result.label).to.equal('🟢 Agent');
+            expect(result.statusIconFile).to.equal('status-green.svg');
             expect(result.description).to.equal('Workspace w9');
             expect(result.tooltip).to.include('Workspace: Workspace w9');
             expect(result.tooltip).to.include('Status: working');
@@ -284,6 +294,7 @@ describe('formatters Unit Tests', () => {
 
             const result = formatAgentDisplay(agent);
             expect(result.label).to.equal('🟡 Agent');
+            expect(result.statusIconFile).to.equal('status-yellow.svg');
             expect(result.description).to.equal('(orphan-1)');
             expect(result.tooltip).to.include('Workspace: Unknown');
         });
@@ -303,6 +314,7 @@ describe('formatters Unit Tests', () => {
             expect(result.isFocused).to.be.false;
             expect(result.isWorktree).to.be.false;
             expect(result.iconId).to.equal('window');
+            expect(result.statusIconFile).to.equal('status-none.svg');
             expect(result.description).to.equal('/path/to/main-app');
             expect(result.tooltip).to.include('Workspace: main-app');
             expect(result.tooltip).to.include('Path: /path/to/main-app');
@@ -350,6 +362,38 @@ describe('formatters Unit Tests', () => {
             expect(result.description).to.equal('(feat/auth)');
             expect(result.tooltip).to.include('Branch: feat/auth (Git Worktree)');
             expect(result.tooltip).to.include('(Active in Herdr)');
+        });
+
+        it('does not classify main repository root as worktree workspace', () => {
+            const ws: ParsedWorkspace = {
+                id: 'ws-main',
+                label: 'rich-markdown-diff',
+                cwd: '/path/to/main-repo',
+                focused: false
+            };
+
+            const worktrees: GitWorktreeInfo[] = [
+                {
+                    worktree: '/path/to/main-repo',
+                    head: '580a5af',
+                    branch: 'release/v1.6.0',
+                    isMain: true
+                },
+                {
+                    worktree: '/path/to/main-repo.worktrees/feature',
+                    head: 'e1367f3',
+                    branch: 'feature',
+                    isMain: false
+                }
+            ];
+
+            const result = formatWorkspaceDisplay(ws, worktrees);
+            expect(result.label).to.equal('rich-markdown-diff');
+            expect(result.isWorktree).to.be.false;
+            expect(result.branchName).to.equal('release/v1.6.0');
+            expect(result.iconId).to.equal('window');
+            expect(result.tooltip).to.include('Branch: release/v1.6.0');
+            expect(result.tooltip).to.not.include('(Git Worktree)');
         });
 
         it('matches current VS Code window folder and assigns folder-active icon', () => {
@@ -400,6 +444,11 @@ describe('formatters Unit Tests', () => {
 
             const result = formatWorkspaceDisplay(ws, [], agents);
             expect(result.matchedAgents).to.have.lengthOf(2);
+            expect(result.label).to.equal('swarm-hub');
+            expect(result.displayLabel).to.equal('swarm-hub');
+            expect(result.statusIcon).to.equal('🔴');
+            expect(result.statusThemeIcon).to.deep.equal({ id: 'circle-filled', color: 'charts.red' });
+            expect(result.statusIconFile).to.equal('status-red.svg');
             expect(result.agentBadges).to.equal('claude 🟢, helper 🔴');
             expect(result.description).to.equal('[claude 🟢, helper 🔴]');
             expect(result.tooltip).to.include('Active Agents (2):');
@@ -460,9 +509,233 @@ describe('formatters Unit Tests', () => {
 
             const result = formatWorkspaceDisplay(ws, [], agents);
             expect(result.matchedAgents).to.have.lengthOf(4);
+            expect(result.label).to.equal('swarm-hub');
+            expect(result.displayLabel).to.equal('swarm-hub');
+            expect(result.statusIcon).to.equal('🔴');
+            expect(result.statusThemeIcon).to.deep.equal({ id: 'circle-filled', color: 'charts.red' });
+            expect(result.statusIconFile).to.equal('status-red.svg');
             expect(result.agentBadges).to.equal('🔴 1, 🟢 2, 🟡 1');
             expect(result.description).to.equal('[🔴 1, 🟢 2, 🟡 1]');
             expect(result.tooltip).to.include('Active Agents (4):');
+        });
+
+        it('sets yellow statusThemeIcon when idle/waiting agent is present and no agent is blocked', () => {
+            const ws: ParsedWorkspace = {
+                id: 'ws-idle',
+                label: 'idle-project',
+                cwd: '/path/to/idle',
+                focused: false
+            };
+
+            const agents: ParsedAgent[] = [
+                {
+                    id: 'pane-1',
+                    name: 'claude',
+                    status: 'running',
+                    statusType: 'working',
+                    statusIcon: '🟢',
+                    isWorking: true,
+                    isBlocked: false,
+                    workspaceId: 'ws-idle'
+                },
+                {
+                    id: 'pane-2',
+                    name: 'cursor',
+                    status: 'idle',
+                    statusType: 'idle',
+                    statusIcon: '🟡',
+                    isWorking: false,
+                    isBlocked: false,
+                    workspaceId: 'ws-idle'
+                }
+            ];
+
+            const result = formatWorkspaceDisplay(ws, [], agents);
+            expect(result.label).to.equal('idle-project');
+            expect(result.displayLabel).to.equal('idle-project');
+            expect(result.statusIcon).to.equal('🟡');
+            expect(result.statusThemeIcon).to.deep.equal({ id: 'circle-filled', color: 'charts.yellow' });
+            expect(result.statusIconFile).to.equal('status-yellow.svg');
+        });
+
+        it('sets green statusThemeIcon when only working agents are present', () => {
+            const ws: ParsedWorkspace = {
+                id: 'ws-working',
+                label: 'working-project',
+                cwd: '/path/to/working',
+                focused: false
+            };
+
+            const agents: ParsedAgent[] = [
+                {
+                    id: 'pane-1',
+                    name: 'claude',
+                    status: 'running',
+                    statusType: 'working',
+                    statusIcon: '🟢',
+                    isWorking: true,
+                    isBlocked: false,
+                    workspaceId: 'ws-working'
+                }
+            ];
+
+            const result = formatWorkspaceDisplay(ws, [], agents);
+            expect(result.label).to.equal('working-project');
+            expect(result.displayLabel).to.equal('working-project');
+            expect(result.statusIcon).to.equal('🟢');
+            expect(result.statusThemeIcon).to.deep.equal({ id: 'circle-filled', color: 'charts.green' });
+            expect(result.statusIconFile).to.equal('status-green.svg');
+        });
+
+        it('sets circle-outline statusThemeIcon when no agents exist', () => {
+            const ws: ParsedWorkspace = {
+                id: 'ws-empty',
+                label: 'empty-project',
+                cwd: '/path/to/empty',
+                focused: false
+            };
+
+            const result = formatWorkspaceDisplay(ws);
+            expect(result.label).to.equal('empty-project');
+            expect(result.statusIcon).to.be.undefined;
+            expect(result.statusThemeIcon).to.deep.equal({ id: 'circle-outline', color: 'disabledForeground' });
+            expect(result.statusIconFile).to.equal('status-none.svg');
+        });
+    });
+
+    describe('getAggregateStatusIcon', () => {
+        it('returns undefined for empty agent list', () => {
+            expect(getAggregateStatusIcon([])).to.be.undefined;
+        });
+
+        it('prioritizes 🔴 Blocked over all other states', () => {
+            const agents = [
+                { statusIcon: '🟢' },
+                { statusIcon: '🔴' },
+                { statusIcon: '🟡' },
+                { statusIcon: '⚪' }
+            ] as ParsedAgent[];
+            expect(getAggregateStatusIcon(agents)).to.equal('🔴');
+        });
+
+        it('prioritizes 🟡 Idle/Waiting over 🟢 Working and ⚪ Done', () => {
+            const agents = [
+                { statusIcon: '🟢' },
+                { statusIcon: '🟡' },
+                { statusIcon: '⚪' }
+            ] as ParsedAgent[];
+            expect(getAggregateStatusIcon(agents)).to.equal('🟡');
+        });
+
+        it('prioritizes 🟢 Working over ⚪ Done', () => {
+            const agents = [
+                { statusIcon: '⚪' },
+                { statusIcon: '🟢' }
+            ] as ParsedAgent[];
+            expect(getAggregateStatusIcon(agents)).to.equal('🟢');
+        });
+
+        it('returns ⚪ when only done/other agents exist', () => {
+            const agents = [
+                { statusIcon: '⚪' }
+            ] as ParsedAgent[];
+            expect(getAggregateStatusIcon(agents)).to.equal('⚪');
+        });
+    });
+
+    describe('getWorkspaceStatusThemeIcon', () => {
+        it('maps 🔴 to charts.red circle-filled', () => {
+            expect(getWorkspaceStatusThemeIcon('🔴')).to.deep.equal({ id: 'circle-filled', color: 'charts.red' });
+        });
+
+        it('maps 🟡 to charts.yellow circle-filled', () => {
+            expect(getWorkspaceStatusThemeIcon('🟡')).to.deep.equal({ id: 'circle-filled', color: 'charts.yellow' });
+        });
+
+        it('maps 🟢 to charts.green circle-filled', () => {
+            expect(getWorkspaceStatusThemeIcon('🟢')).to.deep.equal({ id: 'circle-filled', color: 'charts.green' });
+        });
+
+        it('maps ⚪ to charts.gray circle-filled', () => {
+            expect(getWorkspaceStatusThemeIcon('⚪')).to.deep.equal({ id: 'circle-filled', color: 'charts.gray' });
+        });
+
+        it('maps undefined (no agents) to disabledForeground circle-outline', () => {
+            expect(getWorkspaceStatusThemeIcon(undefined)).to.deep.equal({ id: 'circle-outline', color: 'disabledForeground' });
+        });
+    });
+
+    describe('getAgentStatusThemeIcon', () => {
+        it('prioritizes blocked flag to charts.red circle-filled', () => {
+            expect(getAgentStatusThemeIcon('🟢', true)).to.deep.equal({ id: 'circle-filled', color: 'charts.red' });
+        });
+
+        it('maps 🔴 to charts.red circle-filled', () => {
+            expect(getAgentStatusThemeIcon('🔴', false)).to.deep.equal({ id: 'circle-filled', color: 'charts.red' });
+        });
+
+        it('maps 🟡 to charts.yellow circle-filled', () => {
+            expect(getAgentStatusThemeIcon('🟡', false)).to.deep.equal({ id: 'circle-filled', color: 'charts.yellow' });
+        });
+
+        it('maps 🟢 to charts.green circle-filled', () => {
+            expect(getAgentStatusThemeIcon('🟢', false)).to.deep.equal({ id: 'circle-filled', color: 'charts.green' });
+        });
+
+        it('maps ⚪ to charts.gray circle-filled', () => {
+            expect(getAgentStatusThemeIcon('⚪', false)).to.deep.equal({ id: 'circle-filled', color: 'charts.gray' });
+        });
+
+        it('maps undefined to disabledForeground circle-outline', () => {
+            expect(getAgentStatusThemeIcon(undefined, false)).to.deep.equal({ id: 'circle-outline', color: 'disabledForeground' });
+        });
+    });
+
+    describe('getWorkspaceStatusIconFile', () => {
+        it('maps 🔴 to status-red.svg', () => {
+            expect(getWorkspaceStatusIconFile('🔴')).to.equal('status-red.svg');
+        });
+
+        it('maps 🟡 to status-yellow.svg', () => {
+            expect(getWorkspaceStatusIconFile('🟡')).to.equal('status-yellow.svg');
+        });
+
+        it('maps 🟢 to status-green.svg', () => {
+            expect(getWorkspaceStatusIconFile('🟢')).to.equal('status-green.svg');
+        });
+
+        it('maps ⚪ to status-gray.svg', () => {
+            expect(getWorkspaceStatusIconFile('⚪')).to.equal('status-gray.svg');
+        });
+
+        it('maps undefined (no agents) to status-none.svg', () => {
+            expect(getWorkspaceStatusIconFile(undefined)).to.equal('status-none.svg');
+        });
+    });
+
+    describe('getAgentStatusIconFile', () => {
+        it('prioritizes blocked flag to status-red.svg', () => {
+            expect(getAgentStatusIconFile('🟢', true)).to.equal('status-red.svg');
+        });
+
+        it('maps 🔴 to status-red.svg', () => {
+            expect(getAgentStatusIconFile('🔴', false)).to.equal('status-red.svg');
+        });
+
+        it('maps 🟡 to status-yellow.svg', () => {
+            expect(getAgentStatusIconFile('🟡', false)).to.equal('status-yellow.svg');
+        });
+
+        it('maps 🟢 to status-green.svg', () => {
+            expect(getAgentStatusIconFile('🟢', false)).to.equal('status-green.svg');
+        });
+
+        it('maps ⚪ to status-gray.svg', () => {
+            expect(getAgentStatusIconFile('⚪', false)).to.equal('status-gray.svg');
+        });
+
+        it('maps undefined to status-none.svg', () => {
+            expect(getAgentStatusIconFile(undefined, false)).to.equal('status-none.svg');
         });
     });
 
