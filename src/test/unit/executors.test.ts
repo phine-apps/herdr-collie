@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 import { expect } from 'chai';
-import * as cp from 'child_process';
+import cp = require('child_process');
 import { execHerdr, runGitCmd, getSessionSocketPath, ensureSessionServerRunning, isCommandAvailable, isProcessDescendantRunning } from '../../executors';
 
 describe('executors Unit Tests', () => {

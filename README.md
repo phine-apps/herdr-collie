@@ -189,3 +189,11 @@ Herdr Collie provides conflict-free 2-stroke chord shortcuts prefixed by `Ctrl +
     Enables `🛠️ Delegate Fix to Herdr Agent` in VS Code's Quick-Fix lightbulb menu (`Cmd+.`).
   - `herdr-collie.hideHerdrSidebar` (default: `true`):
     Automatically hides Herdr's built-in TUI sidebar in the integrated terminal to maximize screen area.
+
+---
+
+## Recommended Extensions
+
+If you enjoy **herdr-collie**, you might also like:
+
+https://github.com/phine-apps/mux-prompter

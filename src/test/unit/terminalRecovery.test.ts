@@ -2,8 +2,9 @@
  * Copyright (c) 2026 Herdr Collie Authors
  * Licensed under the MIT License.
  */
+import '../helpers/mockVscode';
 import { expect } from 'chai';
-import * as cp from 'child_process';
+import cp = require('child_process');
 import { isHerdrRunningInTerminal } from '../../extension';
 
 describe('Terminal Recovery & Health Unit Tests', () => {
