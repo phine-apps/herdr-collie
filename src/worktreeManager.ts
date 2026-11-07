@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import { runGitCmd, execHerdr, isCommandAvailable } from './executors';
 import { parseGitWorktrees, GitWorktreeInfo, parsePanes, parseWorkspaces } from './parsers';
 import { HerdrSocketClient } from './socketClient';
+import { formatCodeFence } from './formatters';
 
 let vscode: typeof vscodeTypes;
 try {
@@ -209,6 +210,164 @@ export async function mergeWorktreeBranch(repoRoot: string, branchName: string):
     return await runGitCmd(['merge', '--', branchName], repoRoot);
 }
 
+export interface WorktreeMergeVerification {
+    canMerge: boolean;
+    hasUncommittedWorktreeChanges: boolean;
+    uncommittedFiles: string[];
+    hasConflicts: boolean;
+    conflictingFiles: string[];
+    targetBranch: string;
+    errorDetails?: string;
+}
+
+/**
+ * Extracts conflicting file names from git merge / merge-tree output
+ */
+export function parseMergeConflictFiles(output: string): string[] {
+    if (!output) return [];
+    const files = new Set<string>();
+    const lines = output.split(/\r?\n/);
+    for (const line of lines) {
+        const match = line.match(/CONFLICT\s*\([^)]+\):\s*Merge conflict in\s+(.+)$/i);
+        if (match && match[1]) {
+            files.add(match[1].trim());
+        }
+    }
+    return Array.from(files);
+}
+
+/**
+ * Performs non-destructive pre-merge verification on a worktree branch (checks uncommitted worktree files and merge conflicts)
+ */
+export async function verifyWorktreeMerge(
+    repoRoot: string,
+    branchName: string,
+    worktreePath?: string
+): Promise<WorktreeMergeVerification> {
+    const validationError = validateBranchName(branchName);
+    if (validationError) {
+        throw new Error(validationError);
+    }
+
+    const targetBranch = await getCurrentGitBranch(repoRoot);
+    let resolvedWtPath = worktreePath;
+
+    if (!resolvedWtPath) {
+        const worktrees = await listGitWorktrees(repoRoot);
+        const matched = worktrees.find(w => w.branch === branchName);
+        if (matched) {
+            resolvedWtPath = matched.worktree;
+        }
+    }
+
+    const uncommittedFiles: string[] = [];
+    if (resolvedWtPath && fs.existsSync(resolvedWtPath)) {
+        try {
+            const statusOut = await runGitCmd(['status', '--porcelain', '-uall'], resolvedWtPath);
+            const statusLines = statusOut.split(/\r?\n/).filter(Boolean);
+            for (const line of statusLines) {
+                if (line.length >= 3) {
+                    uncommittedFiles.push(line.substring(3).trim());
+                }
+            }
+        } catch {
+            // Ignore worktree status inspection failure
+        }
+    }
+
+    let hasConflicts = false;
+    let conflictingFiles: string[] = [];
+    let errorDetails: string | undefined;
+
+    try {
+        await runGitCmd(['merge-tree', '--write-tree', 'HEAD', branchName], repoRoot);
+    } catch (err: any) {
+        const msg = String(err?.message || err || '');
+        if (/CONFLICT|Merge conflict/i.test(msg)) {
+            hasConflicts = true;
+            conflictingFiles = parseMergeConflictFiles(msg);
+            errorDetails = msg.trim();
+        } else {
+            // Fallback for older Git versions without `merge-tree --write-tree`
+            try {
+                const mergeBase = (await runGitCmd(['merge-base', 'HEAD', branchName], repoRoot)).trim();
+                if (mergeBase) {
+                    const classicOut = await runGitCmd(['merge-tree', mergeBase, 'HEAD', branchName], repoRoot);
+                    if (classicOut.includes('<<<<<<<') || classicOut.includes('changed in both')) {
+                        hasConflicts = true;
+                        errorDetails = 'Merge conflict detected between HEAD and ' + branchName;
+                    }
+                }
+            } catch {
+                // Ignore fallback failure
+            }
+        }
+    }
+
+    const hasUncommittedWorktreeChanges = uncommittedFiles.length > 0;
+    return {
+        canMerge: !hasUncommittedWorktreeChanges && !hasConflicts,
+        hasUncommittedWorktreeChanges,
+        uncommittedFiles,
+        hasConflicts,
+        conflictingFiles,
+        targetBranch,
+        errorDetails
+    };
+}
+
+/**
+ * Formats a structured closed-loop prompt instructing the worktree agent to resolve merge blockers
+ */
+export function formatMergeConflictPrompt(
+    branchName: string,
+    targetBranch: string,
+    verification: {
+        conflictingFiles?: string[];
+        uncommittedFiles?: string[];
+        errorDetails?: string;
+    }
+): string {
+    const lines: string[] = [
+        `## ⚠️ Pre-Merge Verification Failed (\`${branchName}\` → \`${targetBranch}\`)`,
+        '',
+        `We attempted to merge worktree branch \`${branchName}\` into \`${targetBranch}\`, but pre-merge verification detected blockers:`
+    ];
+
+    if (verification.uncommittedFiles && verification.uncommittedFiles.length > 0) {
+        lines.push('');
+        lines.push(`### 1. Uncommitted Changes in Worktree (${verification.uncommittedFiles.length} file(s))`);
+        lines.push('Please review, test, and commit (or clean up) the following uncommitted files in your worktree:');
+        for (const f of verification.uncommittedFiles) {
+            lines.push(`- \`${f}\``);
+        }
+    }
+
+    if ((verification.conflictingFiles && verification.conflictingFiles.length > 0) || verification.errorDetails) {
+        lines.push('');
+        lines.push(`### 2. Merge Conflicts with \`${targetBranch}\``);
+        if (verification.conflictingFiles && verification.conflictingFiles.length > 0) {
+            lines.push('Conflicting files:');
+            for (const f of verification.conflictingFiles) {
+                lines.push(`- \`${f}\``);
+            }
+        }
+        if (verification.errorDetails) {
+            lines.push('');
+            lines.push('Git Conflict Details:');
+            lines.push(formatCodeFence(verification.errorDetails, 'text'));
+        }
+    }
+
+    lines.push('');
+    lines.push('### 🛠️ Required Action');
+    lines.push(`1. Commit or stash any pending work on \`${branchName}\`.`);
+    lines.push(`2. Merge or rebase \`${targetBranch}\` into \`${branchName}\` and resolve all conflicts cleanly.`);
+    lines.push(`3. Run the test suite/build to verify there are no regressions, then commit the resolved state.`);
+
+    return lines.join('\n');
+}
+
 /**
  * Resolves the destination directory for a new worktree
  */
@@ -224,6 +383,33 @@ export function resolveWorktreePath(
         return path.join(repoRoot, '.worktrees', slug);
     }
     return path.join(path.dirname(repoRoot), `${repoBasename}-${slug}`);
+}
+
+/**
+ * Validates that a workspace/worktree directory exists on disk and opens it in a VS Code window
+ */
+export async function openWorkspaceFolderInWindow(
+    targetPath: string | undefined,
+    forceNewWindow: boolean = true
+): Promise<boolean> {
+    if (!targetPath || !targetPath.trim()) {
+        return false;
+    }
+
+    const resolvedPath = path.resolve(targetPath.trim());
+    try {
+        if (!fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isDirectory()) {
+            return false;
+        }
+    } catch {
+        return false;
+    }
+
+    if (vscode && vscode.commands && vscode.Uri) {
+        await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(resolvedPath), { forceNewWindow });
+        return true;
+    }
+    return false;
 }
 
 /**

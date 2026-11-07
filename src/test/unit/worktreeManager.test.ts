@@ -2,8 +2,12 @@
  * Copyright (c) 2026 Herdr Collie Authors
  * Licensed under the MIT License.
  */
+import '../helpers/mockVscode';
+import { mockState, resetMockState } from '../helpers/mockVscode';
 import { expect } from 'chai';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as cp from 'child_process';
 import { 
     sanitizeBranchSlug, 
@@ -12,13 +16,17 @@ import {
     SUPPORTED_AGENT_DEFINITIONS,
     quoteForShell,
     buildAgentLaunchCommand,
-    validateBranchName
+    validateBranchName,
+    parseMergeConflictFiles,
+    formatMergeConflictPrompt,
+    openWorkspaceFolderInWindow
 } from '../../worktreeManager';
 
 describe('worktreeManager Unit Tests', () => {
     let originalExecFile: any;
 
     beforeEach(() => {
+        resetMockState();
         originalExecFile = cp.execFile;
     });
 
@@ -157,6 +165,57 @@ describe('worktreeManager Unit Tests', () => {
             expect(validateBranchName('fix/issue_42')).to.be.null;
             expect(validateBranchName('main')).to.be.null;
             expect(validateBranchName('release-1.0.0')).to.be.null;
+        });
+    });
+
+    describe('Pre-Merge Verification & Conflict Prompt Formatting', () => {
+        it('extracts conflicting file paths from git merge-tree / merge output', () => {
+            const sampleOutput = [
+                'Auto-merging src/extension.ts',
+                'CONFLICT (content): Merge conflict in src/extension.ts',
+                'CONFLICT (add/add): Merge conflict in src/agentHUD.ts',
+                'Automatic merge failed; fix conflicts and then commit the result.'
+            ].join('\n');
+
+            const files = parseMergeConflictFiles(sampleOutput);
+            expect(files).to.deep.equal(['src/extension.ts', 'src/agentHUD.ts']);
+        });
+
+        it('formats structured conflict resolution prompt for worktree agent', () => {
+            const prompt = formatMergeConflictPrompt('feat/swarm-ui', 'main', {
+                uncommittedFiles: ['src/temp.ts'],
+                conflictingFiles: ['src/extension.ts'],
+                errorDetails: 'CONFLICT (content): Merge conflict in src/extension.ts'
+            });
+
+            expect(prompt).to.include('## ⚠️ Pre-Merge Verification Failed (`feat/swarm-ui` → `main`)');
+            expect(prompt).to.include('`src/temp.ts`');
+            expect(prompt).to.include('`src/extension.ts`');
+            expect(prompt).to.include('Merge or rebase `main` into `feat/swarm-ui`');
+        });
+    });
+
+    describe('openWorkspaceFolderInWindow', () => {
+        it('returns false when targetPath is empty or does not exist on disk', async () => {
+            expect(await openWorkspaceFolderInWindow('')).to.be.false;
+            expect(await openWorkspaceFolderInWindow('   ')).to.be.false;
+            expect(await openWorkspaceFolderInWindow(undefined)).to.be.false;
+            expect(await openWorkspaceFolderInWindow(path.join(os.tmpdir(), 'non-existent-herdr-dir-999999'))).to.be.false;
+            expect(mockState.executedCommands).to.be.empty;
+        });
+
+        it('opens existing workspace directory in a new VS Code window via vscode.openFolder', async () => {
+            const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collie-open-win-'));
+            try {
+                const opened = await openWorkspaceFolderInWindow(tempDir, true);
+                expect(opened).to.be.true;
+                expect(mockState.executedCommands).to.have.lengthOf(1);
+                expect(mockState.executedCommands[0].command).to.equal('vscode.openFolder');
+                expect(mockState.executedCommands[0].args[0].fsPath).to.equal(path.resolve(tempDir));
+                expect(mockState.executedCommands[0].args[1]).to.deep.equal({ forceNewWindow: true });
+            } finally {
+                fs.rmSync(tempDir, { recursive: true, force: true });
+            }
         });
     });
 });

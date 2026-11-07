@@ -129,6 +129,7 @@ export class HerdrSocketClient extends EventEmitter {
     private buffer = '';
     private requestIdCounter = 1;
     private reconnectTimer: NodeJS.Timeout | null = null;
+    private reconnectAttempts = 0;
     private isDisposed = false;
     private _isConnected = false;
     private activeRequestCleanups: Set<() => void> = new Set();
@@ -157,6 +158,7 @@ export class HerdrSocketClient extends EventEmitter {
             
             this.socket.on('connect', () => {
                 this._isConnected = true;
+                this.reconnectAttempts = 0;
                 this.emit('connect');
                 // Subscribe to events automatically upon connection
                 const payload = JSON.stringify({
@@ -190,8 +192,11 @@ export class HerdrSocketClient extends EventEmitter {
         }
     }
 
-    private scheduleReconnect(delayMs = 5000): void {
+    private scheduleReconnect(customDelayMs?: number): void {
         if (this.isDisposed || this.reconnectTimer) return;
+        // Exponential backoff starting at 300ms, doubling up to 5000ms
+        const delayMs = customDelayMs ?? Math.min(300 * Math.pow(1.8, this.reconnectAttempts), 5000);
+        this.reconnectAttempts++;
         this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = null;
             this.connect();

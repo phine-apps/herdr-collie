@@ -22,8 +22,12 @@ import {
     parsePanes,
     parseSnapshotWorkspaces, 
     parseSnapshotAgents, 
+    parseSnapshotTabs,
+    parseTabs,
     parseSessions,
-    GitWorktreeInfo
+    GitWorktreeInfo,
+    ParsedTab,
+    ParsedAgent
 } from './parsers';
 import { HerdrSocketClient, validateSessionName } from './socketClient';
 import { setupConfigManager } from './configManager';
@@ -35,13 +39,17 @@ import {
     getRepoRoot, 
     removeWorktree, 
     mergeWorktreeBranch,
-    getCurrentGitBranch
+    verifyWorktreeMerge,
+    formatMergeConflictPrompt,
+    getCurrentGitBranch,
+    openWorkspaceFolderInWindow
 } from './worktreeManager';
-import { HerdrWorkspaceTreeItem, WorkspaceDragAndDropController } from './workspaceDragAndDrop';
+import { HerdrWorkspaceTreeItem, HerdrTabTreeItem, WorkspaceDragAndDropController } from './workspaceDragAndDrop';
 import { 
     HerdrReviewController,
     HerdrReviewChangesProvider,
     ReviewChangeTreeItem,
+    ReviewViewMode,
     prepareOriginalFileForDiff,
     createReviewCheckpoint,
     rollbackReviewCheckpoint,
@@ -185,11 +193,18 @@ export function activate(context: vscode.ExtensionContext) {
         const sessionLabel = sessionName ? ` (${sessionName})` : '';
         const baseTerminalName = `Herdr${sessionLabel}`;
 
-        const isMatchingName = (tName: string) => (
-            tName === baseTerminalName ||
-            tName.startsWith(`Herdr Workspace${sessionLabel}:`) ||
-            tName.startsWith(`Herdr Agent${sessionLabel}:`)
-        );
+        const isMatchingName = (tName: string) => {
+            if (tName === baseTerminalName || tName === 'Herdr' || tName === 'Herdr (default)' || tName === 'Herdr (vscode)') {
+                return true;
+            }
+            if (tName.startsWith(`Herdr Workspace${sessionLabel}:`) || tName.startsWith(`Herdr Agent${sessionLabel}:`)) {
+                return true;
+            }
+            if (tName.startsWith('Herdr Workspace:') || tName.startsWith('Herdr Agent:')) {
+                return true;
+            }
+            return tName.startsWith('Herdr (');
+        };
 
         const terminal = specificTerminal || vscode.window.terminals.find(t => isMatchingName(t.name));
 
@@ -207,17 +222,42 @@ export function activate(context: vscode.ExtensionContext) {
 
         extensionManagedTerminals.add(terminal);
 
+        // Determine effective target session from terminal name or fallback to sessionName
+        let effectiveSession = sessionName;
+        const sessionMatch = terminal.name.match(/^Herdr\s*\(([^)]+)\)/);
+        if (sessionMatch && sessionMatch[1]) {
+            effectiveSession = sessionMatch[1].trim();
+        }
+
+        // Wait for processId to resolve to ensure shell is spawned
+        try {
+            await Promise.race([
+                terminal.processId,
+                new Promise(r => setTimeout(r, 1000))
+            ]);
+        } catch {}
+
         const isRunning = await isHerdrRunningInTerminal(terminal);
         if (!isRunning) {
-            await ensureSessionServerRunning(sessionName);
-            const safeSession = sessionName ? sessionName.replace(/[^a-zA-Z0-9_-]/g, '') : '';
+            await ensureSessionServerRunning(effectiveSession);
+            const safeSession = effectiveSession ? effectiveSession.replace(/[^a-zA-Z0-9_-]/g, '') : '';
             const sessionFlag = safeSession && safeSession !== 'default' ? `--session ${safeSession}` : '';
             const command = `herdr ${sessionFlag}`.trim();
-            setTimeout(() => {
+            // Generous shell startup delay (600ms) to ensure zsh/bash completed loading
+            setTimeout(async () => {
                 if (terminal.exitStatus === undefined) {
                     terminal.sendText(command);
+                    // Verify if Herdr started; if dropped due to slow shell init, retry once
+                    setTimeout(async () => {
+                        if (terminal.exitStatus === undefined) {
+                            const runningNow = await isHerdrRunningInTerminal(terminal);
+                            if (!runningNow) {
+                                terminal.sendText(command);
+                            }
+                        }
+                    }, 1200);
                 }
-            }, 350);
+            }, 600);
         }
     }
 
@@ -239,9 +279,16 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(onDidOpenTerminalDisposable, onDidCloseTerminalDisposable);
 
-    async function openOrAttachTerminal(target: string, isAgent: boolean, displayLabel: string, targetSession: string, targetWorkspaceId?: string) {
+    async function openOrAttachTerminal(
+        target: string, 
+        isAgent: boolean, 
+        displayLabel: string, 
+        targetSession: string, 
+        targetWorkspaceId?: string,
+        targetTabId?: string
+    ) {
         // Manage a single unified Herdr TUI terminal per session
-        const sessionLabel = targetSession ? ` (${targetSession})` : '';
+        const sessionLabel = targetSession && targetSession !== 'default' ? ` (${targetSession})` : '';
         const baseTerminalName = `Herdr${sessionLabel}`;
         const terminalName = baseTerminalName;
 
@@ -259,6 +306,14 @@ export function activate(context: vscode.ExtensionContext) {
                 await new Promise<void>((resolve) => {
                     execHerdr(['--session', targetSession, 'agent', 'focus', target], () => resolve());
                 });
+            } else if (targetTabId) {
+                // Focus workspace first, then focus the specific tab
+                await new Promise<void>((resolve) => {
+                    execHerdr(['--session', targetSession, 'workspace', 'focus', target], () => resolve());
+                });
+                await new Promise<void>((resolve) => {
+                    execHerdr(['--session', targetSession, 'tab', 'focus', targetTabId], () => resolve());
+                });
             } else {
                 // Focus the specific workspace
                 await new Promise<void>((resolve) => {
@@ -274,6 +329,8 @@ export function activate(context: vscode.ExtensionContext) {
         // Check if an existing terminal is present
         const existingTerminal = vscode.window.terminals.find(t => 
             t.name === baseTerminalName || 
+            (targetSession === 'default' && t.name === 'Herdr') ||
+            (targetSession === 'vscode' && (t.name === 'Herdr (vscode)' || t.name === 'Herdr')) ||
             t.name.startsWith(`Herdr Workspace${sessionLabel}:`) || 
             t.name.startsWith(`Herdr Agent${sessionLabel}:`)
         );
@@ -661,7 +718,12 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Feature 1: Context Injection
     
-    async function sendToHerdr(richText: string, successMsg: string, quickPickTitle: string) {
+    async function sendToHerdr(
+        richText: string,
+        successMsg: string,
+        quickPickTitle: string,
+        options?: { stageOnly?: boolean }
+    ): Promise<boolean> {
         const defaultSession = getSessionName();
         const sessions = await fetchActiveSessions();
         const currentCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -766,7 +828,7 @@ export function activate(context: vscode.ExtensionContext) {
             title: quickPickTitle
         });
 
-        if (!selected || !selected.targetId) return;
+        if (!selected || !selected.targetId) return false;
 
         // If user chose "Other...", show full list across all sessions and panes
         if (selected.targetId === '__SHOW_ALL__') {
@@ -774,7 +836,7 @@ export function activate(context: vscode.ExtensionContext) {
                 placeHolder: l10n.t('Select target across all sessions and panes'),
                 title: `${quickPickTitle} (All Targets)`
             });
-            if (!selected || !selected.targetId) return;
+            if (!selected || !selected.targetId) return false;
         }
         
         const target = selected.targetId;
@@ -782,35 +844,61 @@ export function activate(context: vscode.ExtensionContext) {
         const sessionArgs = sessionName ? ['--session', sessionName] : [];
         const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
-        if (!selected.isAgent) {
-            execHerdr([...sessionArgs, 'pane', 'send-text', target, richText], { cwd }, (error: any) => {
-                if (error) {
-                    vscode.window.showErrorMessage(l10n.t('Failed to send: {0}', error.message));
-                    return;
+        if (!selected.isAgent || options?.stageOnly) {
+            if (options?.stageOnly && socketClient.isConnected && (!sessionName || sessionName === activeSidebarSession)) {
+                try {
+                    await socketClient.sendPaneInput(target, richText);
+                    const prefix = sessionName ? `[${sessionName}] ` : '';
+                    const suffix = selected.isAgent ? 'Agent' : `${prefix}Pane`;
+                    vscode.window.showInformationMessage(
+                        selected.isAgent ? l10n.t('{0} (Agent)', successMsg) : l10n.t('{0} ({1}Pane)', successMsg, prefix)
+                    );
+                    return true;
+                } catch {
+                    // Fallback to CLI
                 }
-                const prefix = sessionName ? `[${sessionName}] ` : '';
-                vscode.window.showInformationMessage(l10n.t('{0} ({1}Pane)', successMsg, prefix));
+            }
+            return await new Promise<boolean>((resolve) => {
+                execHerdr([...sessionArgs, 'pane', 'send-text', target, richText], { cwd }, (error: any) => {
+                    if (error) {
+                        vscode.window.showErrorMessage(l10n.t('Failed to send: {0}', error.message));
+                        resolve(false);
+                        return;
+                    }
+                    const prefix = sessionName ? `[${sessionName}] ` : '';
+                    if (selected?.isAgent) {
+                        vscode.window.showInformationMessage(l10n.t('{0} (Agent)', successMsg));
+                    } else {
+                        vscode.window.showInformationMessage(l10n.t('{0} ({1}Pane)', successMsg, prefix));
+                    }
+                    resolve(true);
+                });
             });
-            return;
         }
         
-        execHerdr([...sessionArgs, 'agent', 'prompt', target, richText], { cwd }, (error: any) => {
-            if (error) {
-                if (error.message && error.message.includes('agent_not_found')) {
-                    execHerdr([...sessionArgs, 'pane', 'send-text', target, richText], { cwd }, (fbError: any) => {
-                        if (fbError) {
-                            vscode.window.showErrorMessage(l10n.t('Failed to send: {0}', fbError.message));
-                            return;
-                        }
-                        const prefix = sessionName ? `[${sessionName}] ` : '';
-                        vscode.window.showInformationMessage(l10n.t('{0} ({1}Pane)', successMsg, prefix));
-                    });
+        return await new Promise<boolean>((resolve) => {
+            execHerdr([...sessionArgs, 'agent', 'prompt', target, richText], { cwd }, (error: any) => {
+                if (error) {
+                    if (error.message && error.message.includes('agent_not_found')) {
+                        execHerdr([...sessionArgs, 'pane', 'send-text', target, richText], { cwd }, (fbError: any) => {
+                            if (fbError) {
+                                vscode.window.showErrorMessage(l10n.t('Failed to send: {0}', fbError.message));
+                                resolve(false);
+                                return;
+                            }
+                            const prefix = sessionName ? `[${sessionName}] ` : '';
+                            vscode.window.showInformationMessage(l10n.t('{0} ({1}Pane)', successMsg, prefix));
+                            resolve(true);
+                        });
+                        return;
+                    }
+                    vscode.window.showErrorMessage(l10n.t('Failed to send context: {0}', error.message));
+                    resolve(false);
                     return;
                 }
-                vscode.window.showErrorMessage(l10n.t('Failed to send context: {0}', error.message));
-                return;
-            }
-            vscode.window.showInformationMessage(l10n.t('{0} (Agent)', successMsg));
+                vscode.window.showInformationMessage(l10n.t('{0} (Agent)', successMsg));
+                resolve(true);
+            });
         });
     }
 
@@ -1058,9 +1146,9 @@ export function activate(context: vscode.ExtensionContext) {
 
 // Feature 3: GUI Sidebar Manager (Socket-driven) & Agent/Workspace HUD
     const sessionProvider = new HerdrSessionProvider(getActiveSidebarSession, fetchActiveSessions);
-    const workspaceProvider = new HerdrWorkspaceProvider('workspaces', socketClient, getActiveSidebarSession, context.extensionUri);
-    const agentProvider = new HerdrWorkspaceProvider('agents', socketClient, getActiveSidebarSession, context.extensionUri);
     const agentHUD = new AgentHUD(socketClient, getActiveSidebarSession);
+    const workspaceProvider = new HerdrWorkspaceProvider('workspaces', socketClient, getActiveSidebarSession, context.extensionUri);
+    const agentProvider = new HerdrWorkspaceProvider('agents', socketClient, getActiveSidebarSession, context.extensionUri, (agents) => agentHUD.enrichAgentsWithStateMetadata(agents));
     const workspaceHUD = new WorkspaceHUD(socketClient, getActiveSidebarSession, getWorktreesForCwds);
     const workspaceDragAndDropController = new WorkspaceDragAndDropController(
         () => workspaceProvider.getCurrentItems(),
@@ -1250,6 +1338,8 @@ export function activate(context: vscode.ExtensionContext) {
         workspaceTreeView.description = undefined;
         const sort = agentProvider.getSortOrder();
         agentTreeView.description = sort === 'priority' ? l10n.t('Priority') : l10n.t('Grouped');
+        const reviewMode = reviewChangesProvider.getViewMode();
+        reviewChangesTreeView.description = reviewMode === 'tree' ? l10n.t('Tree') : l10n.t('Flat');
     };
     updateTreeViewDescriptions();
 
@@ -1266,9 +1356,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     refreshAllProviders = () => { 
         sessionProvider.refresh();
+        agentHUD.refresh();
         workspaceProvider.refresh(); 
         agentProvider.refresh(); 
-        agentHUD.refresh();
         workspaceHUD.refresh();
     };
 
@@ -1332,6 +1422,11 @@ export function activate(context: vscode.ExtensionContext) {
             if (e.affectsConfiguration('herdr-collie.agentSortOrder')) {
                 const newSort = vscode.workspace.getConfiguration('herdr-collie').get<AgentSortOrder>('agentSortOrder', 'grouped') || 'grouped';
                 agentProvider.setSortOrder(newSort);
+                updateTreeViewDescriptions();
+            }
+            if (e.affectsConfiguration('herdr-collie.reviewChanges.viewMode')) {
+                const newMode = vscode.workspace.getConfiguration('herdr-collie').get<ReviewViewMode>('reviewChanges.viewMode', 'tree') || 'tree';
+                reviewChangesProvider.setViewMode(newMode);
                 updateTreeViewDescriptions();
             }
         })
@@ -1593,6 +1688,161 @@ export function activate(context: vscode.ExtensionContext) {
         });
     });
 
+    let openWorkspaceInNewWindowDisposable = vscode.commands.registerCommand('herdr-collie.openWorkspaceInNewWindow', async (item?: HerdrWorkspaceTreeItem) => {
+        let targetPath = item?.cwd;
+        let targetLabel = item?.label || '';
+
+        if (!targetPath) {
+            const currentFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            let candidates: { label: string; description: string; detail: string; cwd: string }[] = [];
+
+            if (socketClient.isConnected) {
+                const snapshot = await socketClient.getSnapshot();
+                if (snapshot) {
+                    const parsedWs = parseSnapshotWorkspaces(snapshot, os.homedir());
+                    const parsedAg = parseSnapshotAgents(snapshot, parsedWs);
+                    const worktrees = await getWorktreesForCwds(parsedWs.map(w => w.cwd));
+                    for (const ws of parsedWs) {
+                        if (!ws.cwd) continue;
+                        const displayInfo = formatWorkspaceDisplay(ws, worktrees, parsedAg, currentFolder);
+                        candidates.push({
+                            label: `$(${displayInfo.iconId}) ${displayInfo.label}`,
+                            description: displayInfo.description,
+                            detail: ws.cwd,
+                            cwd: ws.cwd
+                        });
+                    }
+                }
+            }
+
+            if (candidates.length === 0) {
+                const workspaceFolders = vscode.workspace.workspaceFolders;
+                if (workspaceFolders && workspaceFolders.length > 0) {
+                    const repoRoot = await getRepoRoot(workspaceFolders[0].uri.fsPath);
+                    if (repoRoot) {
+                        const worktrees = await listGitWorktrees(repoRoot);
+                        candidates = worktrees.map(wt => ({
+                            label: `$(git-branch) ${wt.branch || path.basename(wt.worktree)}`,
+                            description: wt.isMain ? l10n.t('(current branch)') : '',
+                            detail: wt.worktree,
+                            cwd: wt.worktree
+                        }));
+                    }
+                }
+            }
+
+            if (candidates.length === 0) {
+                vscode.window.showInformationMessage(l10n.t('No Herdr workspaces found.'));
+                return;
+            }
+
+            const selected = await vscode.window.showQuickPick(candidates, {
+                title: l10n.t('Open Workspace in New Window'),
+                placeHolder: l10n.t('Select Herdr Workspace or Worktree to open in a new VS Code window')
+            });
+            if (!selected) return;
+            targetPath = selected.cwd;
+            targetLabel = selected.label;
+        }
+
+        const opened = await openWorkspaceFolderInWindow(targetPath, true);
+        if (!opened) {
+            vscode.window.showWarningMessage(
+                l10n.t('Workspace directory path is not available or does not exist: {0}', targetPath || targetLabel || 'Unknown')
+            );
+        }
+    });
+
+    // Tab Navigation & Lifecycle Commands
+    let focusTabDisposable = vscode.commands.registerCommand('herdr-collie.focusTab', async (tabId?: string, workspaceId?: string, sessionArg?: string) => {
+        if (!tabId) return;
+        const targetSession = sessionArg || getActiveSidebarSession();
+        const wsId = workspaceId || (tabId.includes(':') ? tabId.split(':')[0] : '');
+        await openOrAttachTerminal(wsId, false, `Tab ${tabId}`, targetSession, undefined, tabId);
+    });
+
+    let createTabDisposable = vscode.commands.registerCommand('herdr-collie.createTab', async (item?: HerdrWorkspaceTreeItem) => {
+        const workspaceId = item?.rawId;
+        const sessionName = getActiveSidebarSession();
+        const args = ['--session', sessionName, 'tab', 'create'];
+        if (workspaceId) {
+            args.push('--workspace', workspaceId);
+        }
+        execHerdr(args, (err: any) => {
+            if (err) {
+                vscode.window.showErrorMessage(l10n.t('Failed to create tab: {0}', err.message));
+                return;
+            }
+            refreshAllProviders();
+            vscode.window.showInformationMessage(l10n.t('Tab created successfully.'));
+        });
+    });
+
+    let closeTabDisposable = vscode.commands.registerCommand('herdr-collie.closeTab', async (item?: HerdrTabTreeItem) => {
+        if (!item || !item.tabId) return;
+        const sessionName = getActiveSidebarSession();
+        const closeBtn = l10n.t('Close Tab');
+        const confirm = await vscode.window.showWarningMessage(
+            l10n.t('Are you sure you want to close tab "{0}"?', item.label || item.tabId),
+            { modal: true },
+            closeBtn
+        );
+        if (confirm !== closeBtn) return;
+
+        execHerdr(['--session', sessionName, 'tab', 'close', item.tabId], (err: any) => {
+            if (err) {
+                vscode.window.showErrorMessage(l10n.t('Failed to close tab: {0}', err.message));
+                return;
+            }
+            refreshAllProviders();
+        });
+    });
+
+    // Agent Live Output Peek Command
+    let agentOutputChannel: vscode.OutputChannel | null = null;
+    let peekAgentOutputDisposable = vscode.commands.registerCommand('herdr-collie.peekAgentOutput', async (item?: HerdrWorkspaceTreeItem | TargetQuickPickItem) => {
+        const targetSession = getActiveSidebarSession();
+        let targetAgent = (item && 'rawId' in item) ? item.rawId : (item && 'targetId' in item ? item.targetId : undefined);
+        
+        if (!targetAgent) {
+            if (socketClient.isConnected) {
+                const snapshot = await socketClient.getSnapshot();
+                const agents = parseSnapshotAgents(snapshot);
+                if (agents.length > 0) {
+                    const picked = await vscode.window.showQuickPick(agents.map(a => ({
+                        label: `${a.statusIcon} ${a.name}`,
+                        description: a.status,
+                        detail: a.id,
+                        agentId: a.id
+                    })), { placeHolder: l10n.t('Select agent to peek output:') });
+                    if (!picked) return;
+                    targetAgent = picked.agentId;
+                }
+            }
+        }
+
+        if (!targetAgent) {
+            vscode.window.showInformationMessage(l10n.t('No active agent selected to inspect.'));
+            return;
+        }
+
+        if (!agentOutputChannel) {
+            agentOutputChannel = vscode.window.createOutputChannel('Herdr Agent Output');
+            context.subscriptions.push(agentOutputChannel);
+        }
+
+        execHerdr(['--session', targetSession, 'agent', 'read', targetAgent, '--source', 'recent-unwrapped', '--lines', '50'], (err: any, stdout: string) => {
+            if (err) {
+                vscode.window.showErrorMessage(l10n.t('Failed to read agent output: {0}', err.message));
+                return;
+            }
+            agentOutputChannel!.clear();
+            agentOutputChannel!.appendLine(`=== Herdr Agent Output [${targetAgent}] (${new Date().toLocaleTimeString()}) ===\n`);
+            agentOutputChannel!.appendLine(stdout || l10n.t('(No output available)'));
+            agentOutputChannel!.show(true);
+        });
+    });
+
     // P1: Smart Swarm & Worktree Commands
     let launchWorktreeAgentDisposable = vscode.commands.registerCommand('herdr-collie.launchWorktreeAgent', async () => {
         await launchWorktreeAgentWizard(getActiveSidebarSession(), () => refreshAllProviders());
@@ -1639,12 +1889,62 @@ export function activate(context: vscode.ExtensionContext) {
         );
         if (confirm !== mergeBtn) return;
 
+        // Pre-merge verification loop: check for uncommitted worktree changes or merge conflicts
+        try {
+            const verification = await verifyWorktreeMerge(repoRoot, branchToMerge, item?.cwd);
+            if (!verification.canMerge) {
+                const delegateBtn = l10n.t('Delegate Resolution to Agent');
+                const mergeAnywayBtn = l10n.t('Merge Anyway');
+                const buttons = verification.hasConflicts
+                    ? [delegateBtn, cancelBtn]
+                    : [delegateBtn, mergeAnywayBtn, cancelBtn];
+
+                const warningChoice = await vscode.window.showWarningMessage(
+                    l10n.t("⚠️ Pre-merge check detected conflicts or uncommitted changes on '{0}'. Delegate resolution to worktree agent?", branchToMerge),
+                    ...buttons
+                );
+
+                if (warningChoice === delegateBtn) {
+                    const conflictPrompt = formatMergeConflictPrompt(branchToMerge, verification.targetBranch, verification);
+                    await promptAndDispatchTask(
+                        conflictPrompt,
+                        l10n.t("Resolve Merge Blockers on '{0}'", branchToMerge),
+                        { socketClient, sessionName: getActiveSidebarSession(), cwd: item?.cwd || repoRoot }
+                    );
+                    return;
+                }
+                if (warningChoice !== mergeAnywayBtn) {
+                    return;
+                }
+            }
+        } catch {
+            // Proceed to standard merge if pre-verification cannot run
+        }
+
         try {
             const out = await mergeWorktreeBranch(repoRoot, branchToMerge);
             vscode.window.showInformationMessage(l10n.t("Merged '{0}' successfully.\n{1}", branchToMerge, out.trim()));
             refreshAllProviders();
         } catch (e: any) {
-            vscode.window.showErrorMessage(l10n.t('Merge failed: {0}', e.message || e));
+            const errMsg = String(e.message || e || '');
+            // Abort partial merge if conflicts occurred so main working tree remains clean
+            await runGitCmd(['merge', '--abort'], repoRoot).catch(() => {});
+
+            const delegateBtn = l10n.t('Delegate Resolution to Agent');
+            const action = await vscode.window.showErrorMessage(
+                l10n.t('Merge failed: {0}', errMsg),
+                delegateBtn,
+                cancelBtn
+            );
+            if (action === delegateBtn) {
+                const targetBranch = await getCurrentGitBranch(repoRoot);
+                const conflictPrompt = formatMergeConflictPrompt(branchToMerge, targetBranch, { errorDetails: errMsg });
+                await promptAndDispatchTask(
+                    conflictPrompt,
+                    l10n.t("Resolve Merge Blockers on '{0}'", branchToMerge),
+                    { socketClient, sessionName: getActiveSidebarSession(), cwd: item?.cwd || repoRoot }
+                );
+            }
         }
     });
 
@@ -1767,6 +2067,50 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
+        const submitModePick = await vscode.window.showQuickPick([
+            {
+                label: `$(send) ` + l10n.t('Submit Review (Code Fixes Only)'),
+                description: l10n.t('Send inline review comments to agent'),
+                mode: 'standard' as const
+            },
+            {
+                label: `$(book) ` + l10n.t('Submit Review + Crystallize Rule to AGENTS.md'),
+                description: l10n.t('Fix code and append generalizable rule to AGENTS.md'),
+                mode: 'crystallize' as const
+            },
+            {
+                label: `$(edit) ` + l10n.t('Submit Review with Custom Instruction...'),
+                description: l10n.t('Append additional instructions to review feedback'),
+                mode: 'custom' as const
+            },
+            {
+                label: `$(terminal) ` + l10n.t('Stage Review in Agent Input (Draft Mode)'),
+                description: l10n.t('Paste review into agent input without pressing Enter'),
+                mode: 'stage' as const
+            },
+            {
+                label: `$(clippy) ` + l10n.t('Copy Review Prompt to Clipboard'),
+                description: l10n.t('Copy formatted review markdown to clipboard'),
+                mode: 'clipboard' as const
+            }
+        ], {
+            title: l10n.t('Submit Review to Agent'),
+            placeHolder: l10n.t('Select review submission mode')
+        });
+
+        if (!submitModePick) return;
+
+        let customInstruction: string | undefined;
+        if (submitModePick.mode === 'custom') {
+            const input = await vscode.window.showInputBox({
+                title: l10n.t('Submit Review with Custom Instruction...'),
+                prompt: l10n.t('Enter custom instruction for the agent'),
+                placeHolder: l10n.t('e.g. Run unit tests after applying review fixes')
+            });
+            if (!input || !input.trim()) return;
+            customInstruction = input.trim();
+        }
+
         const workspaceFolders = vscode.workspace.workspaceFolders;
         let currentBranch: string | undefined;
         let repoRoot: string | null = null;
@@ -1775,18 +2119,44 @@ export function activate(context: vscode.ExtensionContext) {
                 repoRoot = await getRepoRoot(workspaceFolders[0].uri.fsPath);
                 if (repoRoot) {
                     currentBranch = await getCurrentGitBranch(repoRoot);
-                    await createReviewCheckpoint(repoRoot, 'pre-review-submit');
+                    if (submitModePick.mode !== 'clipboard') {
+                        const cp = await createReviewCheckpoint(repoRoot, 'pre-review-submit');
+                        if (cp) {
+                            reviewChangesProvider.setBaseCheckpoint(cp);
+                        }
+                    }
                 }
             } catch {}
         }
 
-        const prompt = reviewController.formatPrompt({ branchName: currentBranch });
-        await sendToHerdr(
-            prompt,
-            l10n.t('Submitted review ({0} comments)', count),
-            l10n.t('Select agent to receive review feedback:')
+        await reviewController.submitSafely(
+            async (prompt) => {
+                if (submitModePick.mode === 'clipboard') {
+                    await vscode.env.clipboard.writeText(prompt);
+                    vscode.window.showInformationMessage(l10n.t('Copied review prompt ({0} comments) to clipboard', count));
+                    return true;
+                }
+                if (submitModePick.mode === 'stage') {
+                    return await sendToHerdr(
+                        prompt,
+                        l10n.t('Staged review ({0} comments) in input', count),
+                        l10n.t('Select agent to stage review feedback:'),
+                        { stageOnly: true }
+                    );
+                }
+                return await sendToHerdr(
+                    prompt,
+                    l10n.t('Submitted review ({0} comments)', count),
+                    l10n.t('Select agent to receive review feedback:')
+                );
+            },
+            {
+                branchName: currentBranch,
+                crystallizeRule: submitModePick.mode === 'crystallize',
+                targetRuleFile: 'AGENTS.md',
+                customInstruction
+            }
         );
-        reviewController.clearAll();
     });
 
     let clearReviewDisposable = vscode.commands.registerCommand('herdr-collie.clearReview', async () => {
@@ -1800,16 +2170,25 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let openDiffDisposable = vscode.commands.registerCommand('herdr-collie.openDiff', async (item?: ReviewChangeTreeItem) => {
-        if (!item) return;
+        if (!item || item.isFolder) return;
         try {
-            const tempOriginalPath = await prepareOriginalFileForDiff(item.repoRoot, item.change.filePath);
+            const baseRef = reviewChangesProvider.getEffectiveBaseRef();
+            const baseLabel = reviewChangesProvider.getEffectiveBaseLabel();
+            const tempOriginalPath = await prepareOriginalFileForDiff(item.repoRoot, item.change.filePath, baseRef);
             const originalUri = vscode.Uri.file(tempOriginalPath);
             const workingUri = vscode.Uri.file(item.change.fullPath);
-            const title = `${item.change.fileName} (HEAD ↔ Working Tree)`;
+            const title = `${item.change.fileName} (${baseLabel} ↔ Working Tree)`;
             await vscode.commands.executeCommand('vscode.diff', originalUri, workingUri, title);
         } catch (err: any) {
             vscode.window.showErrorMessage(err?.message || String(err));
         }
+    });
+
+    let toggleReviewViewModeDisposable = vscode.commands.registerCommand('herdr-collie.toggleReviewViewMode', () => {
+        const newMode = reviewChangesProvider.toggleViewMode();
+        updateTreeViewDescriptions();
+        const modeLabel = newMode === 'tree' ? l10n.t('Tree') : l10n.t('Flat');
+        vscode.window.setStatusBarMessage(l10n.t('Review Changes View: {0}', modeLabel), 3000);
     });
 
     let refreshReviewChangesDisposable = vscode.commands.registerCommand('herdr-collie.refreshReviewChanges', () => {
@@ -1824,6 +2203,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
         const checkpoint = await createReviewCheckpoint(repoRoot);
         if (checkpoint) {
+            reviewChangesProvider.setBaseCheckpoint(checkpoint);
             vscode.window.showInformationMessage(l10n.t('Created review checkpoint: {0}', checkpoint.id));
         } else {
             vscode.window.showErrorMessage(l10n.t('Failed to create review checkpoint: {0}', 'error'));
@@ -1862,6 +2242,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         const success = await rollbackReviewCheckpoint(repoRoot, picked.checkpoint.hash);
         if (success) {
+            reviewChangesProvider.setBaseCheckpoint(null);
             vscode.window.showInformationMessage(l10n.t('Rolled back to checkpoint: {0}', picked.checkpoint.id));
             reviewChangesProvider.refresh();
         } else {
@@ -1975,6 +2356,11 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(createWorkspaceDisposable);
     context.subscriptions.push(renameWorkspaceDisposable);
     context.subscriptions.push(closeWorkspaceDisposable);
+    context.subscriptions.push(openWorkspaceInNewWindowDisposable);
+    context.subscriptions.push(focusTabDisposable);
+    context.subscriptions.push(createTabDisposable);
+    context.subscriptions.push(closeTabDisposable);
+    context.subscriptions.push(peekAgentOutputDisposable);
     context.subscriptions.push(launchWorktreeAgentDisposable);
     context.subscriptions.push(mergeWorktreeDisposable);
     context.subscriptions.push(removeWorktreeDisposable);
@@ -1983,6 +2369,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(submitReviewDisposable);
     context.subscriptions.push(clearReviewDisposable);
     context.subscriptions.push(openDiffDisposable);
+    context.subscriptions.push(toggleReviewViewModeDisposable);
     context.subscriptions.push(refreshReviewChangesDisposable);
     context.subscriptions.push(createReviewCheckpointDisposable);
     context.subscriptions.push(rollbackReviewCheckpointDisposable);
@@ -2066,7 +2453,8 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
         private readonly type: 'workspaces' | 'agents',
         private socketClient: HerdrSocketClient,
         private readonly getSessionName: () => string,
-        private readonly extensionUri?: vscode.Uri
+        private readonly extensionUri?: vscode.Uri,
+        private readonly enrichAgents?: (agents: ParsedAgent[]) => ParsedAgent[]
     ) {}
 
     private getIconPath(iconFile: string): vscode.Uri {
@@ -2119,6 +2507,18 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
 
     async getChildren(element?: vscode.TreeItem): Promise<vscode.TreeItem[]> {
         if (element) {
+            if (this.type === 'workspaces' && element instanceof HerdrWorkspaceTreeItem && element.tabs && element.tabs.length > 0) {
+                const sessionName = this.getSessionName();
+                return element.tabs.map(tab => new HerdrTabTreeItem(
+                    tab.label ? `Tab ${tab.label}` : `Tab ${tab.number || tab.id}`,
+                    tab.id,
+                    element.rawId,
+                    tab.focused,
+                    tab.paneCount,
+                    tab.agentStatus,
+                    sessionName
+                ));
+            }
             return [];
         }
 
@@ -2132,6 +2532,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                     if (this.type === 'workspaces') {
                         const parsedWorkspaces = parseSnapshotWorkspaces(snapshot, os.homedir());
                         const parsedAgents = parseSnapshotAgents(snapshot, parsedWorkspaces);
+                        const parsedTabs = parseSnapshotTabs(snapshot);
                         const worktrees = await getWorktreesForCwds(parsedWorkspaces.map(w => w.cwd));
                         const currentRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
@@ -2139,12 +2540,14 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                             const items = parsedWorkspaces.map(ws => {
                                 const displayInfo = formatWorkspaceDisplay(ws, worktrees, parsedAgents, currentRoot);
                                 const contextValue = displayInfo.isWorktree ? 'worktreeWorkspace' : 'workspace';
-                                const statusSignature = `${displayInfo.agentBadges || 'none'}:${ws.focused ? '1' : '0'}`;
+                                const wsTabs = parsedTabs.filter(t => t.workspaceId === ws.id);
+                                const collapsibleState = wsTabs.length > 1 ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None;
+                                const statusSignature = `${displayInfo.agentBadges || 'none'}:${ws.focused ? '1' : '0'}:${wsTabs.length}`;
                                 
                                 const item = new HerdrWorkspaceTreeItem(
                                     displayInfo.label, 
                                     ws.id, 
-                                    vscode.TreeItemCollapsibleState.None, 
+                                    collapsibleState, 
                                     contextValue,
                                     ws.cwd,
                                     displayInfo.branchName,
@@ -2152,7 +2555,8 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                                     displayInfo.isFocused,
                                     displayInfo.isCurrentWindow,
                                     undefined,
-                                    statusSignature
+                                    statusSignature,
+                                    wsTabs
                                 );
                                 
                                 item.description = displayInfo.description;
@@ -2178,7 +2582,8 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
 
                     if (this.type === 'agents') {
                         const parsedWorkspaces = parseSnapshotWorkspaces(snapshot, os.homedir());
-                        const parsedAgents = parseSnapshotAgents(snapshot, parsedWorkspaces);
+                        const rawParsedAgents = parseSnapshotAgents(snapshot, parsedWorkspaces);
+                        const parsedAgents = this.enrichAgents ? this.enrichAgents(rawParsedAgents) : rawParsedAgents;
                         const sortedAgents = sortAgents(parsedAgents, this.sortOrder);
                         const worktrees = await getWorktreesForCwds(sortedAgents.map(a => a.workspaceCwd));
 
@@ -2233,7 +2638,8 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                 let rawWorkspaces = '';
                 let rawPanes = '';
                 let rawAgents = '';
-                let pending = 3;
+                let rawTabs = '';
+                let pending = 4;
 
                 const checkDone = async () => {
                     pending--;
@@ -2241,6 +2647,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                         const parsedPanes = parsePanes(rawPanes);
                         const parsedWorkspaces = parseWorkspaces(rawWorkspaces, parsedPanes, os.homedir());
                         const parsedAgents = parseAgents(rawAgents, parsedWorkspaces);
+                        const parsedTabs = parseTabs(rawTabs);
                         const worktrees = await getWorktreesForCwds(parsedWorkspaces.map(w => w.cwd));
                         const currentRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
                         let items: vscode.TreeItem[] = [];
@@ -2248,12 +2655,14 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                         parsedWorkspaces.forEach(ws => {
                             const displayInfo = formatWorkspaceDisplay(ws, worktrees, parsedAgents, currentRoot);
                             const contextValue = displayInfo.isWorktree ? 'worktreeWorkspace' : 'workspace';
-                            const statusSignature = `${displayInfo.agentBadges || 'none'}:${ws.focused ? '1' : '0'}`;
+                            const wsTabs = parsedTabs.filter(t => t.workspaceId === ws.id);
+                            const collapsibleState = wsTabs.length > 1 ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None;
+                            const statusSignature = `${displayInfo.agentBadges || 'none'}:${ws.focused ? '1' : '0'}:${wsTabs.length}`;
 
                             const item = new HerdrWorkspaceTreeItem(
                                 displayInfo.label, 
                                 ws.id, 
-                                vscode.TreeItemCollapsibleState.None, 
+                                collapsibleState, 
                                 contextValue,
                                 ws.cwd,
                                 displayInfo.branchName,
@@ -2261,7 +2670,8 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                                 displayInfo.isFocused,
                                 displayInfo.isCurrentWindow,
                                 undefined,
-                                statusSignature
+                                statusSignature,
+                                wsTabs
                             );
                             item.description = displayInfo.description;
                             item.tooltip = displayInfo.tooltip;
@@ -2306,6 +2716,13 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                     }
                     checkDone();
                 });
+
+                execHerdr([...sessionArgs, 'tab', 'list'], (err: any, stdout: any) => {
+                    if (!err && stdout) {
+                        rawTabs = stdout;
+                    }
+                    checkDone();
+                });
                 return;
             }
 
@@ -2320,7 +2737,8 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                     if (pending === 0) {
                         const parsedPanes = parsePanes(rawPanes);
                         const parsedWorkspaces = parseWorkspaces(rawWorkspaces, parsedPanes, os.homedir());
-                        const parsedAgents = parseAgents(rawAgents, parsedWorkspaces);
+                        const rawParsedAgents = parseAgents(rawAgents, parsedWorkspaces);
+                        const parsedAgents = this.enrichAgents ? this.enrichAgents(rawParsedAgents) : rawParsedAgents;
                         const sortedAgents = sortAgents(parsedAgents, this.sortOrder);
                         const worktrees = await getWorktreesForCwds(sortedAgents.map(a => a.workspaceCwd));
 

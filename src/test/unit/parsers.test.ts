@@ -7,10 +7,13 @@ import {
     parseWorkspaces, 
     parseAgents, 
     parsePanes,
-    parseSnapshotWorkspaces,
-    parseSnapshotAgents,
+    parseSnapshotWorkspaces, 
+    parseSnapshotAgents, 
+    parseSnapshotTabs,
+    parseTabs,
     parseSessions,
-    parseGitWorktrees
+    parseGitWorktrees,
+    extractCleanOutputSummary
 } from '../../parsers';
 
 describe('parsers Unit Tests', () => {
@@ -417,6 +420,135 @@ detached
                 detached: true,
                 isMain: false
             });
+        });
+    });
+
+    describe('parseTabs and parseSnapshotTabs', () => {
+        it('parseTabs handles invalid json gracefully', () => {
+            expect(parseTabs('invalid json')).to.deep.equal([]);
+        });
+
+        it('parseTabs parses CLI json output correctly', () => {
+            const raw = JSON.stringify({
+                result: {
+                    tabs: [
+                        {
+                            tab_id: 'w2:t1',
+                            workspace_id: 'w2',
+                            label: '1',
+                            number: 1,
+                            focused: true,
+                            pane_count: 2,
+                            agent_status: 'blocked'
+                        },
+                        {
+                            tab_id: 'w2:t2',
+                            workspace_id: 'w2',
+                            label: '2',
+                            number: 2,
+                            focused: false,
+                            pane_count: 1
+                        }
+                    ]
+                }
+            });
+
+            const tabs = parseTabs(raw);
+            expect(tabs).to.have.lengthOf(2);
+            expect(tabs[0]).to.deep.equal({
+                id: 'w2:t1',
+                workspaceId: 'w2',
+                label: '1',
+                number: 1,
+                focused: true,
+                paneCount: 2,
+                agentStatus: 'blocked'
+            });
+            expect(tabs[1]).to.deep.equal({
+                id: 'w2:t2',
+                workspaceId: 'w2',
+                label: '2',
+                number: 2,
+                focused: false,
+                paneCount: 1,
+                agentStatus: undefined
+            });
+        });
+
+        it('parseSnapshotTabs extracts tabs and reflects focused tab ID', () => {
+            const snapshot = {
+                focused_tab_id: 'w1:t2',
+                tabs: [
+                    {
+                        tab_id: 'w1:t1',
+                        workspace_id: 'w1',
+                        number: 1,
+                        label: '1',
+                        focused: false,
+                        pane_count: 1
+                    },
+                    {
+                        tab_id: 'w1:t2',
+                        workspace_id: 'w1',
+                        number: 2,
+                        label: '2',
+                        focused: false,
+                        pane_count: 3,
+                        agent_status: 'idle'
+                    }
+                ]
+            };
+
+            const result = parseSnapshotTabs(snapshot);
+            expect(result).to.have.lengthOf(2);
+            expect(result[0].id).to.equal('w1:t1');
+            expect(result[0].focused).to.be.false;
+            expect(result[1].id).to.equal('w1:t2');
+            expect(result[1].focused).to.be.true; // Set to true by focused_tab_id
+            expect(result[1].paneCount).to.equal(3);
+        });
+    });
+
+    describe('extractCleanOutputSummary & latestOutput parsing', () => {
+        it('strips ANSI escape sequences and returns the last meaningful line', () => {
+            const raw = '\x1b[32mRunning tests...\x1b[0m\n\x1b[1;33mAllow bash execution: pnpm test? (y/n)\x1b[0m\n──────────────\n   ';
+            expect(extractCleanOutputSummary(raw)).to.equal('Allow bash execution: pnpm test? (y/n)');
+        });
+
+        it('truncates long output lines cleanly with ellipsis', () => {
+            const longLine = 'A'.repeat(100);
+            const summary = extractCleanOutputSummary(longLine, 40);
+            expect(summary).to.have.lengthOf(40);
+            expect(summary?.endsWith('...')).to.be.true;
+        });
+
+        it('populates latestOutput in parseAgents and parseSnapshotAgents when present', () => {
+            const rawCli = JSON.stringify({
+                result: {
+                    agents: [
+                        {
+                            pane_id: 'w1:p1',
+                            name: 'claude',
+                            agent_status: 'blocked',
+                            last_output: '\x1b[31mConfirm file deletion? (y/n)\x1b[0m\n'
+                        }
+                    ]
+                }
+            });
+            const parsedCli = parseAgents(rawCli);
+            expect(parsedCli[0].latestOutput).to.equal('Confirm file deletion? (y/n)');
+
+            const parsedSnap = parseSnapshotAgents({
+                agents: [
+                    {
+                        pane_id: 'w1:p2',
+                        name: 'agy',
+                        agent_status: 'working',
+                        summary: 'Compiling TypeScript modules...'
+                    }
+                ]
+            });
+            expect(parsedSnap[0].latestOutput).to.equal('Compiling TypeScript modules...');
         });
     });
 });

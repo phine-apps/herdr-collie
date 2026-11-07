@@ -20,7 +20,8 @@ import {
     getWorkspaceStatusIconFile,
     getAgentStatusIconFile,
     sortAgents,
-    formatCodeFence
+    formatCodeFence,
+    formatDurationCompact
 } from '../../formatters';
 import { ParsedAgent, ParsedWorkspace, GitWorktreeInfo } from '../../parsers';
 
@@ -832,6 +833,41 @@ describe('formatters Unit Tests', () => {
             const result = formatSelectionContext('src/inject.ts', 1, 2, 'typescript', breakoutSnippet);
             expect(result.startsWith('`src/inject.ts` (Lines 1-2):\n````typescript\n')).to.be.true;
             expect(result.endsWith('\n````')).to.be.true;
+        });
+    });
+
+    describe('formatDurationCompact & Time-in-State / Latest Output in formatAgentDisplay', () => {
+        it('formats elapsed durations into compact strings', () => {
+            expect(formatDurationCompact(0)).to.equal('0s');
+            expect(formatDurationCompact(45000)).to.equal('45s');
+            expect(formatDurationCompact(120000)).to.equal('2m');
+            expect(formatDurationCompact(125000)).to.equal('2m 5s');
+            expect(formatDurationCompact(3600000)).to.equal('1h');
+            expect(formatDurationCompact(4500000)).to.equal('1h 15m');
+        });
+
+        it('includes time-in-state and latestOutput in formatAgentDisplay when present', () => {
+            const nowMs = 1_700_000_000_000;
+            const blockedAgent: ParsedAgent = {
+                id: 'w1:p1',
+                name: 'claude',
+                status: 'blocked',
+                statusType: 'blocked',
+                statusIcon: '🔴',
+                isWorking: false,
+                isBlocked: true,
+                workspaceId: 'w1',
+                workspaceLabel: 'auth-wt',
+                statusChangedAt: nowMs - 45_000,
+                latestOutput: 'Run migration script? (y/n)'
+            };
+
+            const display = formatAgentDisplay(blockedAgent, [], nowMs);
+            expect(display.durationText).to.equal('45s');
+            expect(display.description).to.include('Input Needed (45s)');
+            expect(display.description).to.include('Run migration script? (y/n)');
+            expect(display.tooltip).to.include('Status: blocked (45s)');
+            expect(display.tooltip).to.include('Latest Output: Run migration script? (y/n)');
         });
     });
 });

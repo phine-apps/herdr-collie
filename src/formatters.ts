@@ -419,6 +419,28 @@ export interface AgentDisplayInfo {
     displayLabel: string;
     wsBadge: string;
     branchName?: string;
+    durationText?: string;
+}
+
+/**
+ * Formats an elapsed millisecond duration into a compact human-readable string (e.g. "45s", "2m 5s", "1h 15m")
+ */
+export function formatDurationCompact(elapsedMs: number): string {
+    if (!Number.isFinite(elapsedMs) || elapsedMs < 1000) {
+        return '0s';
+    }
+    const totalSeconds = Math.floor(elapsedMs / 1000);
+    if (totalSeconds < 60) {
+        return `${totalSeconds}s`;
+    }
+    const totalMinutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    if (totalMinutes < 60) {
+        return seconds > 0 ? `${totalMinutes}m ${seconds}s` : `${totalMinutes}m`;
+    }
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
 }
 
 /**
@@ -426,7 +448,8 @@ export interface AgentDisplayInfo {
  */
 export function formatAgentDisplay(
     agent: ParsedAgent,
-    worktrees: GitWorktreeInfo[] = []
+    worktrees: GitWorktreeInfo[] = [],
+    nowMs: number = Date.now()
 ): AgentDisplayInfo {
     const matchedWt = agent.workspaceCwd ? worktrees.find(w => w.worktree === agent.workspaceCwd) : undefined;
     const branchName = matchedWt?.branch;
@@ -440,12 +463,23 @@ export function formatAgentDisplay(
     const statusThemeIcon = getAgentStatusThemeIcon(agent.statusIcon, agent.isBlocked);
     const statusIconFile = getAgentStatusIconFile(agent.statusIcon, agent.isBlocked);
 
+    const durationText = (typeof agent.statusChangedAt === 'number' && nowMs >= agent.statusChangedAt)
+        ? formatDurationCompact(nowMs - agent.statusChangedAt)
+        : undefined;
+
     let description = '';
     if (agent.isBlocked) {
-        const inputNeeded = l10n.t('Input Needed');
+        const inputNeeded = durationText
+            ? `${l10n.t('Input Needed')} (${durationText})`
+            : l10n.t('Input Needed');
         description = wsBadge ? `${inputNeeded} • ${wsBadge}` : `${inputNeeded} (${agent.id})`;
     } else {
-        description = wsBadge || `(${agent.id})`;
+        const baseDesc = wsBadge || `(${agent.id})`;
+        description = durationText ? `${baseDesc} • ${durationText}` : baseDesc;
+    }
+
+    if (agent.latestOutput) {
+        description = `${description} • ${agent.latestOutput}`;
     }
 
     const tooltipLines: string[] = [
@@ -459,12 +493,16 @@ export function formatAgentDisplay(
         tooltipLines.push(`Path: ${agent.workspaceCwd}`);
     }
     tooltipLines.push(`Pane ID: ${agent.id}`);
-    tooltipLines.push(`Status: ${agent.status}${agent.isBlocked ? '\n⚠️ Waiting for user confirmation' : ''}`);
+    const statusWithDuration = durationText ? `${agent.status} (${durationText})` : agent.status;
+    tooltipLines.push(`Status: ${statusWithDuration}${agent.isBlocked ? '\n⚠️ Waiting for user confirmation' : ''}`);
+    if (agent.latestOutput) {
+        tooltipLines.push(`Latest Output: ${agent.latestOutput}`);
+    }
 
     const tooltip = tooltipLines.join('\n');
     const displayLabel = `${agentName} [${wsBadge || agent.id}]`;
 
-    return {
+    const result: AgentDisplayInfo = {
         label,
         agentName,
         statusThemeIcon,
@@ -475,6 +513,10 @@ export function formatAgentDisplay(
         wsBadge,
         branchName
     };
+    if (durationText !== undefined) {
+        result.durationText = durationText;
+    }
+    return result;
 }
 
 export type AgentSortOrder = 'grouped' | 'priority';

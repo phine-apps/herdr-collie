@@ -23,7 +23,9 @@ This document is for developers who want to contribute to the extension or under
 
 ## Testing
 
+- **All Tests**: `pnpm test`
 - **Unit Tests**: `pnpm run test:unit`
+- **Integration Tests**: `pnpm run test:integration`
 
 ## Local VSIX Smoke Test
 
@@ -33,7 +35,7 @@ This document is for developers who want to contribute to the extension or under
 
 ## Quality Control
 
-- **Release baseline**: `pnpm run compile`, `pnpm run test:unit`, then `pnpm run package`.
+- **Release baseline**: `pnpm run compile`, `pnpm test`, then `pnpm run package`.
 
 ## License
 

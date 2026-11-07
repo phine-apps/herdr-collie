@@ -15,6 +15,7 @@ import {
     createWorktree,
     removeWorktree,
     mergeWorktreeBranch,
+    verifyWorktreeMerge,
     resolveWorktreePath,
     sanitizeBranchSlug
 } from '../../worktreeManager';
@@ -185,6 +186,49 @@ describe('Smart Swarm & Git Worktree Integration Tests (W-01 ~ W-06, A-02, A-05)
             const worktrees = await listGitWorktrees(mainRepoDir);
             const found = worktrees.find(w => w.branch === branchName);
             expect(found).to.be.undefined;
+        });
+
+        it('pre-verifies worktree merge: detects uncommitted changes and merge conflicts non-destructively', async () => {
+            const branchName = 'feature/pre-verify-branch';
+            const worktreePath = resolveWorktreePath(mainRepoDir, branchName, 'sibling');
+
+            await createWorktree(mainRepoDir, branchName, worktreePath, 'main');
+
+            // 1. Create uncommitted file in worktree
+            const dirtyFile = path.join(worktreePath, 'UNCOMMITTED.txt');
+            fs.writeFileSync(dirtyFile, 'uncommitted work\n', 'utf8');
+
+            const checkDirty = await verifyWorktreeMerge(mainRepoDir, branchName, worktreePath);
+            expect(checkDirty.canMerge).to.be.false;
+            expect(checkDirty.hasUncommittedWorktreeChanges).to.be.true;
+            expect(checkDirty.uncommittedFiles).to.include('UNCOMMITTED.txt');
+            expect(checkDirty.hasConflicts).to.be.false;
+
+            // 2. Commit the file in worktree -> now clean and conflict-free
+            await runGitCmd(['add', 'UNCOMMITTED.txt'], worktreePath);
+            await runGitCmd(['commit', '-m', 'feat: commit worktree file'], worktreePath);
+
+            const checkClean = await verifyWorktreeMerge(mainRepoDir, branchName, worktreePath);
+            expect(checkClean.canMerge).to.be.true;
+            expect(checkClean.hasUncommittedWorktreeChanges).to.be.false;
+            expect(checkClean.hasConflicts).to.be.false;
+
+            // 3. Introduce conflicting commits on README.md between main and worktree
+            fs.writeFileSync(path.join(worktreePath, 'README.md'), '# Worktree conflict line\n', 'utf8');
+            await runGitCmd(['add', 'README.md'], worktreePath);
+            await runGitCmd(['commit', '-m', 'feat: edit readme in worktree'], worktreePath);
+
+            fs.writeFileSync(path.join(mainRepoDir, 'README.md'), '# Main conflict line\n', 'utf8');
+            await runGitCmd(['add', 'README.md'], mainRepoDir);
+            await runGitCmd(['commit', '-m', 'fix: edit readme in main'], mainRepoDir);
+
+            const checkConflict = await verifyWorktreeMerge(mainRepoDir, branchName, worktreePath);
+            expect(checkConflict.canMerge).to.be.false;
+            expect(checkConflict.hasConflicts).to.be.true;
+
+            // Verify mainRepoDir working tree remained completely untouched by pre-verification
+            const mainStatus = await runGitCmd(['status', '--porcelain'], mainRepoDir);
+            expect(mainStatus.trim()).to.equal('');
         });
     });
 });

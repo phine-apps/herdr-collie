@@ -127,6 +127,38 @@ describe('Integrated Review & Diff-to-Prompt Integration Tests (P3)', function()
         controller.dispose();
     });
 
+    it('enforces All-or-Nothing safe delivery across retries in submitSafely', async () => {
+        const controller = new HerdrReviewController();
+        controller.addComment({
+            id: 'c1',
+            filePath: 'auth.ts',
+            fileName: 'auth.ts',
+            startLine: 2,
+            endLine: 4,
+            codeSnippet: extractSnippetFromFile(path.join(tempRepoDir, 'auth.ts'), 2, 4),
+            commentText: 'Ensure user string is trimmed before validation.'
+        });
+
+        // First attempt fails (e.g. user cancelled target picker)
+        const firstAttempt = await controller.submitSafely(async () => false);
+        expect(firstAttempt).to.be.false;
+        expect(controller.commentCount).to.equal(1);
+
+        // Second attempt succeeds (e.g. staged or submitted to agent)
+        let capturedPayload = '';
+        const secondAttempt = await controller.submitSafely(async (payload) => {
+            capturedPayload = payload;
+            return true;
+        }, { branchName: 'main' });
+
+        expect(secondAttempt).to.be.true;
+        expect(capturedPayload).to.include('Ensure user string is trimmed before validation.');
+        expect(capturedPayload).to.include('throw new Error("Missing user");');
+        expect(controller.commentCount).to.equal(0);
+
+        controller.dispose();
+    });
+
     it('lists changed files in repository via HerdrReviewChangesProvider and prepares diff', async () => {
         // Modify auth.ts
         const authFile = path.join(tempRepoDir, 'auth.ts');
@@ -155,6 +187,36 @@ describe('Integrated Review & Diff-to-Prompt Integration Tests (P3)', function()
         const originalContent = fs.readFileSync(originalAuthPath, 'utf8');
         expect(originalContent).to.not.include('// Extra comment line');
         expect(originalContent).to.include('export function login');
+
+        provider.dispose();
+    });
+
+    it('supports hierarchical compact tree view and toggling to flat view in HerdrReviewChangesProvider', async () => {
+        const nestedDir = path.join(tempRepoDir, 'src', 'components', 'buttons');
+        fs.mkdirSync(nestedDir, { recursive: true });
+        fs.writeFileSync(path.join(nestedDir, 'PrimaryButton.tsx'), 'export const PrimaryButton = () => null;\n', 'utf8');
+
+        const provider = new HerdrReviewChangesProvider(async () => tempRepoDir, 'tree');
+        expect(provider.getViewMode()).to.equal('tree');
+
+        const rootItems = await provider.getChildren();
+        expect(rootItems.length).to.equal(1);
+        expect(rootItems[0].isFolder).to.be.true;
+        expect(rootItems[0].label).to.equal('src/components/buttons');
+
+        const folderChildren = await provider.getChildren(rootItems[0]);
+        expect(folderChildren.length).to.equal(1);
+        expect(folderChildren[0].isFolder).to.be.false;
+        expect(folderChildren[0].change.fileName).to.equal('PrimaryButton.tsx');
+
+        // Toggle to flat mode
+        const newMode = provider.toggleViewMode();
+        expect(newMode).to.equal('flat');
+        const flatItems = await provider.getChildren();
+        expect(flatItems.length).to.equal(1);
+        expect(flatItems[0].isFolder).to.be.false;
+        expect(flatItems[0].change.fileName).to.equal('PrimaryButton.tsx');
+        expect(flatItems[0].description).to.include('src/components/buttons');
 
         provider.dispose();
     });
@@ -199,5 +261,32 @@ describe('Integrated Review & Diff-to-Prompt Integration Tests (P3)', function()
         expect(fs.existsSync(badFile)).to.be.false;
         expect(fs.existsSync(envFile)).to.be.true;
         expect(fs.readFileSync(envFile, 'utf8')).to.equal('SECRET_API_KEY=supersecret\n');
+    });
+
+    it('prepares delta diff against a specific review checkpoint ref instead of HEAD', async () => {
+        const authFile = path.join(tempRepoDir, 'auth.ts');
+        // Modify auth.ts to v2 (uncommitted) and create a review checkpoint
+        fs.writeFileSync(authFile, 'export const version = "v2-pre-review";\n', 'utf8');
+        const cp = await createReviewCheckpoint(tempRepoDir, 'pre-review-submit');
+        expect(cp).to.not.be.null;
+
+        const provider = new HerdrReviewChangesProvider(async () => tempRepoDir, 'tree');
+        expect(provider.getEffectiveBaseRef()).to.equal('HEAD');
+
+        provider.setBaseCheckpoint(cp!);
+        expect(provider.getEffectiveBaseRef()).to.equal(cp!.hash);
+        expect(provider.getEffectiveBaseLabel()).to.equal(cp!.id);
+
+        // Agent modifies auth.ts to v3
+        fs.writeFileSync(authFile, 'export const version = "v3-post-agent-fix";\n', 'utf8');
+
+        // Diff against checkpoint should return v2-pre-review, whereas diff against HEAD returns original v1
+        const checkpointDiffPath = await prepareOriginalFileForDiff(tempRepoDir, 'auth.ts', provider.getEffectiveBaseRef());
+        expect(fs.readFileSync(checkpointDiffPath, 'utf8')).to.equal('export const version = "v2-pre-review";\n');
+
+        const headDiffPath = await prepareOriginalFileForDiff(tempRepoDir, 'auth.ts', 'HEAD');
+        expect(fs.readFileSync(headDiffPath, 'utf8')).to.include('export function login');
+
+        provider.dispose();
     });
 });

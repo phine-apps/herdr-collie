@@ -26,6 +26,8 @@ export interface ReviewFormatOptions {
     agentName?: string;
     branchName?: string;
     customInstruction?: string;
+    crystallizeRule?: boolean;
+    targetRuleFile?: string;
 }
 
 /**
@@ -173,6 +175,13 @@ export function formatReviewFeedback(
         lines.push('');
     }
 
+    if (options.crystallizeRule) {
+        const ruleFile = (options.targetRuleFile && options.targetRuleFile.trim()) ? options.targetRuleFile.trim() : 'AGENTS.md';
+        lines.push(`### 🔄 Outer-Loop Rule Crystallization (\`${ruleFile}\`)`);
+        lines.push(`In addition to fixing the code issues above, please distill any generalizable coding conventions, architectural constraints, or anti-patterns from this review feedback and append a concise rule to \`${ruleFile}\` to prevent recurrence.`);
+        lines.push('');
+    }
+
     lines.push('---');
     lines.push('Please apply the requested fixes, ensure consistency, and verify with tests.');
 
@@ -315,6 +324,37 @@ export class HerdrReviewController implements vscode.Disposable {
         return formatReviewFeedback(this.getPendingComments(), options);
     }
 
+    /**
+     * All-or-Nothing safe delivery of pending review comments.
+     * Clears the pending comment queue ONLY if `deliverFn` resolves to `true`.
+     * If `deliverFn` returns `false` (e.g. user cancelled target selection) or throws an error,
+     * all pending comments and inline threads are preserved for retry.
+     */
+    public async submitSafely(
+        deliverFn: (prompt: string) => Promise<boolean>,
+        options?: ReviewFormatOptions
+    ): Promise<boolean> {
+        if (this.commentCount === 0) {
+            return false;
+        }
+
+        const prompt = this.formatPrompt(options);
+        if (!prompt) {
+            return false;
+        }
+
+        try {
+            const delivered = await deliverFn(prompt);
+            if (delivered) {
+                this.clearAll();
+                return true;
+            }
+            return false;
+        } catch {
+            return false;
+        }
+    }
+
     public dispose(): void {
         this.clearAll();
         this.commentController?.dispose();
@@ -391,7 +431,7 @@ export function parseGitStatusPorcelain(output: string, repoRoot: string): Chang
  */
 export async function getRepoChangedFiles(repoRoot: string): Promise<ChangedFileInfo[]> {
     try {
-        const stdout = await runGitCmd(['status', '--porcelain'], repoRoot);
+        const stdout = await runGitCmd(['status', '--porcelain', '-uall'], repoRoot);
         return parseGitStatusPorcelain(stdout, repoRoot);
     } catch {
         return [];
@@ -427,9 +467,13 @@ export function cleanDiffCache(maxAgeMs = 3600000): void {
 }
 
 /**
- * Prepares the HEAD version of a file in a temporary location for VS Code diffing
+ * Prepares the base version (HEAD or specified checkpoint ref) of a file in a temporary location for VS Code diffing
  */
-export async function prepareOriginalFileForDiff(repoRoot: string, filePath: string): Promise<string> {
+export async function prepareOriginalFileForDiff(
+    repoRoot: string,
+    filePath: string,
+    baseRef: string = 'HEAD'
+): Promise<string> {
     cleanDiffCache(); // Purge stale temp files periodically
 
     const cacheDir = getDiffCacheDir();
@@ -442,27 +486,36 @@ export async function prepareOriginalFileForDiff(repoRoot: string, filePath: str
 
     // Normalize Windows backslashes to POSIX slashes for Git CLI compatibility
     const posixPath = filePath.replace(/\\/g, '/');
+    const safeRef = validateCheckpointRef(baseRef) ? baseRef.trim() : 'HEAD';
 
     try {
-        const headContent = await runGitCmd(['show', `HEAD:${posixPath}`], repoRoot);
+        const headContent = await runGitCmd(['show', `${safeRef}:${posixPath}`], repoRoot);
         fs.writeFileSync(tempFilePath, headContent, 'utf8');
     } catch {
-        // If file is newly added or not in HEAD, write empty file
+        // If file is newly added or not in baseRef, write empty file
         fs.writeFileSync(tempFilePath, '', 'utf8');
     }
 
     return tempFilePath;
 }
 
+export type ReviewViewMode = 'tree' | 'flat';
+
 export class ReviewChangeTreeItem extends vscode.TreeItem {
+    public readonly isFolder: boolean = false;
+
     constructor(
         public readonly change: ChangedFileInfo,
-        public readonly repoRoot: string
+        public readonly repoRoot: string,
+        viewMode: ReviewViewMode = 'flat',
+        collapsibleState: vscode.TreeItemCollapsibleState = vscode.TreeItemCollapsibleState.None
     ) {
-        super(change.fileName, vscode.TreeItemCollapsibleState.None);
+        super(change.fileName, collapsibleState);
         this.contextValue = 'changedFile';
         const dir = path.dirname(change.filePath);
-        this.description = dir !== '.' ? `${dir} [${change.statusLabel}]` : `[${change.statusLabel}]`;
+        this.description = (viewMode === 'flat' && dir !== '.')
+            ? `${dir} [${change.statusLabel}]`
+            : `[${change.statusLabel}]`;
         this.tooltip = `${change.filePath} (${change.statusLabel})`;
 
         let iconName = 'diff-modified';
@@ -484,13 +537,173 @@ export class ReviewChangeTreeItem extends vscode.TreeItem {
     }
 }
 
+export class ReviewFolderTreeItem extends ReviewChangeTreeItem {
+    public override readonly isFolder: boolean = true;
+
+    constructor(
+        public readonly folderLabel: string,
+        public readonly folderPath: string,
+        repoRoot: string,
+        public readonly children: ReviewChangeTreeItem[]
+    ) {
+        super(
+            {
+                filePath: folderPath,
+                fileName: folderLabel,
+                status: 'M',
+                statusLabel: 'Folder',
+                fullPath: path.resolve(repoRoot, folderPath)
+            },
+            repoRoot,
+            'tree',
+            vscode.TreeItemCollapsibleState.Expanded
+        );
+        this.label = folderLabel;
+        this.contextValue = 'changedFolder';
+        this.description = '';
+        this.tooltip = folderPath;
+        this.iconPath = new vscode.ThemeIcon('folder');
+        this.command = undefined;
+    }
+}
+
+interface InternalFolderTrieNode {
+    segment: string;
+    fullRelPath: string;
+    subfolders: Map<string, InternalFolderTrieNode>;
+    files: ChangedFileInfo[];
+}
+
+/**
+ * Builds a hierarchical tree of ReviewFolderTreeItem and ReviewChangeTreeItem with VS Code-style compact folders
+ */
+export function buildReviewChangeTree(changes: ChangedFileInfo[], repoRoot: string): ReviewChangeTreeItem[] {
+    if (!changes || changes.length === 0) return [];
+
+    const root: InternalFolderTrieNode = {
+        segment: '',
+        fullRelPath: '',
+        subfolders: new Map(),
+        files: []
+    };
+
+    for (const change of changes) {
+        const normalizedPath = change.filePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+        const parts = normalizedPath.split('/').filter(Boolean);
+
+        if (parts.length <= 1) {
+            root.files.push(change);
+            continue;
+        }
+
+        const dirParts = parts.slice(0, -1);
+        let current = root;
+        let accumulatedPath = '';
+
+        for (const seg of dirParts) {
+            accumulatedPath = accumulatedPath ? `${accumulatedPath}/${seg}` : seg;
+            let next = current.subfolders.get(seg);
+            if (!next) {
+                next = {
+                    segment: seg,
+                    fullRelPath: accumulatedPath,
+                    subfolders: new Map(),
+                    files: []
+                };
+                current.subfolders.set(seg, next);
+            }
+            current = next;
+        }
+
+        current.files.push(change);
+    }
+
+    const convertFolderNode = (node: InternalFolderTrieNode): ReviewFolderTreeItem => {
+        let label = node.segment;
+        let current = node;
+
+        // Compact single-child intermediate folders that contain no direct files
+        while (current.files.length === 0 && current.subfolders.size === 1) {
+            const onlyChild = Array.from(current.subfolders.values())[0];
+            label = `${label}/${onlyChild.segment}`;
+            current = onlyChild;
+        }
+
+        const childFolders = Array.from(current.subfolders.values())
+            .map(convertFolderNode)
+            .sort((a, b) => a.folderLabel.localeCompare(b.folderLabel));
+
+        const childFiles = [...current.files]
+            .sort((a, b) => a.fileName.localeCompare(b.fileName))
+            .map(f => new ReviewChangeTreeItem(f, repoRoot, 'tree'));
+
+        return new ReviewFolderTreeItem(label, current.fullRelPath, repoRoot, [...childFolders, ...childFiles]);
+    };
+
+    const topFolders = Array.from(root.subfolders.values())
+        .map(convertFolderNode)
+        .sort((a, b) => a.folderLabel.localeCompare(b.folderLabel));
+
+    const topFiles = [...root.files]
+        .sort((a, b) => a.fileName.localeCompare(b.fileName))
+        .map(f => new ReviewChangeTreeItem(f, repoRoot, 'tree'));
+
+    return [...topFolders, ...topFiles];
+}
+
 export class HerdrReviewChangesProvider implements vscode.TreeDataProvider<ReviewChangeTreeItem>, vscode.Disposable {
     private _onDidChangeTreeData: vscode.EventEmitter<ReviewChangeTreeItem | undefined | null | void>;
     public readonly onDidChangeTreeData: vscode.Event<ReviewChangeTreeItem | undefined | null | void>;
+    private viewMode: ReviewViewMode;
+    private baseCheckpoint: ReviewCheckpoint | null = null;
 
-    constructor(private readonly getRepoRoot: () => Promise<string | null>) {
+    constructor(
+        private readonly getRepoRoot: () => Promise<string | null>,
+        initialViewMode?: ReviewViewMode
+    ) {
         this._onDidChangeTreeData = new vscode.EventEmitter<ReviewChangeTreeItem | undefined | null | void>();
         this.onDidChangeTreeData = this._onDidChangeTreeData.event;
+        if (initialViewMode) {
+            this.viewMode = initialViewMode;
+        } else {
+            const config = vscode.workspace?.getConfiguration ? vscode.workspace.getConfiguration('herdr-collie') : undefined;
+            const configured = config?.get<ReviewViewMode>('reviewChanges.viewMode', 'tree');
+            this.viewMode = (configured === 'flat' || configured === 'tree') ? configured : 'tree';
+        }
+    }
+
+    public getViewMode(): ReviewViewMode {
+        return this.viewMode;
+    }
+
+    public setViewMode(mode: ReviewViewMode): void {
+        this.viewMode = mode;
+        this.refresh();
+    }
+
+    public toggleViewMode(): ReviewViewMode {
+        this.viewMode = this.viewMode === 'tree' ? 'flat' : 'tree';
+        this.refresh();
+        return this.viewMode;
+    }
+
+    public getBaseCheckpoint(): ReviewCheckpoint | null {
+        return this.baseCheckpoint;
+    }
+
+    public setBaseCheckpoint(checkpoint: ReviewCheckpoint | null): void {
+        this.baseCheckpoint = checkpoint;
+        this.refresh();
+    }
+
+    public getEffectiveBaseRef(): string {
+        return (this.baseCheckpoint && validateCheckpointRef(this.baseCheckpoint.hash))
+            ? this.baseCheckpoint.hash
+            : 'HEAD';
+    }
+
+    public getEffectiveBaseLabel(): string {
+        return this.baseCheckpoint ? this.baseCheckpoint.id : 'HEAD';
     }
 
     public refresh(): void {
@@ -501,12 +714,22 @@ export class HerdrReviewChangesProvider implements vscode.TreeDataProvider<Revie
         return element;
     }
 
-    public async getChildren(): Promise<ReviewChangeTreeItem[]> {
+    public async getChildren(element?: ReviewChangeTreeItem): Promise<ReviewChangeTreeItem[]> {
+        if (element) {
+            if (element instanceof ReviewFolderTreeItem) {
+                return element.children;
+            }
+            return [];
+        }
+
         const repoRoot = await this.getRepoRoot();
         if (!repoRoot) return [];
 
         const changes = await getRepoChangedFiles(repoRoot);
-        return changes.map(c => new ReviewChangeTreeItem(c, repoRoot));
+        if (this.viewMode === 'flat') {
+            return changes.map(c => new ReviewChangeTreeItem(c, repoRoot, 'flat'));
+        }
+        return buildReviewChangeTree(changes, repoRoot);
     }
 
     public dispose(): void {

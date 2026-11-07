@@ -2,11 +2,122 @@
  * Copyright (c) 2026 Herdr Collie Authors
  * Licensed under the MIT License.
  */
+import * as path from 'path';
 import * as vscode from 'vscode';
 import * as l10n from '@vscode/l10n';
 import { HerdrSocketClient } from './socketClient';
-import { ParsedAgent, AgentStatusType, parseSnapshotAgents, parseAgents } from './parsers';
+import { ParsedAgent, AgentStatusType, parseSnapshotAgents, parseAgents, extractCleanOutputSummary } from './parsers';
 import { execHerdr } from './executors';
+import { formatWorkspaceProblems, formatDurationCompact } from './formatters';
+
+export type AutoVerifyMode = 'prompt' | 'auto' | 'off';
+
+export interface AutoVerifyDiagnosticsSummary {
+    totalErrors: number;
+    fileCount: number;
+    problemsByFile: { [file: string]: { line: number; severity: 'Error' | 'Warning'; message: string }[] };
+}
+
+function normalizePathForMatch(p?: string): string {
+    if (!p) return '';
+    let normalized = path.normalize(p).replace(/[\/\\]+$/, '');
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+        normalized = normalized.toLowerCase();
+    }
+    return normalized;
+}
+
+/**
+ * Collects Error-severity diagnostics from VS Code Language Server, optionally scoped to an agent's workspace CWD
+ */
+export function collectWorkspaceErrorsForAgent(agentCwd?: string): AutoVerifyDiagnosticsSummary {
+    const problemsByFile: { [file: string]: { line: number; severity: 'Error' | 'Warning'; message: string }[] } = {};
+    let totalErrors = 0;
+    let fileCount = 0;
+
+    if (!vscode || !vscode.languages || typeof vscode.languages.getDiagnostics !== 'function') {
+        return { totalErrors: 0, fileCount: 0, problemsByFile };
+    }
+
+    let allDiagnostics: any[];
+    try {
+        allDiagnostics = vscode.languages.getDiagnostics() as any[];
+    } catch {
+        return { totalErrors: 0, fileCount: 0, problemsByFile };
+    }
+
+    if (!Array.isArray(allDiagnostics)) {
+        return { totalErrors: 0, fileCount: 0, problemsByFile };
+    }
+
+    const cwdNorm = normalizePathForMatch(agentCwd);
+    const hasAbsoluteCwd = Boolean(agentCwd && path.isAbsolute(agentCwd));
+
+    for (const entry of allDiagnostics) {
+        if (!Array.isArray(entry) || entry.length < 2 || !entry[0] || !Array.isArray(entry[1])) {
+            continue;
+        }
+        const [uri, fileDiagnostics] = entry;
+        if (fileDiagnostics.length === 0) continue;
+
+        const fsPath: string = typeof uri === 'string' ? uri : (uri.fsPath || uri.path || '');
+        if (hasAbsoluteCwd && fsPath && path.isAbsolute(fsPath)) {
+            const fileNorm = normalizePathForMatch(fsPath);
+            if (fileNorm !== cwdNorm && !fileNorm.startsWith(cwdNorm + path.sep)) {
+                continue;
+            }
+        }
+
+        const errorSeverity = vscode.DiagnosticSeverity ? vscode.DiagnosticSeverity.Error : 0;
+        const errors = fileDiagnostics.filter((d: any) => d && (d.severity === errorSeverity || d.severity === 0));
+        if (errors.length === 0) continue;
+
+        let relPath = '';
+        if (hasAbsoluteCwd && agentCwd && fsPath && path.isAbsolute(fsPath)) {
+            const candidate = path.relative(agentCwd, fsPath).replace(/\\/g, '/');
+            if (candidate && !candidate.startsWith('..')) {
+                relPath = candidate;
+            }
+        }
+        if (!relPath) {
+            relPath = (vscode.workspace && typeof vscode.workspace.asRelativePath === 'function')
+                ? vscode.workspace.asRelativePath(uri)
+                : (fsPath ? path.basename(fsPath) : 'unknown');
+        }
+
+        problemsByFile[relPath] = errors.map((d: any) => ({
+            line: (d.range?.start?.line ?? 0) + 1,
+            severity: 'Error' as const,
+            message: String(d.message || '')
+        }));
+
+        totalErrors += errors.length;
+        fileCount++;
+    }
+
+    return { totalErrors, fileCount, problemsByFile };
+}
+
+/**
+ * Formats collected workspace error diagnostics into a closed-loop verification prompt for the agent
+ */
+export function formatAutoVerifyDiagnosticsPrompt(
+    summary: AutoVerifyDiagnosticsSummary,
+    attempt?: number,
+    maxRetries?: number
+): string {
+    if (!summary || summary.totalErrors === 0) {
+        return '';
+    }
+    const basePrompt = formatWorkspaceProblems(summary.problemsByFile);
+    if (!basePrompt) {
+        return '';
+    }
+    if (attempt !== undefined && maxRetries !== undefined) {
+        return `[Auto-Verify Loop ${attempt}/${maxRetries}] ${basePrompt}`;
+    }
+    return basePrompt;
+}
 
 /**
  * Safely escapes markdown characters and eliminates newlines for markdown table cells
@@ -24,7 +135,8 @@ export function escapeMarkdownTableCell(str: string): string {
 
 export class AgentHUD implements vscode.Disposable {
     private statusBarItem: vscode.StatusBarItem;
-    private previousAgentStates: Map<string, { status: string; statusType: AgentStatusType; name: string; isWorking: boolean; isBlocked: boolean; workspaceId?: string }> = new Map();
+    private previousAgentStates: Map<string, { status: string; statusType: AgentStatusType; name: string; isWorking: boolean; isBlocked: boolean; workspaceId?: string; statusChangedAt: number; latestOutput?: string }> = new Map();
+    private autoVerifyRetryCounts: Map<string, number> = new Map();
     private isDisposed = false;
     private notifiedBlockedAgents: Set<string> = new Set();
     private refreshSequence = 0;
@@ -98,7 +210,10 @@ export class AgentHUD implements vscode.Disposable {
         if (event.event === 'agent.blocked' || (event.agent_status && (event.agent_status === 'blocked' || event.agent_status === 'waiting'))) {
             const agentId = event.pane_id || event.id || event.agent;
             const agentName = event.name || agentId;
-            const workspaceId = event.workspace_id || event.workspaceId || event.workspace || this.previousAgentStates.get(agentId)?.workspaceId;
+            const prev = agentId ? this.previousAgentStates.get(agentId) : undefined;
+            const workspaceId = event.workspace_id || event.workspaceId || event.workspace || prev?.workspaceId;
+            const rawOut = event.last_output ?? event.latest_output ?? event.summary ?? event.last_line ?? event.message;
+            const latestOutput = typeof rawOut === 'string' ? extractCleanOutputSummary(rawOut) : prev?.latestOutput;
             if (agentId && !this.notifiedBlockedAgents.has(agentId)) {
                 this.notifiedBlockedAgents.add(agentId);
                 const config = vscode.workspace.getConfiguration('herdr-collie');
@@ -111,11 +226,31 @@ export class AgentHUD implements vscode.Disposable {
                         statusIcon: '🔴',
                         isWorking: false,
                         isBlocked: true,
-                        workspaceId: workspaceId
+                        workspaceId: workspaceId,
+                        statusChangedAt: prev?.statusType === 'blocked' ? prev.statusChangedAt : Date.now(),
+                        ...(latestOutput !== undefined ? { latestOutput } : {})
                     });
                 }
             }
         }
+    }
+
+    /**
+     * Enriches parsed agents with tracked state transition timestamps and latest output summaries
+     */
+    public enrichAgentsWithStateMetadata(agents: ParsedAgent[], nowMs: number = Date.now()): ParsedAgent[] {
+        return agents.map(agent => {
+            const prev = this.previousAgentStates.get(agent.id);
+            const statusChangedAt = typeof agent.statusChangedAt === 'number'
+                ? agent.statusChangedAt
+                : (prev && prev.statusType === agent.statusType ? prev.statusChangedAt : nowMs);
+            const latestOutput = agent.latestOutput ?? prev?.latestOutput;
+            return {
+                ...agent,
+                statusChangedAt,
+                ...(latestOutput !== undefined ? { latestOutput } : {})
+            };
+        });
     }
 
     /**
@@ -157,12 +292,21 @@ export class AgentHUD implements vscode.Disposable {
     /**
      * Detects status changes and triggers interactive notifications
      */
-    private processAgentStateTransitions(currentAgents: ParsedAgent[]): void {
+    private processAgentStateTransitions(currentAgents: ParsedAgent[], nowMs: number = Date.now()): void {
         const config = vscode.workspace.getConfiguration('herdr-collie');
         const enableNotifications = config.get<boolean>('agentHUD.enableNotifications', true);
 
         for (const agent of currentAgents) {
             const prev = this.previousAgentStates.get(agent.id);
+            const statusChangedAt = typeof agent.statusChangedAt === 'number'
+                ? agent.statusChangedAt
+                : (prev && prev.statusType === agent.statusType ? prev.statusChangedAt : nowMs);
+            const latestOutput = agent.latestOutput ?? prev?.latestOutput;
+
+            agent.statusChangedAt = statusChangedAt;
+            if (latestOutput !== undefined) {
+                agent.latestOutput = latestOutput;
+            }
 
             // Check if newly blocked
             if (agent.isBlocked) {
@@ -178,8 +322,8 @@ export class AgentHUD implements vscode.Disposable {
             }
 
             // Check if agent transitioned from working to done
-            if (prev && prev.isWorking && agent.statusType === 'done' && enableNotifications) {
-                this.triggerDoneNotification(agent);
+            if (prev && prev.isWorking && agent.statusType === 'done') {
+                this.handleAgentDoneTransition(agent, enableNotifications);
             }
 
             this.previousAgentStates.set(agent.id, {
@@ -188,7 +332,9 @@ export class AgentHUD implements vscode.Disposable {
                 name: agent.name,
                 isWorking: agent.isWorking,
                 isBlocked: agent.isBlocked,
-                workspaceId: agent.workspaceId
+                workspaceId: agent.workspaceId,
+                statusChangedAt,
+                latestOutput
             });
         }
 
@@ -198,6 +344,7 @@ export class AgentHUD implements vscode.Disposable {
             if (!currentIds.has(id)) {
                 this.previousAgentStates.delete(id);
                 this.notifiedBlockedAgents.delete(id);
+                this.autoVerifyRetryCounts.delete(id);
             }
         }
     }
@@ -212,8 +359,13 @@ export class AgentHUD implements vscode.Disposable {
         const replyBtn = l10n.t('Quick Reply...');
         const focusBtn = l10n.t('Focus Terminal');
 
+        const baseMessage = l10n.t("🤖 Agent '{0}' requires input / confirmation:", agent.name);
+        const warningText = agent.latestOutput
+            ? `${baseMessage} "${agent.latestOutput}"`
+            : baseMessage;
+
         const action = await vscode.window.showWarningMessage(
-            l10n.t("🤖 Agent '{0}' requires input / confirmation:", agent.name),
+            warningText,
             approveBtn,
             denyBtn,
             replyBtn,
@@ -251,7 +403,59 @@ export class AgentHUD implements vscode.Disposable {
     }
 
     /**
-     * Displays completion notification
+     * Closed-loop verification gate when an agent transitions from working to done
+     */
+    private async handleAgentDoneTransition(agent: ParsedAgent, enableNotifications: boolean): Promise<void> {
+        const config = vscode.workspace.getConfiguration('herdr-collie');
+        const rawMode = config.get<string>('agentHUD.autoVerifyDiagnostics', 'prompt');
+        const mode: AutoVerifyMode = (rawMode === 'auto' || rawMode === 'off' || rawMode === 'prompt') ? rawMode : 'prompt';
+
+        if (mode === 'off') {
+            this.autoVerifyRetryCounts.delete(agent.id);
+            if (enableNotifications) {
+                await this.triggerDoneNotification(agent);
+            }
+            return;
+        }
+
+        const summary = collectWorkspaceErrorsForAgent(agent.workspaceCwd);
+        if (summary.totalErrors === 0) {
+            this.autoVerifyRetryCounts.delete(agent.id);
+            if (enableNotifications) {
+                await this.triggerDoneNotification(agent);
+            }
+            return;
+        }
+
+        if (mode === 'auto') {
+            const rawMaxRetries = config.get<number>('agentHUD.autoVerifyMaxRetries', 2);
+            const maxRetries = Math.max(1, Math.min(5, typeof rawMaxRetries === 'number' ? rawMaxRetries : 2));
+            const currentRetries = this.autoVerifyRetryCounts.get(agent.id) || 0;
+
+            if (currentRetries < maxRetries) {
+                const attempt = currentRetries + 1;
+                this.autoVerifyRetryCounts.set(agent.id, attempt);
+                const prompt = formatAutoVerifyDiagnosticsPrompt(summary, attempt, maxRetries);
+                await this.sendPromptToAgent(agent.id, prompt, agent.workspaceCwd);
+                if (enableNotifications) {
+                    vscode.window.showInformationMessage(
+                        l10n.t("🔄 Auto-Verify ({0}/{1}): Sent {2} remaining error(s) back to '{3}'", attempt, maxRetries, summary.totalErrors, agent.name)
+                    );
+                }
+                return;
+            }
+
+            // Circuit breaker reached: reset counter and escalate to human prompt
+            this.autoVerifyRetryCounts.delete(agent.id);
+        }
+
+        if (enableNotifications) {
+            await this.triggerDoneWithErrorsNotification(agent, summary);
+        }
+    }
+
+    /**
+     * Displays completion notification when no diagnostic errors remain (or verification is off)
      */
     private async triggerDoneNotification(agent: ParsedAgent): Promise<void> {
         const sessionName = this.getSessionName();
@@ -267,6 +471,65 @@ export class AgentHUD implements vscode.Disposable {
         if (action === focusBtn) {
             vscode.commands.executeCommand('herdr-collie.attachWorkspace', agent.id, true, this.getAgentDisplayName(agent), sessionName, agent.workspaceId);
         }
+    }
+
+    /**
+     * Displays interactive warning notification when agent finishes with remaining workspace errors
+     */
+    private async triggerDoneWithErrorsNotification(agent: ParsedAgent, summary: AutoVerifyDiagnosticsSummary): Promise<void> {
+        const sessionName = this.getSessionName();
+        const sendErrorsBtn = l10n.t('Send Errors to Agent ({0})', summary.totalErrors);
+        const focusBtn = l10n.t('Focus Terminal');
+        const dismissBtn = l10n.t('Dismiss');
+
+        const action = await vscode.window.showWarningMessage(
+            l10n.t("⚠️ Agent '{0}' finished, but {1} error(s) remain in workspace.", agent.name, summary.totalErrors),
+            sendErrorsBtn,
+            focusBtn,
+            dismissBtn
+        );
+
+        if (action === sendErrorsBtn) {
+            const prompt = formatAutoVerifyDiagnosticsPrompt(summary);
+            await this.sendPromptToAgent(agent.id, prompt, agent.workspaceCwd);
+            vscode.window.showInformationMessage(
+                l10n.t("Sent {0} diagnostic error(s) back to '{1}'", summary.totalErrors, agent.name)
+            );
+        } else if (action === focusBtn) {
+            vscode.commands.executeCommand('herdr-collie.attachWorkspace', agent.id, true, this.getAgentDisplayName(agent), sessionName, agent.workspaceId);
+        }
+    }
+
+    /**
+     * Sends a prompt string to an agent via socket or CLI fallback
+     */
+    private async sendPromptToAgent(agentId: string, prompt: string, cwd?: string): Promise<boolean> {
+        if (this.socketClient.isConnected) {
+            try {
+                await this.socketClient.sendAgentPrompt(agentId, prompt);
+                return true;
+            } catch {
+                // Fallback to CLI if socket fails
+            }
+        }
+
+        const session = this.getSessionName();
+        const sessionArgs = session ? ['--session', session] : [];
+        return new Promise<boolean>((resolve) => {
+            execHerdr([...sessionArgs, 'agent', 'prompt', agentId, prompt], { cwd }, (err: any) => {
+                if (err) {
+                    execHerdr([...sessionArgs, 'pane', 'send-text', agentId, prompt], { cwd }, (fbErr: any) => {
+                        resolve(!fbErr);
+                    });
+                } else {
+                    resolve(true);
+                }
+            });
+        });
+    }
+
+    public getAutoVerifyRetryCount(agentId: string): number {
+        return this.autoVerifyRetryCounts.get(agentId) || 0;
     }
 
     /**
@@ -317,7 +580,7 @@ export class AgentHUD implements vscode.Disposable {
     /**
      * Formats status bar item text and tooltip
      */
-    private updateHUDText(agents: ParsedAgent[]): void {
+    private updateHUDText(agents: ParsedAgent[], nowMs: number = Date.now()): void {
         const blockedCount = agents.filter(a => a.isBlocked).length;
         if (this.currentBlockedCount !== blockedCount) {
             this.currentBlockedCount = blockedCount;
@@ -353,9 +616,13 @@ export class AgentHUD implements vscode.Disposable {
         md.appendMarkdown(`| :--- | :--- | :--- | :--- |\n`);
         for (const a of agents) {
             const wsBadge = a.workspaceLabel || (a.workspaceId ? `Workspace ${a.workspaceId}` : '-');
+            const durationStr = (typeof a.statusChangedAt === 'number' && nowMs >= a.statusChangedAt)
+                ? formatDurationCompact(nowMs - a.statusChangedAt)
+                : '';
+            const statusText = durationStr ? `${a.status} (${durationStr})` : a.status;
             const safeName = escapeMarkdownTableCell(a.name);
             const safeWs = escapeMarkdownTableCell(wsBadge);
-            const safeStatus = escapeMarkdownTableCell(a.status);
+            const safeStatus = escapeMarkdownTableCell(statusText);
             const safeId = escapeMarkdownTableCell(a.id);
             md.appendMarkdown(`| ${a.statusIcon} **${safeName}** | \`${safeWs}\` | \`${safeStatus}\` | \`${safeId}\` |\n`);
         }
@@ -395,6 +662,9 @@ export class AgentHUD implements vscode.Disposable {
             return;
         }
 
+        const nowMs = Date.now();
+        agents = this.enrichAgentsWithStateMetadata(agents, nowMs);
+
         interface AgentQuickPickItem extends vscode.QuickPickItem {
             agent: ParsedAgent;
         }
@@ -403,12 +673,21 @@ export class AgentHUD implements vscode.Disposable {
             const wsBadge = a.workspaceLabel || (a.workspaceId ? `Workspace ${a.workspaceId}` : '');
             const agentTitle = a.name && a.name !== a.id ? a.name : 'Agent';
             const label = wsBadge ? `${a.statusIcon} [${wsBadge}] ${agentTitle}` : `${a.statusIcon} ${agentTitle}`;
+            const durationStr = (typeof a.statusChangedAt === 'number' && nowMs >= a.statusChangedAt)
+                ? formatDurationCompact(nowMs - a.statusChangedAt)
+                : '';
+            const description = a.isBlocked
+                ? `⚠️ ` + l10n.t('Input Needed') + (durationStr ? ` (${durationStr})` : '') + ` (${a.id})`
+                : (durationStr ? `${durationStr} • (${a.id})` : `(${a.id})`);
+            const baseDetail = a.isBlocked
+                ? l10n.t('⚠️ Waiting for confirmation! Click to respond or focus.')
+                : (a.isWorking ? l10n.t('🟢 Agent is actively processing tasks...') : l10n.t('🟡 Agent is idle and ready for instructions.'));
+            const detail = a.latestOutput ? `${baseDetail} — "${a.latestOutput}"` : baseDetail;
+
             return {
                 label,
-                description: a.isBlocked ? `⚠️ ` + l10n.t('Input Needed') + ` (${a.id})` : `(${a.id})`,
-                detail: a.isBlocked 
-                    ? l10n.t('⚠️ Waiting for confirmation! Click to respond or focus.') 
-                    : (a.isWorking ? l10n.t('🟢 Agent is actively processing tasks...') : l10n.t('🟡 Agent is idle and ready for instructions.')),
+                description,
+                detail,
                 agent: a,
                 buttons: [
                     {

@@ -8,9 +8,21 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest"]') }}
 
     steps:
       - name: Checkout code
@@ -33,8 +45,31 @@ jobs:
       - name: Compile TypeScript
         run: pnpm run compile
 
-      - name: Package Extension
-        run: pnpm run package
-
       - name: Run Unit Tests
         run: pnpm run test:unit
+
+      - name: Run Integration Tests
+        run: pnpm run test:integration
+
+      - name: Package Extension
+        if: matrix.os == 'ubuntu-latest'
+        run: pnpm run package
+
+      - name: Verify Package Contents
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          pnpm exec vsce ls --no-dependencies > /tmp/vsix-files.txt
+          cat /tmp/vsix-files.txt
+          if grep -E '(\.test\.|icon\?|iconのコ|/\.|\btest/|\.env)' /tmp/vsix-files.txt; then
+            echo "::error::Unwanted files or test suites detected in VSIX package!"
+            exit 1
+          fi
+
+      - name: Upload VSIX Artifact
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: herdr-collie-vsix
+          path: '*.vsix'
+          if-no-files-found: error
+          retention-days: 7
