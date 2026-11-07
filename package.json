@@ -718,7 +718,7 @@
     "@types/mocha": "^10.0.10",
     "@types/node": "~20.19.43",
     "@types/vscode": "^1.90.0",
-    "@vscode/vsce": "^3.9.2",
+    "@vscode/vsce": "^4.1.0",
     "chai": "^6.3.0",
     "esbuild": "^0.21.5",
     "mocha": "^11.8.0",
