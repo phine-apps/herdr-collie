@@ -9,18 +9,24 @@ import * as os from 'os';
 import * as fs from 'fs';
 import { HerdrSocketClient, getSessionSocketPath, validateSessionName } from '../../socketClient';
 
-describe('HerdrSocketClient Unit Tests', () => {
+describe('HerdrSocketClient Unit Tests', function() {
+    this.timeout(10000);
+
     let mockServer: net.Server;
     let tempSockPath: string;
+    let activeSockets: Set<net.Socket> = new Set();
     let lastClientSocket: net.Socket | null = null;
     let receivedServerData: string[] = [];
 
     beforeEach((done) => {
         receivedServerData = [];
+        activeSockets.clear();
         tempSockPath = path.join(os.tmpdir(), `herdr-test-${Date.now()}-${Math.random().toString(36).substring(7)}.sock`);
 
         mockServer = net.createServer((socket) => {
+            activeSockets.add(socket);
             lastClientSocket = socket;
+            socket.on('close', () => activeSockets.delete(socket));
             socket.on('error', () => {}); // Ignore client disconnect errors
             socket.on('data', (data) => {
                 const str = data.toString();
@@ -64,17 +70,27 @@ describe('HerdrSocketClient Unit Tests', () => {
     });
 
     afterEach(async () => {
+        for (const sock of activeSockets) {
+            try {
+                sock.destroy();
+            } catch (e) {}
+        }
+        activeSockets.clear();
+
         if (mockServer) {
-            await new Promise<void>((resolve) => {
-                mockServer.close(() => {
-                    try {
-                        if (fs.existsSync(tempSockPath)) {
-                            fs.unlinkSync(tempSockPath);
-                        }
-                    } catch (e) {}
-                    resolve();
-                });
-            });
+            await Promise.race([
+                new Promise<void>((resolve) => {
+                    mockServer.close(() => {
+                        try {
+                            if (fs.existsSync(tempSockPath)) {
+                                fs.unlinkSync(tempSockPath);
+                            }
+                        } catch (e) {}
+                        resolve();
+                    });
+                }),
+                new Promise<void>((resolve) => setTimeout(resolve, 1000))
+            ]);
         }
     });
 

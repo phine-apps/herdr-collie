@@ -39,8 +39,11 @@ First off, thank you for considering contributing to Herdr Collie!
 
 5. **Run Tests:**
    ```bash
-   pnpm run test:unit
+   pnpm test
    ```
+   Or run individually:
+   - Unit tests: `pnpm run test:unit`
+   - Integration tests: `pnpm run test:integration`
 
 ## License
 

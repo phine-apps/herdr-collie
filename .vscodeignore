@@ -18,12 +18,17 @@ CONTRIBUTING.md
 DEVELOPMENT.md
 PUBLISHING.md
 TODO.md
+AGENTS.md
+docs/
 
 # Artifacts & Logs
 *.vsix
 *.log
+media/icon?*.png
 
 # Bundled Extension Inclusion
 dist/**
 !dist/extension.js
-!media/**
+!media/collie-icon.svg
+!media/icon.png
+!media/icons/**

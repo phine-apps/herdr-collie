@@ -38,14 +38,28 @@ export interface MockVscodeState {
     treeViews: Map<string, MockTreeView>;
     configurations: Map<string, any>;
     executedCommands: { command: string; args: any[] }[];
+    workspaceDiagnostics: [any, any[]][];
 }
 
 export const mockState: MockVscodeState = {
     statusBarItems: [],
     treeViews: new Map(),
     configurations: new Map(),
-    executedCommands: []
+    executedCommands: [],
+    workspaceDiagnostics: []
 };
+
+export function defaultGetDiagnostics(uri?: any): any[] {
+    if (!uri) {
+        return mockState.workspaceDiagnostics;
+    }
+    const targetPath = typeof uri === 'string' ? uri : (uri?.fsPath || uri?.path || '');
+    const found = mockState.workspaceDiagnostics.find(([u]) => {
+        const uPath = typeof u === 'string' ? u : (u?.fsPath || u?.path || '');
+        return uPath === targetPath;
+    });
+    return found ? found[1] : [];
+}
 
 export function resetMockState(): void {
     mockState.lastWarningMessage = undefined;
@@ -57,6 +71,10 @@ export function resetMockState(): void {
     mockState.treeViews = new Map();
     mockState.configurations.clear();
     mockState.executedCommands = [];
+    mockState.workspaceDiagnostics = [];
+    if (typeof mockVscode !== 'undefined' && mockVscode.languages) {
+        mockVscode.languages.getDiagnostics = defaultGetDiagnostics;
+    }
 }
 
 export class MockMarkdownString {
@@ -240,7 +258,7 @@ export const mockVscode = {
     languages: {
         registerCodeActionsProvider: (selector: any, provider: any, metadata?: any) => ({ dispose: () => {} }),
         registerCodeLensProvider: (selector: any, provider: any) => ({ dispose: () => {} }),
-        getDiagnostics: (uri?: any): any[] => []
+        getDiagnostics: defaultGetDiagnostics
     },
     comments: {
         createCommentController: (id: string, label: string) => {

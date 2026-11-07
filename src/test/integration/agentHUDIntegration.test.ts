@@ -405,4 +405,109 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
         hud.dispose();
         client.dispose();
     });
+
+    it('offers to send remaining errors back to agent in prompt mode when working -> done with errors', async () => {
+        const client = new HerdrSocketClient(tempSockPath);
+        client.on('error', () => {});
+        client.connect();
+
+        mockState.configurations.set('herdr-collie.agentHUD.autoVerifyDiagnostics', 'prompt');
+        mockState.warningMessageResponse = 'Send Errors to Agent (2)';
+
+        const hud = new AgentHUD(client, () => 'test-session');
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        // Simulate 2 compiler errors in workspace
+        const fileUri = mockVscode.Uri.file('/workspace/project/src/service.ts');
+        mockState.workspaceDiagnostics = [
+            [
+                fileUri,
+                [
+                    new mockVscode.Diagnostic(new mockVscode.Range(10, 0, 10, 5), 'Type string is not assignable to number', mockVscode.DiagnosticSeverity.Error),
+                    new mockVscode.Diagnostic(new mockVscode.Range(24, 0, 24, 5), 'Missing return statement', mockVscode.DiagnosticSeverity.Error)
+                ]
+            ]
+        ];
+
+        // Transition agent-1 from running -> done
+        currentMockAgents = [
+            { id: 'agent-1', name: 'Claude-Worker', status: 'done' },
+            { id: 'agent-2', name: 'Agy-Worker', status: 'idle' }
+        ];
+
+        await hud.refresh();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        expect(mockState.lastWarningMessage).to.not.be.undefined;
+        expect(mockState.lastWarningMessage?.message).to.include("Agent 'Claude-Worker' finished, but 2 error(s) remain in workspace.");
+        expect(mockState.lastWarningMessage?.items).to.include('Send Errors to Agent (2)');
+
+        const promptCalls = receivedCommands.filter(c => c.method === 'agent.prompt');
+        expect(promptCalls.length).to.equal(1);
+        expect(promptCalls[0].params.agent).to.equal('agent-1');
+        expect(promptCalls[0].params.prompt).to.include('Type string is not assignable to number');
+        expect(promptCalls[0].params.prompt).to.include('Missing return statement');
+
+        hud.dispose();
+        client.dispose();
+    });
+
+    it('automatically dispatches errors up to maxRetries in auto mode and trips circuit breaker on exhaustion', async () => {
+        const client = new HerdrSocketClient(tempSockPath);
+        client.on('error', () => {});
+        client.connect();
+
+        mockState.configurations.set('herdr-collie.agentHUD.autoVerifyDiagnostics', 'auto');
+        mockState.configurations.set('herdr-collie.agentHUD.autoVerifyMaxRetries', 2);
+
+        const hud = new AgentHUD(client, () => 'test-session');
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        const fileUri = mockVscode.Uri.file('/workspace/project/src/service.ts');
+        mockState.workspaceDiagnostics = [
+            [
+                fileUri,
+                [new mockVscode.Diagnostic(new mockVscode.Range(5, 0, 5, 10), 'Syntax error', mockVscode.DiagnosticSeverity.Error)]
+            ]
+        ];
+
+        // 1st completion: working -> done (should trigger Auto-Verify 1/2)
+        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'done' }];
+        await hud.refresh();
+        await new Promise((resolve) => setTimeout(resolve, 80));
+
+        expect(hud.getAutoVerifyRetryCount('agent-1')).to.equal(1);
+        let promptCalls = receivedCommands.filter(c => c.method === 'agent.prompt');
+        expect(promptCalls.length).to.equal(1);
+        expect(promptCalls[0].params.prompt).to.include('[Auto-Verify Loop 1/2]');
+
+        // Agent resumes working, then finishes 2nd time with error still present (should trigger Auto-Verify 2/2)
+        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'running' }];
+        await hud.refresh();
+        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'done' }];
+        await hud.refresh();
+        await new Promise((resolve) => setTimeout(resolve, 80));
+
+        expect(hud.getAutoVerifyRetryCount('agent-1')).to.equal(2);
+        promptCalls = receivedCommands.filter(c => c.method === 'agent.prompt');
+        expect(promptCalls.length).to.equal(2);
+        expect(promptCalls[1].params.prompt).to.include('[Auto-Verify Loop 2/2]');
+
+        // Agent resumes working, then finishes 3rd time with error STILL present -> circuit breaker trips!
+        mockState.warningMessageResponse = 'Dismiss';
+        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'running' }];
+        await hud.refresh();
+        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'done' }];
+        await hud.refresh();
+        await new Promise((resolve) => setTimeout(resolve, 80));
+
+        // Counter reset and no 3rd auto-prompt sent; escalated to warning message
+        expect(hud.getAutoVerifyRetryCount('agent-1')).to.equal(0);
+        promptCalls = receivedCommands.filter(c => c.method === 'agent.prompt');
+        expect(promptCalls.length).to.equal(2);
+        expect(mockState.lastWarningMessage?.message).to.include("Agent 'Claude-Worker' finished, but 1 error(s) remain in workspace.");
+
+        hud.dispose();
+        client.dispose();
+    });
 });

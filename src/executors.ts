@@ -163,7 +163,12 @@ export async function runGitCmd(args: string[], cwd: string): Promise<string> {
                     // Git diff can return exit code 1 if differences exist
                     resolve(stdout || '');
                 } else {
-                    const errMsg = (stderr && stderr.trim()) || error.message || 'Git command failed';
+                    const stderrTrimmed = (stderr && stderr.trim()) || '';
+                    const stdoutTrimmed = (stdout && stdout.trim()) || '';
+                    let errMsg = stderrTrimmed || stdoutTrimmed || error.message || 'Git command failed';
+                    if (stderrTrimmed && stdoutTrimmed && (args[0] === 'merge' || /^warning:/i.test(stderrTrimmed))) {
+                        errMsg = `${stderrTrimmed}\n${stdoutTrimmed}`;
+                    }
                     reject(new Error(errMsg));
                 }
                 return;

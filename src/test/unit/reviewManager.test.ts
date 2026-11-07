@@ -15,7 +15,9 @@ import {
     parseGitStatusPorcelain,
     validateCheckpointRef,
     cleanDiffCache,
-    getDiffCacheDir
+    getDiffCacheDir,
+    buildReviewChangeTree,
+    ReviewFolderTreeItem
 } from '../../reviewManager';
 
 describe('reviewManager Unit Tests', () => {
@@ -133,6 +135,28 @@ describe('reviewManager Unit Tests', () => {
             expect(prompt).to.include('**Additional Instructions:**');
             expect(prompt).to.include('Make sure all tests in auth.test.ts pass.');
         });
+
+        it('appends Outer-Loop Rule Crystallization section when crystallizeRule is enabled', () => {
+            const comments: ReviewCommentItem[] = [
+                {
+                    id: 'c1',
+                    filePath: 'src/executors.ts',
+                    fileName: 'executors.ts',
+                    startLine: 20,
+                    endLine: 20,
+                    commentText: 'Always pass arguments as discrete array to execFile instead of shell string interpolation.'
+                }
+            ];
+
+            const prompt = formatReviewFeedback(comments, {
+                agentName: 'claude',
+                crystallizeRule: true,
+                targetRuleFile: 'AGENTS.md'
+            });
+
+            expect(prompt).to.include('### 🔄 Outer-Loop Rule Crystallization (`AGENTS.md`)');
+            expect(prompt).to.include('append a concise rule to `AGENTS.md` to prevent recurrence');
+        });
     });
 
     describe('HerdrReviewController', () => {
@@ -174,6 +198,60 @@ describe('reviewManager Unit Tests', () => {
             expect(created.commentText).to.equal('Check return type');
             expect(created.codeSnippet).to.equal('return true;');
             expect(controller.commentCount).to.equal(1);
+
+            controller.dispose();
+        });
+
+        it('submitSafely preserves comments on cancelled or failed delivery and clears only on success (All-or-Nothing)', async () => {
+            const controller = new HerdrReviewController();
+
+            // 1. Empty queue returns false immediately
+            let called = false;
+            const emptyRes = await controller.submitSafely(async () => {
+                called = true;
+                return true;
+            });
+            expect(emptyRes).to.be.false;
+            expect(called).to.be.false;
+
+            controller.addComment({
+                id: 'c1',
+                filePath: 'src/auth.ts',
+                fileName: 'auth.ts',
+                startLine: 10,
+                endLine: 12,
+                commentText: 'Validate token expiration.'
+            });
+            expect(controller.commentCount).to.equal(1);
+
+            // 2. Cancelled delivery (returns false) preserves all comments
+            const cancelRes = await controller.submitSafely(async (prompt) => {
+                expect(prompt).to.include('Validate token expiration.');
+                return false;
+            });
+            expect(cancelRes).to.be.false;
+            expect(controller.commentCount).to.equal(1);
+
+            // 3. Thrown error during delivery preserves all comments
+            const errorRes = await controller.submitSafely(async () => {
+                throw new Error('Socket disconnected');
+            });
+            expect(errorRes).to.be.false;
+            expect(controller.commentCount).to.equal(1);
+
+            // 4. Successful delivery (returns true) clears all comments
+            let deliveredPrompt = '';
+            const successRes = await controller.submitSafely(
+                async (prompt) => {
+                    deliveredPrompt = prompt;
+                    return true;
+                },
+                { branchName: 'feat/safe-review', crystallizeRule: true }
+            );
+            expect(successRes).to.be.true;
+            expect(deliveredPrompt).to.include('feat/safe-review');
+            expect(deliveredPrompt).to.include('Outer-Loop Rule Crystallization');
+            expect(controller.commentCount).to.equal(0);
 
             controller.dispose();
         });
@@ -307,6 +385,68 @@ describe('reviewManager Unit Tests', () => {
             const feedback = formatReviewFeedback(comments);
             expect(feedback).to.include('````typescript');
             expect(feedback).to.include('const inject = "```";');
+        });
+    });
+
+    describe('buildReviewChangeTree (Hierarchical & Compact Folders)', () => {
+        it('returns empty array when changes list is empty', () => {
+            expect(buildReviewChangeTree([], '/repo')).to.deep.equal([]);
+        });
+
+        it('compacts single-child folder chains without direct files into a single folder item', () => {
+            const changes = parseGitStatusPorcelain([
+                ' M src/test/unit/agentHUD.test.ts',
+                'A  src/test/unit/l10n.test.ts',
+                ' M package.json'
+            ].join('\n'), '/repo');
+
+            const tree = buildReviewChangeTree(changes, '/repo');
+            // Top level should have 1 compacted folder ('src/test/unit') and 1 root file ('package.json')
+            expect(tree).to.have.length(2);
+
+            const folderNode = tree[0] as ReviewFolderTreeItem;
+            expect(folderNode).to.be.instanceOf(ReviewFolderTreeItem);
+            expect(folderNode.isFolder).to.be.true;
+            expect(folderNode.folderLabel).to.equal('src/test/unit');
+            expect(folderNode.folderPath).to.equal('src/test/unit');
+            expect(folderNode.command).to.be.undefined;
+            expect(folderNode.children).to.have.length(2);
+            expect(folderNode.children[0].change.fileName).to.equal('agentHUD.test.ts');
+            expect(folderNode.children[0].description).to.equal('[Modified]');
+            expect(folderNode.children[1].change.fileName).to.equal('l10n.test.ts');
+            expect(folderNode.children[1].description).to.equal('[Added]');
+
+            const rootFileNode = tree[1];
+            expect(rootFileNode.isFolder).to.be.false;
+            expect(rootFileNode.change.fileName).to.equal('package.json');
+            expect(rootFileNode.description).to.equal('[Modified]');
+        });
+
+        it('preserves parent folder split when folder contains both direct files and nested subfolders', () => {
+            const changes = parseGitStatusPorcelain([
+                ' M src/extension.ts',
+                ' M src/test/unit/reviewManager.test.ts'
+            ].join('\n'), '/repo');
+
+            const tree = buildReviewChangeTree(changes, '/repo');
+            expect(tree).to.have.length(1);
+
+            const srcFolder = tree[0] as ReviewFolderTreeItem;
+            expect(srcFolder.isFolder).to.be.true;
+            expect(srcFolder.folderLabel).to.equal('src');
+            expect(srcFolder.children).to.have.length(2);
+
+            // Subfolder 'test/unit' should be compacted inside 'src', ordered before file 'extension.ts'
+            const nestedFolder = srcFolder.children[0] as ReviewFolderTreeItem;
+            expect(nestedFolder.isFolder).to.be.true;
+            expect(nestedFolder.folderLabel).to.equal('test/unit');
+            expect(nestedFolder.folderPath).to.equal('src/test/unit');
+            expect(nestedFolder.children).to.have.length(1);
+            expect(nestedFolder.children[0].change.fileName).to.equal('reviewManager.test.ts');
+
+            const directFile = srcFolder.children[1];
+            expect(directFile.isFolder).to.be.false;
+            expect(directFile.change.fileName).to.equal('extension.ts');
         });
     });
 });

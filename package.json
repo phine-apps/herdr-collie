@@ -18,7 +18,22 @@
     "vscode": "^1.90.0"
   },
   "categories": [
+    "AI",
+    "Machine Learning",
+    "Source Code",
     "Other"
+  ],
+  "keywords": [
+    "herdr",
+    "ai-agents",
+    "multi-agent",
+    "git-worktree",
+    "claude-code",
+    "antigravity",
+    "code-review",
+    "diff-to-prompt",
+    "orchestration",
+    "swarm"
   ],
   "activationEvents": [],
   "main": "./dist/extension.js",
@@ -81,6 +96,11 @@
         "command": "herdr-collie.closeWorkspace",
         "title": "%command.closeWorkspace%",
         "icon": "$(trash)"
+      },
+      {
+        "command": "herdr-collie.openWorkspaceInNewWindow",
+        "title": "%command.openWorkspaceInNewWindow%",
+        "icon": "$(link-external)"
       },
       {
         "command": "herdr-collie.sendTerminalOutput",
@@ -158,8 +178,33 @@
         "icon": "$(clear-all)"
       },
       {
+        "command": "herdr-collie.focusTab",
+        "title": "%command.focusTab%",
+        "icon": "$(window)"
+      },
+      {
+        "command": "herdr-collie.createTab",
+        "title": "%command.createTab%",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "herdr-collie.closeTab",
+        "title": "%command.closeTab%",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "herdr-collie.peekAgentOutput",
+        "title": "%command.peekAgentOutput%",
+        "icon": "$(eye)"
+      },
+      {
         "command": "herdr-collie.openDiff",
         "title": "%command.openDiff%"
+      },
+      {
+        "command": "herdr-collie.toggleReviewViewMode",
+        "title": "%command.toggleReviewViewMode%",
+        "icon": "$(list-tree)"
       },
       {
         "command": "herdr-collie.refreshReviewChanges",
@@ -200,6 +245,9 @@
         },
         {
           "command": "herdr-collie.selectWorkspace"
+        },
+        {
+          "command": "herdr-collie.openWorkspaceInNewWindow"
         },
         {
           "command": "herdr-collie.launchWorktreeAgent",
@@ -276,6 +324,9 @@
         {
           "command": "herdr-collie.openDiff",
           "when": "false"
+        },
+        {
+          "command": "herdr-collie.toggleReviewViewMode"
         },
         {
           "command": "herdr-collie.refreshReviewChanges"
@@ -373,6 +424,11 @@
           "group": "navigation@0"
         },
         {
+          "command": "herdr-collie.toggleReviewViewMode",
+          "when": "view == herdr-collie.reviewChanges",
+          "group": "navigation@0"
+        },
+        {
           "command": "herdr-collie.createReviewCheckpoint",
           "when": "view == herdr-collie.reviewChanges",
           "group": "navigation@1"
@@ -418,6 +474,26 @@
           "command": "herdr-collie.closeWorkspace",
           "when": "view == herdr-collie.workspaces && viewItem == workspace",
           "group": "inline@2"
+        },
+        {
+          "command": "herdr-collie.openWorkspaceInNewWindow",
+          "when": "view == herdr-collie.workspaces && (viewItem == workspace || viewItem == worktreeWorkspace)",
+          "group": "inline@0"
+        },
+        {
+          "command": "herdr-collie.createTab",
+          "when": "view == herdr-collie.workspaces && (viewItem == workspace || viewItem == worktreeWorkspace)",
+          "group": "inline@0"
+        },
+        {
+          "command": "herdr-collie.closeTab",
+          "when": "view == herdr-collie.workspaces && viewItem == tab",
+          "group": "inline@1"
+        },
+        {
+          "command": "herdr-collie.peekAgentOutput",
+          "when": "view == herdr-collie.agents && (viewItem == agent || viewItem == blockedAgent)",
+          "group": "inline@1"
         }
       ],
       "scm/title": [
@@ -511,6 +587,23 @@
           "default": true,
           "description": "%config.agentHUD.enableNotifications%"
         },
+        "herdr-collie.agentHUD.autoVerifyDiagnostics": {
+          "type": "string",
+          "enum": [
+            "prompt",
+            "auto",
+            "off"
+          ],
+          "default": "prompt",
+          "description": "%config.agentHUD.autoVerifyDiagnostics%"
+        },
+        "herdr-collie.agentHUD.autoVerifyMaxRetries": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 5,
+          "description": "%config.agentHUD.autoVerifyMaxRetries%"
+        },
         "herdr-collie.defaultAgentCommand": {
           "type": "string",
           "default": "claude",
@@ -524,6 +617,15 @@
           ],
           "default": "grouped",
           "description": "%config.agentSortOrder%"
+        },
+        "herdr-collie.reviewChanges.viewMode": {
+          "type": "string",
+          "enum": [
+            "tree",
+            "flat"
+          ],
+          "default": "tree",
+          "description": "%config.reviewChanges.viewMode%"
         },
         "herdr-collie.codeLens.enable": {
           "type": "boolean",
@@ -609,22 +711,22 @@
     "publish:vsce": "vsce publish",
     "test:unit": "mocha -r ts-node/register 'src/test/unit/**/*.test.ts'",
     "test:integration": "mocha -r ts-node/register 'src/test/integration/**/*.test.ts'",
-    "test": "npm run test:unit && npm run test:integration"
+    "test": "pnpm run test:unit && pnpm run test:integration"
   },
   "devDependencies": {
     "@types/chai": "^5.2.3",
     "@types/mocha": "^10.0.10",
-    "@types/node": "20.x",
+    "@types/node": "~20.19.43",
     "@types/vscode": "^1.90.0",
     "@vscode/vsce": "^3.9.2",
-    "chai": "^6.2.2",
+    "chai": "^6.3.0",
     "esbuild": "^0.21.5",
     "mocha": "^11.8.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.4.5"
+    "typescript": "^5.9.3"
   },
   "dependencies": {
     "@vscode/l10n": "^0.0.18",
-    "smol-toml": "^1.8.0"
+    "smol-toml": "^1.9.1"
   }
 }

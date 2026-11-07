@@ -8,6 +8,7 @@ import { HerdrSocketClient } from './socketClient';
 
 export class HerdrWorkspaceTreeItem extends vscode.TreeItem {
     public readonly rawId: string;
+    public tabs?: any[];
 
     constructor(
         public readonly label: string,
@@ -20,13 +21,39 @@ export class HerdrWorkspaceTreeItem extends vscode.TreeItem {
         public readonly isFocused?: boolean,
         public readonly isCurrentFolder?: boolean,
         public readonly workspaceId?: string,
-        statusSignature?: string
+        statusSignature?: string,
+        tabs?: any[]
     ) {
         super(label, collapsibleState);
         this.rawId = rawId;
         this.contextValue = contextValue;
+        this.tabs = tabs;
         // Include status signature in TreeItem.id so VS Code re-renders dynamic status changes
         this.id = statusSignature ? `${rawId}:${statusSignature}` : rawId;
+    }
+}
+
+export class HerdrTabTreeItem extends vscode.TreeItem {
+    constructor(
+        public readonly label: string,
+        public readonly tabId: string,
+        public readonly workspaceId: string,
+        public readonly isFocused: boolean,
+        public readonly paneCount: number = 1,
+        public readonly agentStatus?: string,
+        sessionName: string = 'vscode'
+    ) {
+        super(label, vscode.TreeItemCollapsibleState.None);
+        this.contextValue = 'tab';
+        this.id = `${workspaceId}:${tabId}:${isFocused ? '1' : '0'}`;
+        this.iconPath = new vscode.ThemeIcon(isFocused ? 'window' : 'terminal');
+        this.description = isFocused ? l10n.t('(Active)') : (paneCount > 1 ? `${paneCount} panes` : undefined);
+        this.tooltip = l10n.t('Tab {0} (ID: {1}, Panes: {2})', label, tabId, paneCount);
+        this.command = {
+            command: 'herdr-collie.focusTab',
+            title: l10n.t('Focus Tab'),
+            arguments: [tabId, workspaceId, sessionName]
+        };
     }
 }
 

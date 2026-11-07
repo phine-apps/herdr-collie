@@ -33,6 +33,46 @@ export interface ParsedAgent {
     workspaceLabel?: string;
     workspaceCwd?: string;
     session?: string;
+    statusChangedAt?: number;
+    latestOutput?: string;
+}
+
+/**
+ * Strips ANSI escape codes and extracts the last meaningful non-empty line as a compact summary
+ */
+export function extractCleanOutputSummary(rawText?: string, maxLength = 80): string | undefined {
+    if (!rawText || typeof rawText !== 'string') {
+        return undefined;
+    }
+
+    // Strip ANSI escape sequences and control characters (preserving newlines)
+    const stripped = rawText
+        .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+
+    const lines = stripped
+        .split(/\r?\n/)
+        .map(line => line.replace(/\s+/g, ' ').trim())
+        .filter(line => line.length > 0);
+
+    if (lines.length === 0) {
+        return undefined;
+    }
+
+    // Prefer the last line that contains alphanumeric/CJK characters rather than pure box-drawing or punctuation
+    let chosen = lines[lines.length - 1];
+    for (let i = lines.length - 1; i >= 0; i--) {
+        if (/[\p{L}\p{N}]/u.test(lines[i])) {
+            chosen = lines[i];
+            break;
+        }
+    }
+
+    if (chosen.length > maxLength) {
+        return chosen.slice(0, Math.max(1, maxLength - 3)).trimEnd() + '...';
+    }
+    return chosen;
 }
 
 export interface GitWorktreeInfo {
@@ -52,7 +92,18 @@ export interface ParsedPane {
     command: string;
     workspaceId: string;
     cwd: string;
+    tabId?: string;
     session?: string;
+}
+
+export interface ParsedTab {
+    id: string;
+    workspaceId: string;
+    label: string;
+    number?: number;
+    focused: boolean;
+    paneCount: number;
+    agentStatus?: string;
 }
 
 /**
@@ -195,8 +246,10 @@ export function parseAgents(
             const matchedWs = workspaces.find(w => w.id === workspaceId);
             const workspaceLabel = matchedWs ? matchedWs.label : (workspaceId ? `Workspace ${workspaceId}` : undefined);
             const workspaceCwd = matchedWs ? matchedWs.cwd : undefined;
+            const rawOutput = a.last_output ?? a.latest_output ?? a.summary ?? a.last_line ?? a.output;
+            const latestOutput = typeof rawOutput === 'string' ? extractCleanOutputSummary(rawOutput) : undefined;
 
-            return {
+            const parsed: ParsedAgent = {
                 id,
                 name,
                 status: info.status,
@@ -208,6 +261,10 @@ export function parseAgents(
                 workspaceLabel,
                 workspaceCwd
             };
+            if (latestOutput !== undefined) {
+                parsed.latestOutput = latestOutput;
+            }
+            return parsed;
         });
     } catch {
         return [];
@@ -223,16 +280,69 @@ export function parsePanes(stdout: string): ParsedPane[] {
         const result = data.result || data;
         const rawPanes = Array.isArray(result.panes) ? result.panes : [];
 
-        return rawPanes.map((p: any) => ({
-            id: String(p.pane_id || p.id || ''),
-            name: String(p.name || p.pane_id || ''),
-            command: String(p.command || ''),
-            workspaceId: String(p.workspace_id || ''),
-            cwd: String(p.foreground_cwd || p.cwd || '')
+        return rawPanes.map((p: any) => {
+            const pane: ParsedPane = {
+                id: String(p.pane_id || p.id || ''),
+                name: String(p.name || p.pane_id || ''),
+                command: String(p.command || ''),
+                workspaceId: String(p.workspace_id || ''),
+                cwd: String(p.foreground_cwd || p.cwd || '')
+            };
+            if (p.tab_id) {
+                pane.tabId = String(p.tab_id);
+            }
+            return pane;
+        });
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * Parse stdout of `herdr tab list`
+ */
+export function parseTabs(stdout: string): ParsedTab[] {
+    try {
+        const data = JSON.parse(stdout);
+        const result = data.result || data;
+        const rawTabs = Array.isArray(result.tabs) ? result.tabs : [];
+
+        return rawTabs.map((t: any) => ({
+            id: String(t.tab_id || t.id || ''),
+            workspaceId: String(t.workspace_id || ''),
+            label: String(t.label || t.number || 'Tab'),
+            number: typeof t.number === 'number' ? t.number : undefined,
+            focused: Boolean(t.focused),
+            paneCount: typeof t.pane_count === 'number' ? t.pane_count : 1,
+            agentStatus: t.agent_status ? String(t.agent_status) : undefined
         }));
     } catch {
         return [];
     }
+}
+
+/**
+ * Parse structured snapshot object into ParsedTab array
+ */
+export function parseSnapshotTabs(
+    snapshot: { tabs?: any[]; focused_tab_id?: string } | null
+): ParsedTab[] {
+    if (!snapshot || !Array.isArray(snapshot.tabs)) return [];
+    const focusedTabId = snapshot.focused_tab_id || '';
+
+    return snapshot.tabs.map(t => {
+        const id = String(t.tab_id || t.id || '');
+        const isFocused = Boolean(t.focused) || (focusedTabId !== '' && focusedTabId === id);
+        return {
+            id,
+            workspaceId: String(t.workspace_id || ''),
+            label: String(t.label || t.number || 'Tab'),
+            number: typeof t.number === 'number' ? t.number : undefined,
+            focused: isFocused,
+            paneCount: typeof t.pane_count === 'number' ? t.pane_count : 1,
+            agentStatus: t.agent_status ? String(t.agent_status) : undefined
+        };
+    });
 }
 
 /**
@@ -320,8 +430,11 @@ export function parseSnapshotAgents(
 
         const workspaceLabel = matchedWs ? matchedWs.label : (workspaceId ? `Workspace ${workspaceId}` : undefined);
         const workspaceCwd = matchedWs?.cwd || (paneCwd || undefined);
+        const rawOutput = a.last_output ?? a.latest_output ?? a.summary ?? a.last_line ?? a.output ??
+            (matchedPane ? (matchedPane.last_output ?? matchedPane.latest_output ?? matchedPane.summary ?? matchedPane.last_line) : undefined);
+        const latestOutput = typeof rawOutput === 'string' ? extractCleanOutputSummary(rawOutput) : undefined;
 
-        return {
+        const parsed: ParsedAgent = {
             id,
             name,
             status: info.status,
@@ -333,6 +446,10 @@ export function parseSnapshotAgents(
             workspaceLabel,
             workspaceCwd
         };
+        if (latestOutput !== undefined) {
+            parsed.latestOutput = latestOutput;
+        }
+        return parsed;
     });
 }
 

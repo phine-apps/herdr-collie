@@ -15,6 +15,7 @@ describe('Keybindings & Command Configuration in package.json', () => {
         const commandIds = pkg.contributes.commands.map((c: any) => c.command);
         expect(commandIds).to.include('herdr-collie.selectAgent');
         expect(commandIds).to.include('herdr-collie.selectWorkspace');
+        expect(commandIds).to.include('herdr-collie.openWorkspaceInNewWindow');
         expect(commandIds).to.include('herdr-collie.sendContext');
         expect(commandIds).to.include('herdr-collie.attachWorkspace');
         expect(commandIds).to.include('herdr-collie.showAgentHUD');
