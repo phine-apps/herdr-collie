@@ -9,6 +9,8 @@
 
 Stop context-switching between terminals or manually copying file paths. Supercharge your AI-driven workflow with zero friction.
 
+![Herdr Collie in Visual Studio Code](https://raw.githubusercontent.com/phine-apps/herdr-collie/main/media/screenshot.png)
+
 ---
 
 ## ⚡ Quick Start in 30 Seconds
