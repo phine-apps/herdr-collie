@@ -24,6 +24,7 @@ docs/
 # Artifacts & Logs
 *.vsix
 *.log
+media/screenshot.png
 media/icon?*.png
 
 # Bundled Extension Inclusion
