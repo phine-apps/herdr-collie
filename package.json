@@ -13,7 +13,7 @@
   "bugs": {
     "url": "https://github.com/phine-apps/herdr-collie/issues"
   },
-  "homepage": "https://github.com/phine-apps/herdr-collie#readme",
+  "homepage": "https://phine-apps.github.io/",
   "engines": {
     "vscode": "^1.90.0"
   },
