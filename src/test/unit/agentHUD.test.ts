@@ -271,5 +271,34 @@ describe('AgentHUD & Status Classification Unit Tests', () => {
 
             hud.dispose();
         });
+
+        it('coalesces bursty socket event refreshes into a single getSnapshot call', async () => {
+            const { EventEmitter } = require('events');
+            const emitterClient: any = new EventEmitter();
+            emitterClient.isConnected = true;
+            let snapshotCalls = 0;
+            const recordedMaxAges: number[] = [];
+            emitterClient.getSnapshot = async (maxAgeMs: number = 0) => {
+                snapshotCalls++;
+                recordedMaxAges.push(maxAgeMs);
+                return { agents: [{ pane_id: 'w1:p1', name: 'claude', agent_status: 'working' }] };
+            };
+
+            const hud = new AgentHUD(emitterClient as unknown as HerdrSocketClient, () => 'test-session');
+            emitterClient.emit('event', { type: 'pane.output' });
+            emitterClient.emit('event', { type: 'pane.output' });
+            emitterClient.emit('event', { type: 'pane.output' });
+
+            await new Promise(r => setTimeout(r, 70));
+            expect(snapshotCalls).to.equal(1);
+            expect(recordedMaxAges).to.deep.equal([150]);
+
+            // Direct explicit refresh() must bypass short-lived cache (maxAgeMs = 0)
+            await hud.refresh();
+            expect(snapshotCalls).to.equal(2);
+            expect(recordedMaxAges[1]).to.equal(0);
+
+            hud.dispose();
+        });
     });
 });

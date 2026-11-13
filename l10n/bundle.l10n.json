@@ -263,5 +263,18 @@
   "Fix Test \"{0}\"": "Fix Test \"{0}\"",
   "Generate Edge Cases for \"{0}\"": "Generate Edge Cases for \"{0}\"",
   "Complete {0} in {1}": "Complete {0} in {1}",
-  "Please open a file in the editor first.": "Please open a file in the editor first."
+  "Please open a file in the editor first.": "Please open a file in the editor first.",
+  "Failed to create tab: {0}": "Failed to create tab: {0}",
+  "Tab created successfully.": "Tab created successfully.",
+  "Close Tab": "Close Tab",
+  "Are you sure you want to close tab \"{0}\"?": "Are you sure you want to close tab \"{0}\"?",
+  "Failed to close tab: {0}": "Failed to close tab: {0}",
+  "Select agent to peek output:": "Select agent to peek output:",
+  "No active agent selected to inspect.": "No active agent selected to inspect.",
+  "Failed to read agent output: {0}": "Failed to read agent output: {0}",
+  "(No output available)": "(No output available)",
+  "'{0}' is not a linked Git worktree. Would you like to close the Herdr workspace without deleting any files?": "'{0}' is not a linked Git worktree. Would you like to close the Herdr workspace without deleting any files?",
+  "(Active)": "(Active)",
+  "Tab {0} (ID: {1}, Panes: {2})": "Tab {0} (ID: {1}, Panes: {2})",
+  "Focus Tab": "Focus Tab"
 }

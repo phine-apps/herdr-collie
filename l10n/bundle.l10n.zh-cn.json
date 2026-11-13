@@ -263,5 +263,18 @@
   "Fix Test \"{0}\"": "修复测试 \"{0}\"",
   "Generate Edge Cases for \"{0}\"": "为 \"{0}\" 生成边界用例",
   "Complete {0} in {1}": "实现 {1} 中的 {0}",
-  "Please open a file in the editor first.": "请先在编辑器中打开文件。"
+  "Please open a file in the editor first.": "请先在编辑器中打开文件。",
+  "Failed to create tab: {0}": "创建标签页失败: {0}",
+  "Tab created successfully.": "已成功创建标签页。",
+  "Close Tab": "关闭标签页",
+  "Are you sure you want to close tab \"{0}\"?": "确定要关闭标签页 \"{0}\" 吗？",
+  "Failed to close tab: {0}": "关闭标签页失败: {0}",
+  "Select agent to peek output:": "选择要查看输出的智能体:",
+  "No active agent selected to inspect.": "未选择要查看的活跃智能体。",
+  "Failed to read agent output: {0}": "读取智能体输出失败: {0}",
+  "(No output available)": "（暂无输出）",
+  "'{0}' is not a linked Git worktree. Would you like to close the Herdr workspace without deleting any files?": "'{0}' 不是已链接的 Git 工作树。是否在不删除任何文件的情况下仅关闭 Herdr 工作区？",
+  "(Active)": "(活跃)",
+  "Tab {0} (ID: {1}, Panes: {2})": "标签页 {0} (ID: {1}, 窗格数: {2})",
+  "Focus Tab": "聚焦标签页"
 }

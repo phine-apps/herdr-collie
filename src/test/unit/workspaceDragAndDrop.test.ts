@@ -4,7 +4,14 @@
  */
 import { expect } from 'chai';
 import { mockState, resetMockState, mockVscode } from '../helpers/mockVscode';
-import { HerdrWorkspaceTreeItem, WorkspaceDragAndDropController } from '../../workspaceDragAndDrop';
+import {
+    HerdrWorkspaceTreeItem,
+    HerdrTabTreeItem,
+    WorkspaceDragAndDropController,
+    AutoSelectionState,
+    resolveWorkspaceAutoSelection,
+    resolveAgentAutoSelection
+} from '../../workspaceDragAndDrop';
 import { HerdrSocketClient } from '../../socketClient';
 
 describe('WorkspaceDragAndDropController Unit Tests', () => {
@@ -301,6 +308,57 @@ describe('WorkspaceDragAndDropController Unit Tests', () => {
                 beforeWorkspaceId: 'ws-3'
             });
             expect(reorderCallbackCalled).to.be.true;
+        });
+    });
+
+    describe('Stable TreeItem IDs & Auto-Selection Preservation', () => {
+        it('keeps HerdrTabTreeItem id stable regardless of tab focus state', () => {
+            const unfocused = new HerdrTabTreeItem('Tab 1', 'tab-1', 'ws-1', false, 2);
+            const focused = new HerdrTabTreeItem('Tab 1', 'tab-1', 'ws-1', true, 2);
+            expect(unfocused.id).to.equal('ws-1:tab-1');
+            expect(focused.id).to.equal('ws-1:tab-1');
+        });
+
+        it('preserves user manual workspace selection across refreshes while Herdr focus is unchanged', () => {
+            const state: AutoSelectionState = {};
+            const ws1 = new HerdrWorkspaceTreeItem('WS 1', 'ws-1', mockVscode.TreeItemCollapsibleState.Expanded, 'workspace', '/repo/1', undefined, false, true);
+            const ws2 = new HerdrWorkspaceTreeItem('WS 2', 'ws-2', mockVscode.TreeItemCollapsibleState.Collapsed, 'workspace', '/repo/2', undefined, false, false);
+
+            // Initial load with no selection -> reveals focused ws-1
+            const initial = resolveWorkspaceAutoSelection([ws1, ws2], undefined, state);
+            expect(initial.target?.rawId).to.equal('ws-1');
+            expect(initial.focusChanged).to.be.false;
+
+            // User clicks ws-2 in the tree view, and an unrelated status update triggers refresh while ws-1 stays focused
+            const afterStatusEvent = resolveWorkspaceAutoSelection([ws1, ws2], ws2, state);
+            expect(afterStatusEvent.target).to.be.undefined;
+            expect(afterStatusEvent.focusChanged).to.be.false;
+
+            // Herdr focus switches to ws-2 (or another workspace ws-3) -> selection syncs to new focused workspace
+            const ws1Unfocused = new HerdrWorkspaceTreeItem('WS 1', 'ws-1', mockVscode.TreeItemCollapsibleState.Expanded, 'workspace', '/repo/1', undefined, false, false);
+            const ws2Focused = new HerdrWorkspaceTreeItem('WS 2', 'ws-2', mockVscode.TreeItemCollapsibleState.Collapsed, 'workspace', '/repo/2', undefined, false, true);
+            const afterFocusMove = resolveWorkspaceAutoSelection([ws1Unfocused, ws2Focused], ws1Unfocused, state);
+            expect(afterFocusMove.target?.rawId).to.equal('ws-2');
+            expect(afterFocusMove.focusChanged).to.be.true;
+
+            // If previously selected workspace disappears -> falls back to focused workspace
+            const afterRemoval = resolveWorkspaceAutoSelection([ws1], ws2Focused, { lastFocusedWorkspaceId: 'ws-1' });
+            expect(afterRemoval.target?.rawId).to.equal('ws-1');
+        });
+
+        it('preserves user manual agent selection unless selected agent vanishes or workspace focus changed', () => {
+            const ws1 = new HerdrWorkspaceTreeItem('WS 1', 'ws-1', mockVscode.TreeItemCollapsibleState.None, 'workspace', '/repo/1', undefined, false, true);
+            const a1 = new HerdrWorkspaceTreeItem('claude', 'a1', mockVscode.TreeItemCollapsibleState.None, 'agent', '/repo/1', undefined, false, false, false, 'ws-1');
+            const a2 = new HerdrWorkspaceTreeItem('codex', 'a2', mockVscode.TreeItemCollapsibleState.None, 'agent', '/repo/2', undefined, false, false, false, 'ws-2');
+
+            // Initial with no selection -> picks a1 matching ws-1
+            expect(resolveAgentAutoSelection([a1, a2], ws1, undefined, false)?.rawId).to.equal('a1');
+
+            // User selects a2 intentionally and focus did not change -> keep a2
+            expect(resolveAgentAutoSelection([a1, a2], ws1, a2, false)).to.be.undefined;
+
+            // Workspace focus moved to ws-1 -> reveal matching a1
+            expect(resolveAgentAutoSelection([a1, a2], ws1, a2, true)?.rawId).to.equal('a1');
         });
     });
 });

@@ -322,6 +322,14 @@
           "command": "herdr-collie.clearReview"
         },
         {
+          "command": "herdr-collie.focusTab",
+          "when": "false"
+        },
+        {
+          "command": "herdr-collie.closeTab",
+          "when": "false"
+        },
+        {
           "command": "herdr-collie.openDiff",
           "when": "false"
         },
@@ -718,7 +726,7 @@
     "@types/mocha": "^10.0.10",
     "@types/node": "~26.6.6",
     "@types/vscode": "~1.90.0",
-    "@vscode/vsce": "^4.1.0",
+    "@vscode/vsce": "^4.1.1",
     "chai": "^6.3.0",
     "esbuild": "^0.21.5",
     "mocha": "^12.0.3",

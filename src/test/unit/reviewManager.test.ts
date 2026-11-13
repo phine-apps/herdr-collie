@@ -311,6 +311,20 @@ describe('reviewManager Unit Tests', () => {
             expect(parseGitStatusPorcelain('', '/repo')).to.deep.equal([]);
             expect(parseGitStatusPorcelain('   \n  ', '/repo')).to.deep.equal([]);
         });
+
+        it('unquotes Git C-style escaped and octal UTF-8 paths in porcelain output', () => {
+            // "docs/テスト.txt" -> UTF-8 bytes in octal: \343\203\206\343\202\271\343\203\210
+            const sample = [
+                '?? "docs/\\343\\203\\206\\343\\202\\271\\343\\203\\210.txt"',
+                'R  "src/old \\"name\\".ts" -> "src/new \\\\name.ts"'
+            ].join('\n');
+
+            const result = parseGitStatusPorcelain(sample, '/repo');
+            expect(result).to.have.length(2);
+            expect(result[0].filePath).to.equal('docs/テスト.txt');
+            expect(result[1].originalFilePath).to.equal('src/old "name".ts');
+            expect(result[1].filePath).to.equal('src/new \\name.ts');
+        });
     });
 
     describe('validateCheckpointRef', () => {

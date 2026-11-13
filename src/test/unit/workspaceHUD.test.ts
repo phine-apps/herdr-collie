@@ -129,4 +129,66 @@ describe('WorkspaceHUD Unit Tests', () => {
         // Dispose
         hud.dispose();
     });
+
+    it('coalesces bursty socket event refreshes in WorkspaceHUD', async () => {
+        const { EventEmitter } = require('events');
+        const emitterClient: any = new EventEmitter();
+        emitterClient.isConnected = true;
+        let snapshotCalls = 0;
+        emitterClient.getSnapshot = async () => {
+            snapshotCalls++;
+            return {
+                workspaces: [{ workspace_id: 'ws-1', label: 'Primary', cwd: '/repo', focused: true }],
+                agents: []
+            };
+        };
+
+        const hud = new WorkspaceHUD(emitterClient as unknown as HerdrSocketClient, () => 'default', async () => []);
+        emitterClient.emit('event', { type: 'workspace.updated' });
+        emitterClient.emit('event', { type: 'pane.output' });
+        emitterClient.emit('event', { type: 'layout.updated' });
+
+        await new Promise(r => setTimeout(r, 70));
+        expect(snapshotCalls).to.equal(1);
+
+        hud.dispose();
+    });
+
+    it('coalesces concurrent HerdrSocketClient.getSnapshot calls and invalidates cache on event', async () => {
+        const client = new HerdrSocketClient('test-coalesce');
+        let requestCalls = 0;
+        (client as any).request = async () => {
+            requestCalls++;
+            await new Promise(r => setTimeout(r, 15));
+            return {
+                snapshot: {
+                    workspaces: [{ workspace_id: `ws-${requestCalls}`, label: 'Primary', focused: true }],
+                    agents: []
+                }
+            };
+        };
+
+        // Concurrent calls share a single in-flight request
+        const [s1, s2, s3] = await Promise.all([
+            client.getSnapshot(150),
+            client.getSnapshot(150),
+            client.getSnapshot()
+        ]);
+        expect(requestCalls).to.equal(1);
+        expect(s1).to.equal(s2);
+        expect(s1).to.equal(s3);
+
+        // Sequential call within maxAgeMs uses short-lived cache
+        const sCached = await client.getSnapshot(150);
+        expect(requestCalls).to.equal(1);
+        expect(sCached).to.equal(s1);
+
+        // New event invalidates cache immediately so next getSnapshot fetches fresh state
+        (client as any).handleMessage({ type: 'workspace.focused' });
+        const sFresh = await client.getSnapshot(150);
+        expect(requestCalls).to.equal(2);
+        expect(sFresh?.workspaces?.[0].workspace_id).to.equal('ws-2');
+
+        client.dispose();
+    });
 });

@@ -17,6 +17,13 @@ describe('HerdrSocketClient Unit Tests', function() {
     let activeSockets: Set<net.Socket> = new Set();
     let lastClientSocket: net.Socket | null = null;
     let receivedServerData: string[] = [];
+    const createdClients: HerdrSocketClient[] = [];
+
+    const createClient = (socketPathOrSession?: string): HerdrSocketClient => {
+        const client = new HerdrSocketClient(socketPathOrSession);
+        createdClients.push(client);
+        return client;
+    };
 
     beforeEach((done) => {
         receivedServerData = [];
@@ -70,6 +77,12 @@ describe('HerdrSocketClient Unit Tests', function() {
     });
 
     afterEach(async () => {
+        while (createdClients.length > 0) {
+            try {
+                createdClients.pop()!.dispose();
+            } catch {}
+        }
+
         for (const sock of activeSockets) {
             try {
                 sock.destroy();
@@ -95,7 +108,7 @@ describe('HerdrSocketClient Unit Tests', function() {
     });
 
     it('connects to socket and automatically subscribes to events', (done) => {
-        const client = new HerdrSocketClient(tempSockPath);
+        const client = createClient(tempSockPath);
         client.on('connect', () => {
             expect(client.isConnected).to.be.true;
             // Allow small tick for subscribe message to be processed
@@ -110,7 +123,7 @@ describe('HerdrSocketClient Unit Tests', function() {
     });
 
     it('fetches session.snapshot successfully', async () => {
-        const client = new HerdrSocketClient(tempSockPath);
+        const client = createClient(tempSockPath);
         await new Promise<void>((resolve) => {
             client.on('connect', () => resolve());
             client.connect();
@@ -127,7 +140,7 @@ describe('HerdrSocketClient Unit Tests', function() {
     });
 
     it('receives pushed events and emits event signal', (done) => {
-        const client = new HerdrSocketClient(tempSockPath);
+        const client = createClient(tempSockPath);
         client.on('event', (ev: any) => {
             expect(ev.type).to.equal('workspace_updated');
             expect(ev.workspace_id).to.equal('ws-sock-1');
@@ -150,7 +163,7 @@ describe('HerdrSocketClient Unit Tests', function() {
     });
 
     it('handles request errors properly', async () => {
-        const client = new HerdrSocketClient(tempSockPath);
+        const client = createClient(tempSockPath);
         await new Promise<void>((resolve) => {
             client.on('connect', () => resolve());
             client.connect();
@@ -167,7 +180,7 @@ describe('HerdrSocketClient Unit Tests', function() {
     });
 
     it('sends pane keys, agent keys, and pane input successfully', async () => {
-        const client = new HerdrSocketClient(tempSockPath);
+        const client = createClient(tempSockPath);
         await new Promise<void>((resolve) => {
             client.on('connect', () => resolve());
             client.connect();
@@ -186,7 +199,7 @@ describe('HerdrSocketClient Unit Tests', function() {
     });
 
     it('cleans up and rejects pending requests on dispose', async () => {
-        const client = new HerdrSocketClient(tempSockPath);
+        const client = createClient(tempSockPath);
         await new Promise<void>((resolve) => {
             client.on('connect', () => resolve());
             client.connect();

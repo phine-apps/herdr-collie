@@ -154,6 +154,36 @@ export function formatDiagnosticPrompt(
     ].filter(line => line !== undefined && line !== '').join('\n');
 }
 
+export interface DiagnosticPromptInput {
+    message: string;
+    code?: string | number | { value: string | number; target?: any };
+    source?: string;
+    severity?: string | vscode.DiagnosticSeverity | number;
+    range?: { start?: { line?: number } };
+}
+
+/**
+ * Builds a fix prompt from either a single diagnostic or an array of diagnostics,
+ * extracting surrounding code around each diagnostic's actual line.
+ */
+export function buildDiagnosticFixPrompt(
+    fileRelPath: string,
+    docText: string,
+    lineCount: number,
+    diagOrDiags: DiagnosticPromptInput | DiagnosticPromptInput[]
+): string {
+    const diags = Array.isArray(diagOrDiags) ? diagOrDiags : [diagOrDiags];
+    if (diags.length === 0) {
+        return '';
+    }
+
+    return diags.map(d => {
+        const lineNum = (d.range?.start?.line ?? 0) + 1;
+        const snippet = extractSnippet(docText, Math.max(1, lineNum - 5), Math.min(lineCount, lineNum + 5));
+        return formatDiagnosticPrompt(fileRelPath, lineNum, d, snippet);
+    }).join('\n\n---\n\n');
+}
+
 /**
  * Formats structured prompt for fixing or generating edge cases for a test
  */

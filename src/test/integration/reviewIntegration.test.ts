@@ -15,6 +15,8 @@ import {
     ReviewCommentItem,
     HerdrReviewChangesProvider,
     prepareOriginalFileForDiff,
+    resolveDiffTargets,
+    getRepoChangedFiles,
     createReviewCheckpoint,
     rollbackReviewCheckpoint,
     listReviewCheckpoints
@@ -288,5 +290,88 @@ describe('Integrated Review & Diff-to-Prompt Integration Tests (P3)', function()
         expect(fs.readFileSync(headDiffPath, 'utf8')).to.include('export function login');
 
         provider.dispose();
+    });
+
+    it('preserves pre-existing untracked files across checkpoint rollback while removing post-checkpoint untracked files', async () => {
+        const preExistingUntracked = path.join(tempRepoDir, 'notes.md');
+        fs.writeFileSync(preExistingUntracked, 'original untracked notes\n', 'utf8');
+
+        const cp = await createReviewCheckpoint(tempRepoDir, 'with-untracked');
+        expect(cp).to.not.be.null;
+
+        // Post-checkpoint mutations: modify pre-existing untracked file and add new garbage file
+        fs.writeFileSync(preExistingUntracked, 'corrupted untracked notes\n', 'utf8');
+        const garbageFile = path.join(tempRepoDir, 'garbage.tmp');
+        fs.writeFileSync(garbageFile, 'should be removed\n', 'utf8');
+
+        const ok = await rollbackReviewCheckpoint(tempRepoDir, cp!.hash);
+        expect(ok).to.be.true;
+
+        expect(fs.existsSync(preExistingUntracked)).to.be.true;
+        expect(fs.readFileSync(preExistingUntracked, 'utf8')).to.equal('original untracked notes\n');
+        expect(fs.existsSync(garbageFile)).to.be.false;
+
+        // Pre-existing untracked file remains untracked (not staged in .git/index)
+        const changes = await getRepoChangedFiles(tempRepoDir);
+        const notesChange = changes.find(c => c.filePath === 'notes.md');
+        expect(notesChange?.status).to.equal('??');
+    });
+
+    it('resolves diff targets accurately for renamed (R) and deleted (D) files', async () => {
+        // Rename config.ts -> settings.ts (staged so git status reports R)
+        const oldPath = path.join(tempRepoDir, 'config.ts');
+        const newPath = path.join(tempRepoDir, 'settings.ts');
+        fs.renameSync(oldPath, newPath);
+        await runGitCmd(['add', '-A'], tempRepoDir);
+
+        // Delete auth.ts from working tree
+        fs.unlinkSync(path.join(tempRepoDir, 'auth.ts'));
+
+        const changes = await getRepoChangedFiles(tempRepoDir);
+        const renamed = changes.find(c => c.filePath === 'settings.ts');
+        const deleted = changes.find(c => c.filePath === 'auth.ts');
+
+        expect(renamed?.status).to.equal('R');
+        expect(renamed?.originalFilePath).to.equal('config.ts');
+        expect(deleted?.status).to.equal('D');
+
+        const renamedTargets = await resolveDiffTargets(renamed!, tempRepoDir, 'HEAD', 'HEAD');
+        expect(fs.readFileSync(renamedTargets.originalPath, 'utf8')).to.include('port: 8080');
+        expect(renamedTargets.workingPath).to.equal(renamed!.fullPath);
+        expect(renamedTargets.title).to.include('config.ts → settings.ts');
+
+        const deletedTargets = await resolveDiffTargets(deleted!, tempRepoDir, 'HEAD', 'HEAD');
+        expect(fs.readFileSync(deletedTargets.originalPath, 'utf8')).to.include('export function login');
+        expect(fs.existsSync(deletedTargets.workingPath)).to.be.true;
+        expect(fs.readFileSync(deletedTargets.workingPath, 'utf8')).to.equal('');
+        expect(deletedTargets.title).to.include('Deleted');
+    });
+
+    it('does not resurrect untracked files from an older checkpoint sharing the same HEAD hash', async () => {
+        const notesPath = path.join(tempRepoDir, 'notes.md');
+        fs.writeFileSync(notesPath, 'first checkpoint untracked\n', 'utf8');
+
+        const cp1 = await createReviewCheckpoint(tempRepoDir, 'cp-one');
+        expect(cp1).to.not.be.null;
+
+        // Remove untracked file and create a second checkpoint on the exact same clean HEAD
+        fs.unlinkSync(notesPath);
+        await new Promise(r => setTimeout(r, 5));
+        const cp2 = await createReviewCheckpoint(tempRepoDir, 'cp-two-empty');
+        expect(cp2).to.not.be.null;
+        expect(cp2!.hash).to.equal(cp1!.hash);
+
+        // Rolling back to cp2 (by hash or ref) must NOT resurrect cp1's notes.md
+        fs.writeFileSync(path.join(tempRepoDir, 'extra.tmp'), 'remove me\n', 'utf8');
+        const ok2 = await rollbackReviewCheckpoint(tempRepoDir, cp2!.hash);
+        expect(ok2).to.be.true;
+        expect(fs.existsSync(notesPath)).to.be.false;
+        expect(fs.existsSync(path.join(tempRepoDir, 'extra.tmp'))).to.be.false;
+
+        // Rolling back explicitly by cp1 ref still restores cp1's untracked notes.md
+        const ok1 = await rollbackReviewCheckpoint(tempRepoDir, `refs/herdr/checkpoints/${cp1!.id}`);
+        expect(ok1).to.be.true;
+        expect(fs.existsSync(notesPath)).to.be.true;
+        expect(fs.readFileSync(notesPath, 'utf8')).to.equal('first checkpoint untracked\n');
     });
 });

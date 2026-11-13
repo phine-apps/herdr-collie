@@ -20,6 +20,21 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
     let activeSockets: Set<net.Socket> = new Set();
     let receivedCommands: any[] = [];
     let currentMockAgents: any[] = [];
+    const createdClients: HerdrSocketClient[] = [];
+    const createdHuds: AgentHUD[] = [];
+
+    const createClient = (sockPath: string): HerdrSocketClient => {
+        const client = new HerdrSocketClient(sockPath);
+        client.on('error', () => {});
+        createdClients.push(client);
+        return client;
+    };
+
+    const createHud = (client: HerdrSocketClient, getSession: () => string): AgentHUD => {
+        const hud = new AgentHUD(client, getSession);
+        createdHuds.push(hud);
+        return hud;
+    };
 
     beforeEach((done) => {
         resetMockState();
@@ -70,6 +85,17 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
     });
 
     afterEach(async () => {
+        while (createdHuds.length > 0) {
+            try {
+                createdHuds.pop()!.dispose();
+            } catch {}
+        }
+        while (createdClients.length > 0) {
+            try {
+                createdClients.pop()!.dispose();
+            } catch {}
+        }
+
         for (const sock of activeSockets) {
             try {
                 sock.destroy();
@@ -92,11 +118,10 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
     });
 
     it('updates StatusBar HUD and tooltip when connected and receiving snapshots (H-01, H-02)', async () => {
-        const client = new HerdrSocketClient(tempSockPath);
-        client.on('error', () => {});
+        const client = createClient(tempSockPath);
         client.connect();
 
-        const hud = new AgentHUD(client, () => 'test-session');
+        const hud = createHud(client, () => 'test-session');
 
         // Wait for connect & snapshot processing
         await new Promise((resolve) => setTimeout(resolve, 150));
@@ -130,11 +155,10 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
             }
         ];
 
-        const client = new HerdrSocketClient(tempSockPath);
-        client.on('error', () => {});
+        const client = createClient(tempSockPath);
         client.connect();
 
-        const hud = new AgentHUD(client, () => 'test-session');
+        const hud = createHud(client, () => 'test-session');
         await new Promise((resolve) => setTimeout(resolve, 150));
 
         const statusBarItem = mockState.statusBarItems[0];
@@ -153,13 +177,12 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
     });
 
     it('displays Alert in StatusBar and triggers interactive popup on agent.blocked (H-01, H-03)', async () => {
-        const client = new HerdrSocketClient(tempSockPath);
-        client.on('error', () => {});
+        const client = createClient(tempSockPath);
         client.connect();
 
         mockState.warningMessageResponse = 'Approve (y)';
 
-        const hud = new AgentHUD(client, () => 'test-session');
+        const hud = createHud(client, () => 'test-session');
         await new Promise((resolve) => setTimeout(resolve, 100));
 
         // Update server mock agents to reflect blocked status on subsequent snapshot refresh
@@ -207,13 +230,12 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
     });
 
     it('sends n and enter to agent pane when Deny (n) is selected (H-04)', async () => {
-        const client = new HerdrSocketClient(tempSockPath);
-        client.on('error', () => {});
+        const client = createClient(tempSockPath);
         client.connect();
 
         mockState.warningMessageResponse = 'Deny (n)';
 
-        const hud = new AgentHUD(client, () => 'test-session');
+        const hud = createHud(client, () => 'test-session');
         await new Promise((resolve) => setTimeout(resolve, 100));
 
         currentMockAgents = [
@@ -244,14 +266,13 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
     });
 
     it('sends text and enter to agent pane when Quick Reply is submitted', async () => {
-        const client = new HerdrSocketClient(tempSockPath);
-        client.on('error', () => {});
+        const client = createClient(tempSockPath);
         client.connect();
 
         mockState.warningMessageResponse = 'Quick Reply...';
         mockState.inputBoxResponse = 'proceed with build';
 
-        const hud = new AgentHUD(client, () => 'test-session');
+        const hud = createHud(client, () => 'test-session');
         await new Promise((resolve) => setTimeout(resolve, 100));
 
         currentMockAgents = [
@@ -283,11 +304,10 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
     });
 
     it('resets status bar when socket disconnects (H-01)', async () => {
-        const client = new HerdrSocketClient(tempSockPath);
-        client.on('error', () => {});
+        const client = createClient(tempSockPath);
         client.connect();
 
-        const hud = new AgentHUD(client, () => 'test-session');
+        const hud = createHud(client, () => 'test-session');
         await new Promise((resolve) => setTimeout(resolve, 100));
 
         // Close server-side socket to trigger client disconnect event
@@ -304,13 +324,12 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
     });
 
     it('triggers attachWorkspace with unique agent ID and display name on Focus Terminal for same-named agents', async () => {
-        const client = new HerdrSocketClient(tempSockPath);
-        client.on('error', () => {});
+        const client = createClient(tempSockPath);
         client.connect();
 
         mockState.warningMessageResponse = 'Focus Terminal';
 
-        const hud = new AgentHUD(client, () => 'test-session');
+        const hud = createHud(client, () => 'test-session');
         await new Promise((resolve) => setTimeout(resolve, 100));
 
         // Two agents with the exact same name 'agy' in the same workspace
@@ -349,11 +368,10 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
     });
 
     it('updates onDidChangeBlockedCount and Activity Bar treeView badge when agent blocks and resumes', async () => {
-        const client = new HerdrSocketClient(tempSockPath);
-        client.on('error', () => {});
+        const client = createClient(tempSockPath);
         client.connect();
 
-        const hud = new AgentHUD(client, () => 'test-session');
+        const hud = createHud(client, () => 'test-session');
         const treeView = mockVscode.window.createTreeView('herdr-collie.agents');
 
         let lastEventCount = -1;
@@ -407,14 +425,13 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
     });
 
     it('offers to send remaining errors back to agent in prompt mode when working -> done with errors', async () => {
-        const client = new HerdrSocketClient(tempSockPath);
-        client.on('error', () => {});
+        const client = createClient(tempSockPath);
         client.connect();
 
         mockState.configurations.set('herdr-collie.agentHUD.autoVerifyDiagnostics', 'prompt');
         mockState.warningMessageResponse = 'Send Errors to Agent (2)';
 
-        const hud = new AgentHUD(client, () => 'test-session');
+        const hud = createHud(client, () => 'test-session');
         await new Promise((resolve) => setTimeout(resolve, 100));
 
         // Simulate 2 compiler errors in workspace
@@ -453,14 +470,13 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
     });
 
     it('automatically dispatches errors up to maxRetries in auto mode and trips circuit breaker on exhaustion', async () => {
-        const client = new HerdrSocketClient(tempSockPath);
-        client.on('error', () => {});
+        const client = createClient(tempSockPath);
         client.connect();
 
         mockState.configurations.set('herdr-collie.agentHUD.autoVerifyDiagnostics', 'auto');
         mockState.configurations.set('herdr-collie.agentHUD.autoVerifyMaxRetries', 2);
 
-        const hud = new AgentHUD(client, () => 'test-session');
+        const hud = createHud(client, () => 'test-session');
         await new Promise((resolve) => setTimeout(resolve, 100));
 
         const fileUri = mockVscode.Uri.file('/workspace/project/src/service.ts');

@@ -11,6 +11,7 @@ import {
     generateEmbeddedConfigContent,
     getOriginalConfigPath,
     setOriginalConfigPathForTesting,
+    reloadConfigForSessions,
     syncHerdrConfig,
     setupConfigManager
 } from '../../configManager';
@@ -179,6 +180,80 @@ sidebar_collapsed_mode = "compact"
                     done();
                 }, 350);
             }, 50);
+        });
+
+        it('should notify configured and active custom sessions instead of hardcoding vscode on config reload', () => {
+            const executors = require('../../executors');
+            const originalExecHerdr = executors.execHerdr;
+            const recordedCalls: string[][] = [];
+            executors.execHerdr = (args: string[]) => {
+                recordedCalls.push(args);
+            };
+
+            try {
+                const originalConfigFile = path.join(tempConfigDir, 'config.toml');
+                fs.writeFileSync(originalConfigFile, '[ui]\naccent = "cyan"\n', 'utf8');
+                setOriginalConfigPathForTesting(originalConfigFile);
+
+                let configChangeListener: ((e: any) => void) | undefined;
+                let configuredSession = 'custom-team';
+                const mockVscode = {
+                    workspace: {
+                        getConfiguration: () => ({
+                            get: (key: string, def: any) => {
+                                if (key === 'hideHerdrSidebar') return true;
+                                if (key === 'sessionName') return configuredSession;
+                                return def;
+                            }
+                        }),
+                        onDidChangeConfiguration: (listener: (e: any) => void) => {
+                            configChangeListener = listener;
+                            return { dispose: () => {} };
+                        }
+                    }
+                };
+
+                const disposable = setupConfigManager(mockContext, mockVscode, () => 'sidebar-extra');
+                expect(recordedCalls).to.deep.include(['server', 'reload-config']);
+                expect(recordedCalls).to.deep.include(['--session', 'custom-team', 'server', 'reload-config']);
+                expect(recordedCalls).to.deep.include(['--session', 'sidebar-extra', 'server', 'reload-config']);
+                expect(recordedCalls.some(args => args.includes('vscode'))).to.be.false;
+
+                recordedCalls.length = 0;
+                configuredSession = 'renamed-session';
+                configChangeListener?.({ affectsConfiguration: (section: string) => section === 'herdr-collie.sessionName' });
+                expect(recordedCalls).to.deep.include(['--session', 'renamed-session', 'server', 'reload-config']);
+
+                disposable.dispose();
+            } finally {
+                executors.execHerdr = originalExecHerdr;
+            }
+        });
+
+        it('reloadConfigForSessions falls back to vscode when omitted and skips duplicate --session default', () => {
+            const executors = require('../../executors');
+            const originalExecHerdr = executors.execHerdr;
+            const recordedCalls: string[][] = [];
+            executors.execHerdr = (args: string[]) => {
+                recordedCalls.push(args);
+            };
+
+            try {
+                reloadConfigForSessions();
+                expect(recordedCalls).to.deep.equal([
+                    ['server', 'reload-config'],
+                    ['--session', 'vscode', 'server', 'reload-config']
+                ]);
+
+                recordedCalls.length = 0;
+                reloadConfigForSessions(['default', 'alpha', 'alpha']);
+                expect(recordedCalls).to.deep.equal([
+                    ['server', 'reload-config'],
+                    ['--session', 'alpha', 'server', 'reload-config']
+                ]);
+            } finally {
+                executors.execHerdr = originalExecHerdr;
+            }
         });
     });
 });

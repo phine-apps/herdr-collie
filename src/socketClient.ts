@@ -133,6 +133,9 @@ export class HerdrSocketClient extends EventEmitter {
     private isDisposed = false;
     private _isConnected = false;
     private activeRequestCleanups: Set<() => void> = new Set();
+    private inFlightSnapshotPromise: Promise<HerdrSessionSnapshot | null> | null = null;
+    private snapshotGeneration = 0;
+    private lastSnapshot: { value: HerdrSessionSnapshot; timestamp: number; generation: number } | null = null;
 
     constructor(customSocketPathOrSession?: string) {
         super();
@@ -181,6 +184,7 @@ export class HerdrSocketClient extends EventEmitter {
             this.socket.on('close', () => {
                 this._isConnected = false;
                 this.socket = null;
+                this.invalidateSnapshotCache();
                 this.emit('disconnect');
                 this.scheduleReconnect();
             });
@@ -226,8 +230,15 @@ export class HerdrSocketClient extends EventEmitter {
         }
     }
 
+    private invalidateSnapshotCache(): void {
+        this.snapshotGeneration++;
+        this.inFlightSnapshotPromise = null;
+        this.lastSnapshot = null;
+    }
+
     private handleMessage(message: any): void {
-        // Pushed event or broadcast notification
+        // Pushed event or broadcast notification invalidates cached snapshot state
+        this.invalidateSnapshotCache();
         this.emit('event', message);
     }
 
@@ -344,13 +355,44 @@ export class HerdrSocketClient extends EventEmitter {
         });
     }
 
-    public async getSnapshot(): Promise<HerdrSessionSnapshot | null> {
-        try {
-            const res = await this.request<{ snapshot: HerdrSessionSnapshot }>('session.snapshot', {});
-            return res.snapshot || (res as any) || null;
-        } catch {
+    public async getSnapshot(maxAgeMs: number = 0): Promise<HerdrSessionSnapshot | null> {
+        if (this.isDisposed) {
             return null;
         }
+        if (
+            maxAgeMs > 0 &&
+            this.lastSnapshot &&
+            this.lastSnapshot.generation === this.snapshotGeneration &&
+            Date.now() - this.lastSnapshot.timestamp <= maxAgeMs
+        ) {
+            return this.lastSnapshot.value;
+        }
+        if (this.inFlightSnapshotPromise) {
+            return this.inFlightSnapshotPromise;
+        }
+
+        const gen = this.snapshotGeneration;
+        const promise = this.request<{ snapshot: HerdrSessionSnapshot }>('session.snapshot', {})
+            .then((res) => {
+                const snap = res?.snapshot || (res as any) || null;
+                if (snap && gen === this.snapshotGeneration && !this.isDisposed) {
+                    this.lastSnapshot = {
+                        value: snap,
+                        timestamp: Date.now(),
+                        generation: gen
+                    };
+                }
+                return snap;
+            })
+            .catch(() => null)
+            .finally(() => {
+                if (this.inFlightSnapshotPromise === promise) {
+                    this.inFlightSnapshotPromise = null;
+                }
+            });
+
+        this.inFlightSnapshotPromise = promise;
+        return promise;
     }
 
     /**
@@ -405,6 +447,7 @@ export class HerdrSocketClient extends EventEmitter {
 
     public dispose(): void {
         this.isDisposed = true;
+        this.invalidateSnapshotCache();
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;

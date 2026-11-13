@@ -5,10 +5,29 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as cp from 'child_process';
 import * as vscode from 'vscode';
 import * as l10n from '@vscode/l10n';
 import { runGitCmd } from './executors';
 import { formatCodeFence } from './formatters';
+
+function runGitWithEnv(args: string[], cwd: string, extraEnv: Record<string, string>): Promise<string> {
+    return new Promise((resolve, reject) => {
+        cp.execFile(
+            'git',
+            args,
+            { cwd, env: { ...process.env, ...extraEnv }, maxBuffer: 10 * 1024 * 1024 },
+            (error: any, stdout: any, stderr: any) => {
+                if (error) {
+                    const msg = (stderr && String(stderr).trim()) || (stdout && String(stdout).trim()) || error.message || 'Git command failed';
+                    reject(new Error(msg));
+                    return;
+                }
+                resolve(stdout || '');
+            }
+        );
+    });
+}
 
 export interface ReviewCommentItem {
     id: string;
@@ -364,10 +383,53 @@ export class HerdrReviewController implements vscode.Disposable {
 
 export interface ChangedFileInfo {
     filePath: string;
+    originalFilePath?: string;
     fileName: string;
     status: 'M' | 'A' | 'D' | 'R' | '??';
     statusLabel: string;
     fullPath: string;
+}
+
+function unquoteGitPath(raw: string): string {
+    const trimmed = raw.trim();
+    if (!(trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2)) {
+        return trimmed;
+    }
+
+    const inner = trimmed.slice(1, -1);
+    const bytes: number[] = [];
+    for (let i = 0; i < inner.length; i++) {
+        const ch = inner[i];
+        if (ch === '\\' && i + 1 < inner.length) {
+            const next = inner[i + 1];
+            if (/^[0-7]{3}$/.test(inner.slice(i + 1, i + 4))) {
+                bytes.push(parseInt(inner.slice(i + 1, i + 4), 8));
+                i += 3;
+                continue;
+            }
+            const escapeMap: Record<string, number> = {
+                'a': 0x07,
+                'b': 0x08,
+                't': 0x09,
+                'n': 0x0a,
+                'v': 0x0b,
+                'f': 0x0c,
+                'r': 0x0d,
+                '"': 0x22,
+                '\\': 0x5c
+            };
+            if (next in escapeMap) {
+                bytes.push(escapeMap[next]);
+                i += 1;
+                continue;
+            }
+        }
+        const utf8 = Buffer.from(ch, 'utf8');
+        for (const b of utf8) {
+            bytes.push(b);
+        }
+    }
+    return Buffer.from(bytes).toString('utf8');
 }
 
 /**
@@ -383,15 +445,15 @@ export function parseGitStatusPorcelain(output: string, repoRoot: string): Chang
         if (line.length < 3) continue;
         const statusCode = line.substring(0, 2);
         let rawPath = line.substring(3).trim();
+        let originalFilePath: string | undefined;
 
         // Handle renames (e.g. "R  orig.ts -> dest.ts")
         if (rawPath.includes(' -> ')) {
-            rawPath = rawPath.split(' -> ')[1].trim();
-        }
-
-        // Unquote if enclosed in quotes
-        if (rawPath.startsWith('"') && rawPath.endsWith('"')) {
-            rawPath = rawPath.slice(1, -1);
+            const arrowIdx = rawPath.indexOf(' -> ');
+            originalFilePath = unquoteGitPath(rawPath.slice(0, arrowIdx));
+            rawPath = unquoteGitPath(rawPath.slice(arrowIdx + 4));
+        } else {
+            rawPath = unquoteGitPath(rawPath);
         }
 
         let status: 'M' | 'A' | 'D' | 'R' | '??' = 'M';
@@ -416,6 +478,7 @@ export function parseGitStatusPorcelain(output: string, repoRoot: string): Chang
 
         results.push({
             filePath: rawPath,
+            ...(originalFilePath ? { originalFilePath } : {}),
             fileName: path.basename(rawPath),
             status,
             statusLabel,
@@ -497,6 +560,43 @@ export async function prepareOriginalFileForDiff(
     }
 
     return tempFilePath;
+}
+
+/**
+ * Prepares an empty temporary file for deleted working-tree files in VS Code diff view.
+ */
+export function prepareEmptyFileForDiff(filePath: string): string {
+    cleanDiffCache();
+    const cacheDir = getDiffCacheDir();
+    if (!fs.existsSync(cacheDir)) {
+        fs.mkdirSync(cacheDir, { recursive: true });
+    }
+    const safeFileName = `${Date.now()}_deleted_${path.basename(filePath)}`;
+    const tempFilePath = path.join(cacheDir, safeFileName);
+    fs.writeFileSync(tempFilePath, '', 'utf8');
+    return tempFilePath;
+}
+
+/**
+ * Resolves left/right file paths and title for vscode.diff, handling renamed and deleted files.
+ */
+export async function resolveDiffTargets(
+    change: ChangedFileInfo,
+    repoRoot: string,
+    baseRef: string = 'HEAD',
+    baseLabel: string = 'HEAD'
+): Promise<{ originalPath: string; workingPath: string; title: string }> {
+    const originalGitPath = change.originalFilePath || change.filePath;
+    const originalPath = await prepareOriginalFileForDiff(repoRoot, originalGitPath, baseRef);
+
+    const isDeleted = change.status === 'D' || !fs.existsSync(change.fullPath);
+    const workingPath = isDeleted ? prepareEmptyFileForDiff(change.filePath) : change.fullPath;
+    const workingLabel = isDeleted ? 'Deleted' : 'Working Tree';
+    const title = change.originalFilePath
+        ? `${path.basename(change.originalFilePath)} → ${change.fileName} (${baseLabel} ↔ ${workingLabel})`
+        : `${change.fileName} (${baseLabel} ↔ ${workingLabel})`;
+
+    return { originalPath, workingPath, title };
 }
 
 export type ReviewViewMode = 'tree' | 'flat';
@@ -760,7 +860,9 @@ export interface RollbackOptions {
 }
 
 /**
- * Creates a git checkpoint before applying review feedback or running agent tasks
+ * Creates a git checkpoint before applying review feedback or running agent tasks.
+ * Snapshots tracked changes plus pre-existing untracked files (excluding .env* and .vscode/*)
+ * so rollback preserves untracked user files created prior to the checkpoint.
  */
 export async function createReviewCheckpoint(repoRoot: string, label: string = 'pre-review'): Promise<ReviewCheckpoint | null> {
     try {
@@ -789,6 +891,44 @@ export async function createReviewCheckpoint(repoRoot: string, label: string = '
         // Store as a ref under refs/herdr/checkpoints/
         await runGitCmd(['update-ref', `refs/herdr/checkpoints/${checkpointId}`, commitHash], repoRoot);
 
+        // Snapshot pre-existing untracked files (excluding protected .env* and .vscode/*) into a companion tree ref
+        try {
+            const untrackedOut = await runGitCmd(['ls-files', '--others', '--exclude-standard', '-z'], repoRoot);
+            const untrackedFiles = untrackedOut
+                .split('\0')
+                .filter(Boolean)
+                .filter(f => !path.basename(f).startsWith('.env') && !f.startsWith('.vscode/') && f !== '.vscode');
+
+            if (untrackedFiles.length > 0) {
+                const tempIndexPath = path.join(os.tmpdir(), `herdr-cp-idx-${timestamp}-${Math.random().toString(36).slice(2)}`);
+                try {
+                    const chunkSize = 50;
+                    for (let i = 0; i < untrackedFiles.length; i += chunkSize) {
+                        const chunk = untrackedFiles.slice(i, i + chunkSize);
+                        await runGitWithEnv(['update-index', '--add', '--', ...chunk], repoRoot, { GIT_INDEX_FILE: tempIndexPath });
+                    }
+                    const treeHash = (await runGitWithEnv(['write-tree'], repoRoot, { GIT_INDEX_FILE: tempIndexPath })).trim();
+                    if (treeHash) {
+                        const untrackedCommitHash = (await runGitCmd(
+                            ['commit-tree', treeHash, '-m', `Untracked snapshot for ${checkpointId}`],
+                            repoRoot
+                        )).trim();
+                        if (untrackedCommitHash) {
+                            await runGitCmd(['update-ref', `refs/herdr/checkpoint-untracked/${checkpointId}`, untrackedCommitHash], repoRoot);
+                        }
+                    }
+                } finally {
+                    try {
+                        if (fs.existsSync(tempIndexPath)) {
+                            fs.unlinkSync(tempIndexPath);
+                        }
+                    } catch {}
+                }
+            }
+        } catch {
+            // Non-fatal: tracked checkpoint was already recorded
+        }
+
         return {
             id: checkpointId,
             hash: commitHash,
@@ -798,6 +938,54 @@ export async function createReviewCheckpoint(repoRoot: string, label: string = '
     } catch {
         return null;
     }
+}
+
+function extractCheckpointTimestamp(cpId: string): number {
+    const match = cpId.match(/^checkpoint_(\d+)_/);
+    return match ? parseInt(match[1], 10) : 0;
+}
+
+async function resolveCheckpointUntrackedRef(repoRoot: string, checkpointHashOrRef: string): Promise<string | null> {
+    try {
+        const trimmedInput = checkpointHashOrRef.trim();
+        const refsOut = await runGitCmd(['for-each-ref', '--format=%(refname)|%(objectname)', 'refs/herdr/checkpoints/'], repoRoot).catch(() => '');
+        const entries = refsOut
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .map(line => {
+                const [refName, objHash] = line.split('|');
+                const cpId = refName.replace(/^refs\/herdr\/checkpoints\//, '');
+                return { refName, objHash, cpId };
+            });
+
+        // 1. Exact ref/id match takes strict precedence and never falls back to another checkpoint sharing HEAD
+        const exactMatch = entries.find(e => e.refName === trimmedInput || e.cpId === trimmedInput);
+        if (exactMatch) {
+            const untrackedRef = `refs/herdr/checkpoint-untracked/${exactMatch.cpId}`;
+            const verified = await runGitCmd(['rev-parse', '--verify', untrackedRef], repoRoot).catch(() => '');
+            return verified.trim() ? untrackedRef : null;
+        }
+
+        // 2. Hash match: pick the newest checkpoint sharing this commit hash so older HEAD checkpoints cannot resurrect stale files
+        const resolvedHash = (await runGitCmd(['rev-parse', '--verify', trimmedInput], repoRoot)).trim();
+        const hashMatches = entries
+            .filter(e => e.objHash === resolvedHash)
+            .sort((a, b) => {
+                const tsDiff = extractCheckpointTimestamp(b.cpId) - extractCheckpointTimestamp(a.cpId);
+                return tsDiff !== 0 ? tsDiff : b.cpId.localeCompare(a.cpId);
+            });
+
+        if (hashMatches.length > 0) {
+            const untrackedRef = `refs/herdr/checkpoint-untracked/${hashMatches[0].cpId}`;
+            const verified = await runGitCmd(['rev-parse', '--verify', untrackedRef], repoRoot).catch(() => '');
+            if (verified.trim()) {
+                return untrackedRef;
+            }
+        }
+    } catch {
+        // Ignore resolution errors
+    }
+    return null;
 }
 
 /**
@@ -813,6 +1001,8 @@ export async function rollbackReviewCheckpoint(
     }
 
     try {
+        const untrackedRef = await resolveCheckpointUntrackedRef(repoRoot, checkpointHashOrRef);
+
         await runGitCmd(['checkout', checkpointHashOrRef, '--', '.'], repoRoot);
         if (options.cleanUntracked !== false) {
             const cleanArgs = ['clean', '-fd', '-e', '.env*', '-e', '.vscode/*'];
@@ -823,6 +1013,21 @@ export async function rollbackReviewCheckpoint(
             }
             await runGitCmd(cleanArgs, repoRoot);
         }
+
+        if (untrackedRef) {
+            const tempIndexPath = path.join(os.tmpdir(), `herdr-restore-idx-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+            try {
+                await runGitWithEnv(['read-tree', untrackedRef], repoRoot, { GIT_INDEX_FILE: tempIndexPath });
+                await runGitWithEnv(['checkout-index', '-a', '-f'], repoRoot, { GIT_INDEX_FILE: tempIndexPath });
+            } finally {
+                try {
+                    if (fs.existsSync(tempIndexPath)) {
+                        fs.unlinkSync(tempIndexPath);
+                    }
+                } catch {}
+            }
+        }
+
         return true;
     } catch {
         return false;

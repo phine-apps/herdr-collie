@@ -78,11 +78,42 @@ export interface ExtensionContextLike {
 }
 
 /**
+ * Notifies running Herdr servers (default plus any configured/active sessions) to reload config.
+ */
+export function reloadConfigForSessions(sessionNames?: string | string[]): void {
+    const targets = new Set<string>();
+    if (Array.isArray(sessionNames)) {
+        for (const s of sessionNames) {
+            if (typeof s === 'string' && s.trim()) {
+                targets.add(s.trim());
+            }
+        }
+    } else if (typeof sessionNames === 'string' && sessionNames.trim()) {
+        targets.add(sessionNames.trim());
+    }
+
+    if (targets.size === 0) {
+        targets.add('vscode');
+    }
+
+    try {
+        const { execHerdr } = require('./executors');
+        execHerdr(['server', 'reload-config'], () => {});
+        for (const session of targets) {
+            if (session !== 'default') {
+                execHerdr(['--session', session, 'server', 'reload-config'], () => {});
+            }
+        }
+    } catch (e) {}
+}
+
+/**
  * Synchronizes the embedded herdr config and sets the HERDR_CONFIG_PATH environment variable.
  */
 export function syncHerdrConfig(
     context: ExtensionContextLike,
-    hideSidebar: boolean = true
+    hideSidebar: boolean = true,
+    sessionNames?: string | string[]
 ): string | undefined {
     if (!hideSidebar) {
         if (context.environmentVariableCollection) {
@@ -120,11 +151,7 @@ export function syncHerdrConfig(
         process.env['HERDR_CONFIG_PATH'] = embeddedPath;
 
         // Notify running servers to reload config
-        try {
-            const { execHerdr } = require('./executors');
-            execHerdr(['server', 'reload-config'], () => {});
-            execHerdr(['--session', 'vscode', 'server', 'reload-config'], () => {});
-        } catch (e) {}
+        reloadConfigForSessions(sessionNames);
 
         return embeddedPath;
     } catch (e) {
@@ -139,7 +166,8 @@ export function syncHerdrConfig(
  */
 export function setupConfigManager(
     context: any,
-    vscodeModule?: any
+    vscodeModule?: any,
+    getSessionNames?: () => string | string[]
 ): { dispose(): void } {
     let vscode = vscodeModule;
     if (!vscode) {
@@ -158,8 +186,32 @@ export function setupConfigManager(
         return true;
     };
 
+    const getTargetSessions = (): string[] => {
+        const sessions = new Set<string>();
+        if (vscode && vscode.workspace) {
+            const config = vscode.workspace.getConfiguration('herdr-collie');
+            const configured = config.get('sessionName', 'vscode');
+            if (typeof configured === 'string' && configured.trim()) {
+                sessions.add(configured.trim());
+            }
+        }
+        if (getSessionNames) {
+            const extra = getSessionNames();
+            if (Array.isArray(extra)) {
+                for (const s of extra) {
+                    if (typeof s === 'string' && s.trim()) {
+                        sessions.add(s.trim());
+                    }
+                }
+            } else if (typeof extra === 'string' && extra.trim()) {
+                sessions.add(extra.trim());
+            }
+        }
+        return sessions.size > 0 ? Array.from(sessions) : ['vscode'];
+    };
+
     // Initial sync
-    syncHerdrConfig(context, getHideSidebarSetting());
+    syncHerdrConfig(context, getHideSidebarSetting(), getTargetSessions());
 
     // Watch original config.toml
     const origPath = getOriginalConfigPath();
@@ -170,7 +222,7 @@ export function setupConfigManager(
             clearTimeout(debounceTimer);
         }
         debounceTimer = setTimeout(() => {
-            syncHerdrConfig(context, getHideSidebarSetting());
+            syncHerdrConfig(context, getHideSidebarSetting(), getTargetSessions());
         }, 200);
     }
 
@@ -189,8 +241,8 @@ export function setupConfigManager(
     let configChangeSub: { dispose(): void } | null = null;
     if (vscode && vscode.workspace && vscode.workspace.onDidChangeConfiguration) {
         configChangeSub = vscode.workspace.onDidChangeConfiguration((e: any) => {
-            if (e.affectsConfiguration('herdr-collie.hideHerdrSidebar')) {
-                syncHerdrConfig(context, getHideSidebarSetting());
+            if (e.affectsConfiguration('herdr-collie.hideHerdrSidebar') || e.affectsConfiguration('herdr-collie.sessionName')) {
+                syncHerdrConfig(context, getHideSidebarSetting(), getTargetSessions());
             }
         });
     }

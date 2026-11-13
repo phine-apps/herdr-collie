@@ -24,6 +24,7 @@ export class WorkspaceHUD implements vscode.Disposable {
     private connectListener?: () => void;
     private eventListener?: () => void;
     private disconnectListener?: () => void;
+    private eventRefreshTimer: NodeJS.Timeout | null = null;
 
     constructor(
         private socketClient: HerdrSocketClient,
@@ -51,10 +52,25 @@ export class WorkspaceHUD implements vscode.Disposable {
         this.refresh();
     }
 
+    private scheduleEventRefresh(delayMs: number = 30): void {
+        if (this.isDisposed) return;
+        if (this.eventRefreshTimer) {
+            clearTimeout(this.eventRefreshTimer);
+        }
+        this.eventRefreshTimer = setTimeout(() => {
+            this.eventRefreshTimer = null;
+            void this.refresh({ maxAgeMs: 150 });
+        }, delayMs);
+    }
+
     private setupSocketEvents(client: HerdrSocketClient): void {
         this.connectListener = () => this.refresh();
-        this.eventListener = () => this.refresh();
+        this.eventListener = () => this.scheduleEventRefresh(30);
         this.disconnectListener = () => {
+            if (this.eventRefreshTimer) {
+                clearTimeout(this.eventRefreshTimer);
+                this.eventRefreshTimer = null;
+            }
             this.updateHUDText(undefined);
         };
 
@@ -65,6 +81,10 @@ export class WorkspaceHUD implements vscode.Disposable {
     }
 
     private cleanupSocketEvents(): void {
+        if (this.eventRefreshTimer) {
+            clearTimeout(this.eventRefreshTimer);
+            this.eventRefreshTimer = null;
+        }
         if (this.socketClient && typeof (this.socketClient as any).off === 'function') {
             if (this.connectListener) {
                 this.socketClient.off('connect', this.connectListener);
@@ -84,7 +104,7 @@ export class WorkspaceHUD implements vscode.Disposable {
     /**
      * Refreshes active workspace and updates status bar display
      */
-    public async refresh(): Promise<void> {
+    public async refresh(options?: { maxAgeMs?: number }): Promise<void> {
         if (this.isDisposed) return;
 
         const seq = ++this.refreshSequence;
@@ -92,7 +112,7 @@ export class WorkspaceHUD implements vscode.Disposable {
         let agents: ParsedAgent[] = [];
 
         if (this.socketClient.isConnected) {
-            const snapshot = await this.socketClient.getSnapshot();
+            const snapshot = await this.socketClient.getSnapshot(options?.maxAgeMs ?? 0);
             if (this.isDisposed || seq !== this.refreshSequence) return;
             if (snapshot) {
                 workspaces = parseSnapshotWorkspaces(snapshot);

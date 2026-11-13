@@ -146,6 +146,7 @@ export class AgentHUD implements vscode.Disposable {
     private connectListener?: () => void;
     private eventListener?: (event: any) => void;
     private disconnectListener?: () => void;
+    private eventRefreshTimer: NodeJS.Timeout | null = null;
 
     constructor(
         private socketClient: HerdrSocketClient,
@@ -157,7 +158,7 @@ export class AgentHUD implements vscode.Disposable {
             100
         );
         this.statusBarItem.command = 'herdr-collie.showAgentHUD';
-        this.statusBarItem.name = 'Hrdr Collie Agent HUD';
+        this.statusBarItem.name = 'Herdr Collie Agent HUD';
         this.updateHUDText([]);
         this.statusBarItem.show();
 
@@ -171,13 +172,28 @@ export class AgentHUD implements vscode.Disposable {
         this.refresh();
     }
 
+    private scheduleEventRefresh(delayMs: number = 30): void {
+        if (this.isDisposed) return;
+        if (this.eventRefreshTimer) {
+            clearTimeout(this.eventRefreshTimer);
+        }
+        this.eventRefreshTimer = setTimeout(() => {
+            this.eventRefreshTimer = null;
+            void this.refresh({ maxAgeMs: 150 });
+        }, delayMs);
+    }
+
     private setupSocketEvents(client: HerdrSocketClient): void {
         this.connectListener = () => this.refresh();
         this.eventListener = (event: any) => {
             this.handleSocketEvent(event);
-            this.refresh();
+            this.scheduleEventRefresh(30);
         };
         this.disconnectListener = () => {
+            if (this.eventRefreshTimer) {
+                clearTimeout(this.eventRefreshTimer);
+                this.eventRefreshTimer = null;
+            }
             this.updateHUDText([]);
         };
 
@@ -188,6 +204,10 @@ export class AgentHUD implements vscode.Disposable {
     }
 
     private cleanupSocketEvents(): void {
+        if (this.eventRefreshTimer) {
+            clearTimeout(this.eventRefreshTimer);
+            this.eventRefreshTimer = null;
+        }
         if (this.socketClient && typeof (this.socketClient as any).off === 'function') {
             if (this.connectListener) {
                 this.socketClient.off('connect', this.connectListener);
@@ -256,14 +276,14 @@ export class AgentHUD implements vscode.Disposable {
     /**
      * Refreshes agents list and updates HUD & notifications
      */
-    public async refresh(): Promise<void> {
+    public async refresh(options?: { maxAgeMs?: number }): Promise<void> {
         if (this.isDisposed) return;
 
         const seq = ++this.refreshSequence;
         let agents: ParsedAgent[] = [];
 
         if (this.socketClient.isConnected) {
-            const snapshot = await this.socketClient.getSnapshot();
+            const snapshot = await this.socketClient.getSnapshot(options?.maxAgeMs ?? 0);
             if (this.isDisposed || seq !== this.refreshSequence) return;
             if (snapshot) {
                 agents = parseSnapshotAgents(snapshot);

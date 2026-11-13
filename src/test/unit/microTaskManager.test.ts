@@ -9,6 +9,7 @@ import {
     detectTestAtLine,
     detectTodoAtLine,
     formatDiagnosticPrompt,
+    buildDiagnosticFixPrompt,
     formatTestPrompt,
     formatTodoPrompt,
     formatContextTaskPrompt,
@@ -203,6 +204,32 @@ describe('microTaskManager Unit Tests', () => {
             expect(prompt).to.include("Argument of type 'string' is not assignable");
             expect(prompt).to.include('```typescript');
             expect(prompt).to.include('add("1", 2);');
+        });
+
+        it('buildDiagnosticFixPrompt extracts surrounding snippet at actual diagnostic line for single and array inputs', () => {
+            const lines = Array.from({ length: 20 }, (_, i) => `const line${i + 1} = ${i + 1};`);
+            const docText = lines.join('\n');
+
+            const diagA = {
+                message: 'Error A on line 15',
+                severity: 0,
+                range: new MockRange(14, 0, 14, 10)
+            };
+            const diagB = {
+                message: 'Warning B on line 15',
+                severity: 1,
+                range: new MockRange(14, 5, 14, 15)
+            };
+
+            const arrayPrompt = buildDiagnosticFixPrompt('src/sample.ts', docText, lines.length, [diagA, diagB]);
+            expect(arrayPrompt).to.include('`src/sample.ts` (Line 15)');
+            expect(arrayPrompt).to.include('const line15 = 15;');
+            expect(arrayPrompt).to.not.include('const line1 = 1;');
+            expect(arrayPrompt).to.include('Error A on line 15');
+            expect(arrayPrompt).to.include('Warning B on line 15');
+            expect(arrayPrompt).to.include('\n\n---\n\n');
+
+            expect(buildDiagnosticFixPrompt('src/sample.ts', docText, lines.length, [])).to.equal('');
         });
 
         it('formatTestPrompt formats fix and edge-cases prompts', () => {

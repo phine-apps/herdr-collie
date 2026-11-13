@@ -274,13 +274,60 @@ export function getAggregateStatusIcon(agents: ParsedAgent[]): string | undefine
     return agents[0]?.statusIcon || '⚪';
 }
 
-function normalizePathForComparison(p?: string): string {
+export function normalizePathForComparison(p?: string): string {
     if (!p) return '';
     let normalized = path.normalize(p).replace(/[\/\\]+$/, '');
+    if (!normalized && p.trim()) {
+        normalized = path.sep;
+    }
     if (process.platform === 'win32' || process.platform === 'darwin') {
         normalized = normalized.toLowerCase();
     }
     return normalized;
+}
+
+/**
+ * Checks whether candidatePath equals basePath or is strictly inside basePath directory.
+ */
+export function isSameOrSubPath(candidatePath?: string, basePath?: string): boolean {
+    const candidateNorm = normalizePathForComparison(candidatePath);
+    const baseNorm = normalizePathForComparison(basePath);
+    if (!candidateNorm || !baseNorm) {
+        return false;
+    }
+    if (candidateNorm === baseNorm) {
+        return true;
+    }
+    const prefix = baseNorm.endsWith(path.sep) ? baseNorm : `${baseNorm}${path.sep}`;
+    return candidateNorm.startsWith(prefix);
+}
+
+/**
+ * Finds an existing Herdr workspace matching the current VS Code project directory.
+ * Prefers normalized cwd equality (preserving matches across workspace renames while
+ * avoiding collisions on identical basenames in different directories), falling back
+ * to id match or label match when cwd is unavailable.
+ */
+export function findMatchingWorkspaceForCwd(
+    workspaces: ParsedWorkspace[],
+    currentCwd?: string,
+    wsName?: string
+): ParsedWorkspace | undefined {
+    const normCurrent = normalizePathForComparison(currentCwd);
+    if (normCurrent) {
+        const byCwd = workspaces.find(w => {
+            const wsCwd = normalizePathForComparison(w.cwd);
+            return Boolean(wsCwd) && wsCwd === normCurrent;
+        });
+        if (byCwd) {
+            return byCwd;
+        }
+    }
+
+    return workspaces.find(w =>
+        (Boolean(currentCwd) && w.id === currentCwd) ||
+        (!w.cwd && Boolean(wsName) && w.label === wsName)
+    );
 }
 
 /**
@@ -297,12 +344,7 @@ export function formatWorkspaceDisplay(
     const isWorktree = Boolean(matchedWt && !matchedWt.isMain);
     const branchName = matchedWt?.branch;
 
-    const curFolderNorm = normalizePathForComparison(currentWorkspaceFolder);
-    const isCurrentWindow = Boolean(
-        curFolderNorm && 
-        wsCwdNorm && 
-        (wsCwdNorm === curFolderNorm || wsCwdNorm.startsWith(curFolderNorm))
-    );
+    const isCurrentWindow = isSameOrSubPath(ws.cwd, currentWorkspaceFolder);
     const isFocused = Boolean(ws.focused);
 
     // Filter agents associated with this workspace
@@ -451,7 +493,8 @@ export function formatAgentDisplay(
     worktrees: GitWorktreeInfo[] = [],
     nowMs: number = Date.now()
 ): AgentDisplayInfo {
-    const matchedWt = agent.workspaceCwd ? worktrees.find(w => w.worktree === agent.workspaceCwd) : undefined;
+    const agentCwdNorm = normalizePathForComparison(agent.workspaceCwd);
+    const matchedWt = agentCwdNorm ? worktrees.find(w => normalizePathForComparison(w.worktree) === agentCwdNorm) : undefined;
     const branchName = matchedWt?.branch;
     const wsName = agent.workspaceLabel || (agent.workspaceId ? `Workspace ${agent.workspaceId}` : '');
 
