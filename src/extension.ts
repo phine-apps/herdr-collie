@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as l10n from '@vscode/l10n';
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execHerdr, runGitCmd, ensureSessionServerRunning, isProcessDescendantRunning } from './executors';
@@ -13,6 +14,8 @@ import {
     formatTerminalOutput,
     formatAgentDisplay,
     formatWorkspaceDisplay,
+    findMatchingWorkspaceForCwd,
+    isSameOrSubPath,
     sortAgents,
     AgentSortOrder
 } from './formatters';
@@ -30,7 +33,7 @@ import {
     ParsedAgent
 } from './parsers';
 import { HerdrSocketClient, validateSessionName } from './socketClient';
-import { setupConfigManager } from './configManager';
+import { setupConfigManager, reloadConfigForSessions } from './configManager';
 import { AgentHUD } from './agentHUD';
 import { WorkspaceHUD } from './workspaceHUD';
 import { 
@@ -44,13 +47,20 @@ import {
     getCurrentGitBranch,
     openWorkspaceFolderInWindow
 } from './worktreeManager';
-import { HerdrWorkspaceTreeItem, HerdrTabTreeItem, WorkspaceDragAndDropController } from './workspaceDragAndDrop';
+import {
+    HerdrWorkspaceTreeItem,
+    HerdrTabTreeItem,
+    WorkspaceDragAndDropController,
+    AutoSelectionState,
+    resolveWorkspaceAutoSelection,
+    resolveAgentAutoSelection
+} from './workspaceDragAndDrop';
 import { 
     HerdrReviewController,
     HerdrReviewChangesProvider,
     ReviewChangeTreeItem,
     ReviewViewMode,
-    prepareOriginalFileForDiff,
+    resolveDiffTargets,
     createReviewCheckpoint,
     rollbackReviewCheckpoint,
     listReviewCheckpoints,
@@ -61,6 +71,7 @@ import {
     HerdrCodeLensProvider,
     promptAndDispatchTask,
     handleContextTaskDispatch,
+    buildDiagnosticFixPrompt,
     formatDiagnosticPrompt,
     formatTestPrompt,
     formatTodoPrompt
@@ -79,7 +90,7 @@ function getSessionName(): string {
     return config.get<string>('sessionName', 'vscode') || 'vscode';
 }
 
-function fetchActiveSessions(): Promise<string[]> {
+function fetchActiveSessions(extraSession?: string): Promise<string[]> {
     const configuredSession = getSessionName();
     return new Promise((resolve) => {
         execHerdr(['session', 'list', '--json'], (err: any, stdout: any) => {
@@ -90,6 +101,9 @@ function fetchActiveSessions(): Promise<string[]> {
                     if (!sessionNames.includes(configuredSession)) {
                         sessionNames.push(configuredSession);
                     }
+                    if (extraSession && !sessionNames.includes(extraSession)) {
+                        sessionNames.push(extraSession);
+                    }
                     resolve(sessionNames);
                     return;
                 }
@@ -98,43 +112,217 @@ function fetchActiveSessions(): Promise<string[]> {
             if (configuredSession && !fallback.includes(configuredSession)) {
                 fallback.push(configuredSession);
             }
+            if (extraSession && !fallback.includes(extraSession)) {
+                fallback.push(extraSession);
+            }
             resolve(fallback);
         });
     });
 }
 
+const WORKTREE_CACHE_TTL_MS = 350;
+let worktreeCacheGeneration = 0;
+const inFlightWorktreeQueries = new Map<string, Promise<GitWorktreeInfo[]>>();
+const worktreeQueryCache = new Map<string, { data: GitWorktreeInfo[]; timestamp: number }>();
+
+function invalidateWorktreeCache(): void {
+    worktreeCacheGeneration++;
+    worktreeQueryCache.clear();
+    inFlightWorktreeQueries.clear();
+}
+
 async function getWorktreesForCwds(cwds: (string | undefined)[]): Promise<GitWorktreeInfo[]> {
-    const validCwds = Array.from(new Set(cwds.filter((c): c is string => Boolean(c))));
-    const allWorktrees: GitWorktreeInfo[] = [];
-    const visitedRepos = new Set<string>();
+    const validCwds = Array.from(new Set(cwds.filter((c): c is string => Boolean(c)))).sort();
+    const folderPaths = (vscode.workspace.workspaceFolders || []).map(wf => wf.uri.fsPath).sort();
+    const cacheKey = JSON.stringify({ validCwds, folderPaths });
 
-    for (const cwd of validCwds) {
+    const cached = worktreeQueryCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp <= WORKTREE_CACHE_TTL_MS) {
+        return cached.data;
+    }
+
+    const inFlight = inFlightWorktreeQueries.get(cacheKey);
+    if (inFlight) {
+        return inFlight;
+    }
+
+    const gen = worktreeCacheGeneration;
+    const queryPromise = (async () => {
+        const allWorktrees: GitWorktreeInfo[] = [];
+        const visitedRepos = new Set<string>();
+
+        for (const cwd of validCwds) {
+            try {
+                const repoRoot = await getRepoRoot(cwd);
+                if (repoRoot && !visitedRepos.has(repoRoot)) {
+                    visitedRepos.add(repoRoot);
+                    const wts = await listGitWorktrees(repoRoot);
+                    allWorktrees.push(...wts);
+                }
+            } catch {
+                // Ignore git inspection errors for non-git paths
+            }
+        }
+
+        for (const folderPath of folderPaths) {
+            try {
+                const repoRoot = await getRepoRoot(folderPath);
+                if (repoRoot && !visitedRepos.has(repoRoot)) {
+                    visitedRepos.add(repoRoot);
+                    const wts = await listGitWorktrees(repoRoot);
+                    allWorktrees.push(...wts);
+                }
+            } catch {
+                // Ignore git inspection errors
+            }
+        }
+
+        if (gen === worktreeCacheGeneration) {
+            worktreeQueryCache.set(cacheKey, { data: allWorktrees, timestamp: Date.now() });
+        }
+        return allWorktrees;
+    })().finally(() => {
+        if (inFlightWorktreeQueries.get(cacheKey) === queryPromise) {
+            inFlightWorktreeQueries.delete(cacheKey);
+        }
+    });
+
+    inFlightWorktreeQueries.set(cacheKey, queryPromise);
+    return queryPromise;
+}
+
+function tryRealpath(targetPath: string): string {
+    try {
+        return fs.realpathSync(targetPath);
+    } catch {
+        const parent = path.dirname(targetPath);
+        if (parent && parent !== targetPath) {
+            try {
+                return path.join(fs.realpathSync(parent), path.basename(targetPath));
+            } catch {
+                // Fall back to original path when parent cannot be resolved
+            }
+        }
+        return targetPath;
+    }
+}
+
+/**
+ * Computes a repository-relative POSIX path for git CLI calls, avoiding multi-root workspace folder prefixes.
+ */
+export function computeGitRelativePath(repoRoot: string, filePath: string): string {
+    const rel = path.relative(repoRoot, filePath).replace(/\\/g, '/');
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+        return rel;
+    }
+    const realRel = path.relative(tryRealpath(repoRoot), tryRealpath(filePath)).replace(/\\/g, '/');
+    if (realRel && !realRel.startsWith('..') && !path.isAbsolute(realRel)) {
+        return realRel;
+    }
+    return filePath;
+}
+
+/**
+ * Resolves the target workspace/git repository root and optional repo-relative file path
+ * cleanly in both single-root and multi-root VS Code workspaces.
+ */
+export async function resolveGitContextForUri(
+    resourceUri?: vscode.Uri,
+    fallbackUri?: vscode.Uri
+): Promise<{ cwd: string; targetFile: string } | null> {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    const contextUri = resourceUri || fallbackUri;
+
+    let cwd: string | undefined;
+    if (contextUri?.fsPath) {
         try {
-            const repoRoot = await getRepoRoot(cwd);
-            if (repoRoot && !visitedRepos.has(repoRoot)) {
-                visitedRepos.add(repoRoot);
-                const wts = await listGitWorktrees(repoRoot);
-                allWorktrees.push(...wts);
+            const repoRoot = await getRepoRoot(path.dirname(contextUri.fsPath));
+            if (repoRoot) {
+                cwd = repoRoot;
             }
         } catch {
-            // Ignore git inspection errors for non-git paths
+            // Fall back to owning workspace folder
+        }
+        if (!cwd && typeof vscode.workspace.getWorkspaceFolder === 'function') {
+            cwd = vscode.workspace.getWorkspaceFolder(contextUri)?.uri.fsPath;
         }
     }
 
-    for (const wf of vscode.workspace.workspaceFolders || []) {
-        try {
-            const repoRoot = await getRepoRoot(wf.uri.fsPath);
-            if (repoRoot && !visitedRepos.has(repoRoot)) {
-                visitedRepos.add(repoRoot);
-                const wts = await listGitWorktrees(repoRoot);
-                allWorktrees.push(...wts);
+    if (!cwd && workspaceFolders && workspaceFolders.length > 0) {
+        const firstPath = workspaceFolders[0].uri.fsPath;
+        cwd = (await getRepoRoot(firstPath).catch(() => null)) || firstPath;
+    }
+
+    if (!cwd) {
+        return null;
+    }
+
+    let targetFile = '';
+    if (resourceUri?.fsPath) {
+        targetFile = computeGitRelativePath(cwd, resourceUri.fsPath);
+    } else if (resourceUri) {
+        targetFile = vscode.workspace.asRelativePath(resourceUri, false);
+    }
+
+    return { cwd, targetFile };
+}
+
+/**
+ * Captures terminal selection if present, or falls back to the full terminal buffer,
+ * using a unique sentinel clipboard marker so selections identical to prior clipboard
+ * contents are still recognized accurately.
+ */
+export async function captureTerminalOutputWithClipboard(
+    clipboard: { readText(): Thenable<string> | Promise<string>; writeText(value: string): Thenable<void> | Promise<void> },
+    executeCommand: (command: string) => Thenable<any> | Promise<any>
+): Promise<string> {
+    let originalClipboard = '';
+    try {
+        originalClipboard = await clipboard.readText();
+    } catch {
+        // Ignore clipboard read errors
+    }
+
+    const sentinel = `__herdr_collie_terminal_sentinel_${Date.now()}_${Math.random().toString(36).slice(2)}__`;
+    let sentinelWritten = false;
+    try {
+        await clipboard.writeText(sentinel);
+        sentinelWritten = true;
+    } catch {
+        // Fallback when clipboard write fails
+    }
+
+    let outputText = '';
+    try {
+        await executeCommand('workbench.action.terminal.copySelection');
+        const selectionText = await clipboard.readText();
+
+        const hasSelection = sentinelWritten
+            ? Boolean(selectionText && selectionText !== sentinel)
+            : Boolean(selectionText && selectionText !== originalClipboard);
+
+        if (hasSelection) {
+            outputText = selectionText;
+        } else {
+            await executeCommand('workbench.action.terminal.selectAll');
+            await executeCommand('workbench.action.terminal.copySelection');
+            await executeCommand('workbench.action.terminal.clearSelection');
+            const bufferText = await clipboard.readText();
+            if (!sentinelWritten || bufferText !== sentinel) {
+                outputText = bufferText;
             }
+        }
+    } catch {
+        // Fallback or handle error
+    } finally {
+        try {
+            await clipboard.writeText(originalClipboard);
         } catch {
-            // Ignore git inspection errors
+            // Ignore clipboard restore errors
         }
     }
 
-    return allWorktrees;
+    return outputText;
 }
 
 /**
@@ -164,20 +352,20 @@ export function activate(context: vscode.ExtensionContext) {
         }
     }
 
-    // Ensure session server is running in background
     const initialSession = getSessionName();
-    ensureSessionServerRunning(initialSession).catch(() => {});
-
-    // Setup Herdr embedded config to hide sidebar in VS Code terminal if enabled
-    setupConfigManager(context);
-
-    let activeSidebarSession = getSessionName();
+    let activeSidebarSession = initialSession;
     const getActiveSidebarSession = () => activeSidebarSession;
+
+    // Setup Herdr embedded config before starting session server so HERDR_CONFIG_PATH is ready
+    setupConfigManager(context, vscode, getActiveSidebarSession);
+
+    // Ensure session server is running in background
+    ensureSessionServerRunning(initialSession).catch(() => {});
 
     let socketClient = new HerdrSocketClient(activeSidebarSession);
     socketClient.connect();
 
-    let refreshAllProviders: () => void = () => {};
+    let refreshAllProviders: (options?: { includeHUDs?: boolean; snapshotMaxAgeMs?: number }) => void = () => {};
 
     // Track terminals initiated or restored by Herdr Collie
     const extensionManagedTerminals = new Set<vscode.Terminal>();
@@ -724,8 +912,8 @@ export function activate(context: vscode.ExtensionContext) {
         quickPickTitle: string,
         options?: { stageOnly?: boolean }
     ): Promise<boolean> {
-        const defaultSession = getSessionName();
-        const sessions = await fetchActiveSessions();
+        const defaultSession = activeSidebarSession;
+        const sessions = await fetchActiveSessions(defaultSession);
         const currentCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         
         const allItems: TargetQuickPickItem[] = [];
@@ -746,7 +934,7 @@ export function activate(context: vscode.ExtensionContext) {
                         const panes = parsePanes(stdout);
                         panes.forEach(p => {
                             const isCurrentSession = sessionName === defaultSession;
-                            const isCurrentCwd = Boolean(currentCwd && (p.cwd === currentCwd || p.cwd.startsWith(currentCwd)));
+                            const isCurrentCwd = isSameOrSubPath(p.cwd, currentCwd);
                             const item: TargetQuickPickItem = {
                                 label: `[${sessionName}] $(terminal) Pane: ${p.name || p.id}`,
                                 description: `Session: ${sessionName}${p.command ? ` | ${p.command}` : ''}${isCurrentCwd ? ' (Current Project)' : ''}`,
@@ -932,14 +1120,12 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let sendStagedChangesDisposable = vscode.commands.registerCommand('herdr-collie.sendStagedChanges', async (...args) => {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders) return;
-        const cwd = workspaceFolders[0].uri.fsPath;
-        
-        let targetFile = '';
-        if (args.length > 0 && args[0] && args[0].resourceUri) {
-            targetFile = vscode.workspace.asRelativePath(args[0].resourceUri as vscode.Uri);
-        }
+        const resourceUri = args.length > 0 && args[0] && args[0].resourceUri
+            ? (args[0].resourceUri as vscode.Uri)
+            : undefined;
+        const gitCtx = await resolveGitContextForUri(resourceUri, vscode.window.activeTextEditor?.document.uri);
+        if (!gitCtx) return;
+        const { cwd, targetFile } = gitCtx;
 
         try {
             const gitArgs = targetFile ? ['diff', '--cached', '--', targetFile] : ['diff', '--cached'];
@@ -956,14 +1142,12 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let sendWorkingTreeChangesDisposable = vscode.commands.registerCommand('herdr-collie.sendWorkingTreeChanges', async (...args) => {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders) return;
-        const cwd = workspaceFolders[0].uri.fsPath;
-        
-        let targetFile = '';
-        if (args.length > 0 && args[0] && args[0].resourceUri) {
-            targetFile = vscode.workspace.asRelativePath(args[0].resourceUri as vscode.Uri);
-        }
+        const resourceUri = args.length > 0 && args[0] && args[0].resourceUri
+            ? (args[0].resourceUri as vscode.Uri)
+            : undefined;
+        const gitCtx = await resolveGitContextForUri(resourceUri, vscode.window.activeTextEditor?.document.uri);
+        if (!gitCtx) return;
+        const { cwd, targetFile } = gitCtx;
 
         try {
             const gitArgs = targetFile ? ['diff', '--', targetFile] : ['diff'];
@@ -980,9 +1164,9 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let sendBranchContextDisposable = vscode.commands.registerCommand('herdr-collie.sendBranchContext', async () => {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders) return;
-        const cwd = workspaceFolders[0].uri.fsPath;
+        const gitCtx = await resolveGitContextForUri(undefined, vscode.window.activeTextEditor?.document.uri);
+        if (!gitCtx) return;
+        const cwd = gitCtx.cwd;
 
         try {
             const branchOut = await runGitCmd(['branch', '--show-current'], cwd);
@@ -1085,40 +1269,10 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        // Save original clipboard text
-        let originalClipboard = '';
-        try {
-            originalClipboard = await vscode.env.clipboard.readText();
-        } catch {
-            // Ignore clipboard errors
-        }
-
-        let outputText = '';
-
-        try {
-            // Try to copy current selection in terminal first
-            await vscode.commands.executeCommand('workbench.action.terminal.copySelection');
-            const selectionText = await vscode.env.clipboard.readText();
-
-            if (selectionText && selectionText !== originalClipboard) {
-                outputText = selectionText;
-            } else {
-                // If no selection, select all buffer, copy, then clear selection
-                await vscode.commands.executeCommand('workbench.action.terminal.selectAll');
-                await vscode.commands.executeCommand('workbench.action.terminal.copySelection');
-                await vscode.commands.executeCommand('workbench.action.terminal.clearSelection');
-                outputText = await vscode.env.clipboard.readText();
-            }
-        } catch (e: any) {
-            // Fallback or handle error
-        } finally {
-            // Restore clipboard
-            try {
-                await vscode.env.clipboard.writeText(originalClipboard);
-            } catch {
-                // Ignore
-            }
-        }
+        const outputText = await captureTerminalOutputWithClipboard(
+            vscode.env.clipboard,
+            (cmd) => vscode.commands.executeCommand(cmd)
+        );
 
         if (!outputText || !outputText.trim()) {
             vscode.window.showInformationMessage(l10n.t('No terminal output or selection found.'));
@@ -1214,10 +1368,10 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(agentHUD.onDidChangeBlockedCount(updateAgentBadge));
 
     const getActiveRepoRoot = async (): Promise<string | null> => {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders || workspaceFolders.length === 0) return null;
+        const gitCtx = await resolveGitContextForUri(undefined, vscode.window.activeTextEditor?.document.uri);
+        if (!gitCtx) return null;
         try {
-            return await getRepoRoot(workspaceFolders[0].uri.fsPath);
+            return await getRepoRoot(gitCtx.cwd);
         } catch {
             return null;
         }
@@ -1289,50 +1443,67 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    // Automatically highlight the active workspace and its agent on load / refresh
+    // Automatically highlight the active workspace and its agent without overriding intentional user selection
+    const autoSelectionState: AutoSelectionState = {};
+    let pendingAgentSyncFromFocusChange = false;
+
     const syncActiveSelection = async () => {
         if (isSyncingSelection) return;
         const allWs = workspaceProvider.getCurrentItems();
         if (allWs.length === 0) return;
 
+        const currentSelected = workspaceTreeView.selection[0] as HerdrWorkspaceTreeItem | undefined;
+        const { target: targetWs, focusChanged } = resolveWorkspaceAutoSelection(allWs, currentSelected, autoSelectionState);
+        if (focusChanged) {
+            pendingAgentSyncFromFocusChange = true;
+        }
+
+        if (targetWs) {
+            isSyncingSelection = true;
+            try {
+                await workspaceTreeView.reveal(targetWs, { select: true, focus: false });
+            } catch {
+            } finally {
+                isSyncingSelection = false;
+            }
+        }
+
         const focusedWs = allWs.find(w => w.isFocused) || allWs[0];
-        if (focusedWs) {
-            const currentSelected = workspaceTreeView.selection[0] as HerdrWorkspaceTreeItem | undefined;
-            if (!currentSelected || currentSelected.id !== focusedWs.id) {
+        const allAgents = agentProvider.getCurrentItems();
+        if (allAgents.length > 0 && focusedWs) {
+            const currentAgentSelected = agentTreeView.selection[0] as HerdrWorkspaceTreeItem | undefined;
+            const targetAgent = resolveAgentAutoSelection(
+                allAgents,
+                focusedWs,
+                currentAgentSelected,
+                pendingAgentSyncFromFocusChange
+            );
+            pendingAgentSyncFromFocusChange = false;
+            if (targetAgent) {
                 isSyncingSelection = true;
                 try {
-                    await workspaceTreeView.reveal(focusedWs, { select: true, focus: false });
+                    await agentTreeView.reveal(targetAgent, { select: true, focus: false });
                 } catch {
                 } finally {
                     isSyncingSelection = false;
                 }
             }
         }
-
-        const allAgents = agentProvider.getCurrentItems();
-        if (allAgents.length > 0 && focusedWs) {
-            const focusedId = focusedWs.rawId || focusedWs.id;
-            const matchingAgent = allAgents.find(a => 
-                (a.workspaceId && a.workspaceId === focusedId) ||
-                (a.cwd && focusedWs.cwd && a.cwd === focusedWs.cwd)
-            );
-            if (matchingAgent) {
-                const currentAgentSelected = agentTreeView.selection[0] as HerdrWorkspaceTreeItem | undefined;
-                if (!currentAgentSelected || currentAgentSelected.id !== matchingAgent.id) {
-                    isSyncingSelection = true;
-                    try {
-                        await agentTreeView.reveal(matchingAgent, { select: true, focus: false });
-                    } catch {
-                    } finally {
-                        isSyncingSelection = false;
-                    }
-                }
-            }
-        }
     };
 
-    workspaceProvider.onDidUpdateItems(() => setTimeout(syncActiveSelection, 60));
-    agentProvider.onDidUpdateItems(() => setTimeout(syncActiveSelection, 60));
+    let syncSelectionTimer: NodeJS.Timeout | null = null;
+    const scheduleSyncActiveSelection = () => {
+        if (syncSelectionTimer) {
+            clearTimeout(syncSelectionTimer);
+        }
+        syncSelectionTimer = setTimeout(() => {
+            syncSelectionTimer = null;
+            void syncActiveSelection();
+        }, 60);
+    };
+
+    workspaceProvider.onDidUpdateItems(scheduleSyncActiveSelection);
+    agentProvider.onDidUpdateItems(scheduleSyncActiveSelection);
 
     const updateTreeViewDescriptions = () => {
         workspaceTreeView.description = undefined;
@@ -1344,28 +1515,48 @@ export function activate(context: vscode.ExtensionContext) {
     updateTreeViewDescriptions();
 
     let refreshDebounceTimer: NodeJS.Timeout | null = null;
-    const scheduleRefreshAllProviders = (delayMs = 120) => {
+    let pendingIncludeHUDs = false;
+    let pendingSnapshotMaxAgeMs = 0;
+    const scheduleRefreshAllProviders = (delayMs = 120, options?: { includeHUDs?: boolean; snapshotMaxAgeMs?: number }) => {
+        if (options?.includeHUDs ?? true) {
+            pendingIncludeHUDs = true;
+        }
+        if (typeof options?.snapshotMaxAgeMs === 'number') {
+            pendingSnapshotMaxAgeMs = Math.max(pendingSnapshotMaxAgeMs, options.snapshotMaxAgeMs);
+        }
         if (refreshDebounceTimer) {
             clearTimeout(refreshDebounceTimer);
         }
         refreshDebounceTimer = setTimeout(() => {
             refreshDebounceTimer = null;
-            refreshAllProviders();
+            const includeHUDs = pendingIncludeHUDs;
+            const snapshotMaxAgeMs = pendingSnapshotMaxAgeMs;
+            pendingIncludeHUDs = false;
+            pendingSnapshotMaxAgeMs = 0;
+            refreshAllProviders({ includeHUDs, snapshotMaxAgeMs });
         }, delayMs);
     };
 
-    refreshAllProviders = () => { 
+    refreshAllProviders = (options?: { includeHUDs?: boolean; snapshotMaxAgeMs?: number }) => {
+        const includeHUDs = options?.includeHUDs ?? true;
+        const maxAgeMs = options?.snapshotMaxAgeMs ?? 0;
+        if (includeHUDs) {
+            invalidateWorktreeCache();
+        }
         sessionProvider.refresh();
-        agentHUD.refresh();
-        workspaceProvider.refresh(); 
-        agentProvider.refresh(); 
-        workspaceHUD.refresh();
+        workspaceProvider.refresh({ maxAgeMs });
+        agentProvider.refresh({ maxAgeMs });
+        if (includeHUDs) {
+            void agentHUD.refresh({ maxAgeMs });
+            void workspaceHUD.refresh({ maxAgeMs });
+        }
     };
 
     const setupSocketListeners = (client: HerdrSocketClient) => {
-        client.on('connect', () => scheduleRefreshAllProviders(50));
-        client.on('event', () => scheduleRefreshAllProviders(120));
-        client.on('disconnect', () => scheduleRefreshAllProviders(50));
+        // AgentHUD and WorkspaceHUD subscribe directly to socket events, so avoid double-refreshing them here.
+        client.on('connect', () => scheduleRefreshAllProviders(50, { includeHUDs: false }));
+        client.on('event', () => scheduleRefreshAllProviders(120, { includeHUDs: false, snapshotMaxAgeMs: 150 }));
+        client.on('disconnect', () => scheduleRefreshAllProviders(50, { includeHUDs: false }));
         client.on('error', () => {});
     };
     setupSocketListeners(socketClient);
@@ -1374,13 +1565,14 @@ export function activate(context: vscode.ExtensionContext) {
     // Background safety net polling (relaxed from 1.2s to 10s to prevent socket FD exhaustion)
     const statusPollInterval = setInterval(() => {
         if (socketClient && socketClient.isConnected) {
-            scheduleRefreshAllProviders(50);
+            scheduleRefreshAllProviders(50, { includeHUDs: true });
         }
     }, 10000);
     context.subscriptions.push({ 
         dispose: () => {
             clearInterval(statusPollInterval);
             if (refreshDebounceTimer) clearTimeout(refreshDebounceTimer);
+            if (syncSelectionTimer) clearTimeout(syncSelectionTimer);
         } 
     });
 
@@ -1442,6 +1634,9 @@ export function activate(context: vscode.ExtensionContext) {
 
         activeSidebarSession = targetSession;
         await ensureSessionServerRunning(activeSidebarSession);
+        if (vscode.workspace.getConfiguration('herdr-collie').get<boolean>('hideHerdrSidebar', true)) {
+            reloadConfigForSessions(activeSidebarSession);
+        }
 
         socketClient.dispose();
         socketClient = new HerdrSocketClient(activeSidebarSession);
@@ -1603,15 +1798,15 @@ export function activate(context: vscode.ExtensionContext) {
             execHerdr(['--session', activeSidebarSession, 'workspace', 'list'], (wErr: any, wStdout: any) => {
                 if (!wErr && wStdout) {
                     const parsedWs = parseWorkspaces(wStdout, parsedPanes, os.homedir());
-                    const matchedWs = parsedWs.find(w => w.label === wsName || w.id === currentCwd);
+                    const matchedWs = findMatchingWorkspaceForCwd(parsedWs, currentCwd, wsName);
                     if (matchedWs) {
                         execHerdr(['--session', activeSidebarSession, 'workspace', 'focus', matchedWs.id], () => refreshAllProviders());
                         return;
                     }
-                }
 
-                // If no matching workspace by label/project, create one
-                execHerdr(['--session', activeSidebarSession, 'workspace', 'create', '--cwd', currentCwd, '--label', wsName], () => refreshAllProviders());
+                    // If no matching workspace by cwd/label/id, create one
+                    execHerdr(['--session', activeSidebarSession, 'workspace', 'create', '--cwd', currentCwd, '--label', wsName], () => refreshAllProviders());
+                }
             });
         });
     }
@@ -2174,10 +2369,9 @@ export function activate(context: vscode.ExtensionContext) {
         try {
             const baseRef = reviewChangesProvider.getEffectiveBaseRef();
             const baseLabel = reviewChangesProvider.getEffectiveBaseLabel();
-            const tempOriginalPath = await prepareOriginalFileForDiff(item.repoRoot, item.change.filePath, baseRef);
-            const originalUri = vscode.Uri.file(tempOriginalPath);
-            const workingUri = vscode.Uri.file(item.change.fullPath);
-            const title = `${item.change.fileName} (${baseLabel} ↔ Working Tree)`;
+            const { originalPath, workingPath, title } = await resolveDiffTargets(item.change, item.repoRoot, baseRef, baseLabel);
+            const originalUri = vscode.Uri.file(originalPath);
+            const workingUri = vscode.Uri.file(workingPath);
             await vscode.commands.executeCommand('vscode.diff', originalUri, workingUri, title);
         } catch (err: any) {
             vscode.window.showErrorMessage(err?.message || String(err));
@@ -2240,7 +2434,7 @@ export function activate(context: vscode.ExtensionContext) {
         );
         if (confirm !== l10n.t('Rollback')) return;
 
-        const success = await rollbackReviewCheckpoint(repoRoot, picked.checkpoint.hash);
+        const success = await rollbackReviewCheckpoint(repoRoot, `refs/herdr/checkpoints/${picked.checkpoint.id}`);
         if (success) {
             reviewChangesProvider.setBaseCheckpoint(null);
             vscode.window.showInformationMessage(l10n.t('Rolled back to checkpoint: {0}', picked.checkpoint.id));
@@ -2283,15 +2477,11 @@ export function activate(context: vscode.ExtensionContext) {
             const diags = vscode.languages.getDiagnostics(uri);
             if (diags.length > 0) diag = diags[0];
         }
-        if (!diag) {
+        if (!diag || (Array.isArray(diag) && diag.length === 0)) {
             vscode.window.showInformationMessage(l10n.t('No errors or warnings found.'));
             return;
         }
-        const lineNum = (diag.range?.start?.line ?? 0) + 1;
-        const snippet = extractSnippet(doc.getText(), Math.max(1, lineNum - 5), Math.min(doc.lineCount, lineNum + 5));
-        const prompt = Array.isArray(diag)
-            ? diag.map(d => formatDiagnosticPrompt(fileRelPath, (d.range?.start?.line ?? 0) + 1, d, snippet)).join('\n\n---\n\n')
-            : formatDiagnosticPrompt(fileRelPath, lineNum, diag, snippet);
+        const prompt = buildDiagnosticFixPrompt(fileRelPath, doc.getText(), doc.lineCount, diag);
         await promptAndDispatchTask(prompt, l10n.t('Fix Issue in {0}', path.basename(fileRelPath)), {
             socketClient,
             sessionName: getActiveSidebarSession()
@@ -2448,6 +2638,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
     readonly onDidUpdateItems: vscode.Event<void> = this._onDidUpdateItems.event;
     private sortOrder: AgentSortOrder = 'grouped';
     private currentItems: HerdrWorkspaceTreeItem[] = [];
+    private nextSnapshotMaxAgeMs = 0;
 
     constructor(
         private readonly type: 'workspaces' | 'agents',
@@ -2492,7 +2683,8 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
         this.refresh();
     }
 
-    refresh(): void {
+    refresh(options?: { maxAgeMs?: number }): void {
+        this.nextSnapshotMaxAgeMs = options?.maxAgeMs ?? 0;
         this._onDidChangeTreeData.fire();
     }
 
@@ -2524,10 +2716,13 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
 
         const sessionName = this.getSessionName();
 
+        const maxAgeMs = this.nextSnapshotMaxAgeMs;
+        this.nextSnapshotMaxAgeMs = 0;
+
         // 1. Try fetching via fast Unix Domain Socket snapshot (Zero process execution)
         try {
             if (this.socketClient.isConnected) {
-                const snapshot = await this.socketClient.getSnapshot();
+                const snapshot = await this.socketClient.getSnapshot(maxAgeMs);
                 if (snapshot) {
                     if (this.type === 'workspaces') {
                         const parsedWorkspaces = parseSnapshotWorkspaces(snapshot, os.homedir());
@@ -2542,7 +2737,6 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                                 const contextValue = displayInfo.isWorktree ? 'worktreeWorkspace' : 'workspace';
                                 const wsTabs = parsedTabs.filter(t => t.workspaceId === ws.id);
                                 const collapsibleState = wsTabs.length > 1 ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None;
-                                const statusSignature = `${displayInfo.agentBadges || 'none'}:${ws.focused ? '1' : '0'}:${wsTabs.length}`;
                                 
                                 const item = new HerdrWorkspaceTreeItem(
                                     displayInfo.label, 
@@ -2555,7 +2749,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                                     displayInfo.isFocused,
                                     displayInfo.isCurrentWindow,
                                     undefined,
-                                    statusSignature,
+                                    undefined,
                                     wsTabs
                                 );
                                 
@@ -2590,7 +2784,6 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                         if (sortedAgents.length > 0) {
                             const items = sortedAgents.map(a => {
                                 const displayInfo = formatAgentDisplay(a, worktrees);
-                                const statusSignature = `${a.status}:${a.statusIcon}:${a.isBlocked ? 'blocked' : 'normal'}`;
 
                                 const item = new HerdrWorkspaceTreeItem(
                                     displayInfo.agentName, 
@@ -2603,7 +2796,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                                     false,
                                     false,
                                     a.workspaceId,
-                                    statusSignature
+                                    undefined
                                 );
                                 item.description = displayInfo.description;
                                 item.tooltip = displayInfo.tooltip;
@@ -2657,7 +2850,6 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                             const contextValue = displayInfo.isWorktree ? 'worktreeWorkspace' : 'workspace';
                             const wsTabs = parsedTabs.filter(t => t.workspaceId === ws.id);
                             const collapsibleState = wsTabs.length > 1 ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None;
-                            const statusSignature = `${displayInfo.agentBadges || 'none'}:${ws.focused ? '1' : '0'}:${wsTabs.length}`;
 
                             const item = new HerdrWorkspaceTreeItem(
                                 displayInfo.label, 
@@ -2670,7 +2862,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                                 displayInfo.isFocused,
                                 displayInfo.isCurrentWindow,
                                 undefined,
-                                statusSignature,
+                                undefined,
                                 wsTabs
                             );
                             item.description = displayInfo.description;
@@ -2745,7 +2937,6 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                         let items: vscode.TreeItem[] = [];
                         sortedAgents.forEach(a => {
                             const displayInfo = formatAgentDisplay(a, worktrees);
-                            const statusSignature = `${a.status}:${a.statusIcon}:${a.isBlocked ? 'blocked' : 'normal'}`;
 
                             const item = new HerdrWorkspaceTreeItem(
                                 displayInfo.agentName, 
@@ -2758,7 +2949,7 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
                                 false,
                                 false,
                                 a.workspaceId,
-                                statusSignature
+                                undefined
                             );
                             item.description = displayInfo.description;
                             item.tooltip = displayInfo.tooltip;

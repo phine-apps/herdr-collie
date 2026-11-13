@@ -143,6 +143,32 @@ describe('Localization (l10n) Unit Tests', () => {
                 }
             }
         });
+
+        it('should ensure all l10n.t(...) string keys used in src/ exist in bundle.l10n.json', () => {
+            const srcDir = path.join(projectRoot, 'src');
+            const sourceFiles = fs.readdirSync(srcDir).filter(f => f.endsWith('.ts'));
+            const missingKeys: { file: string; key: string }[] = [];
+
+            for (const file of sourceFiles) {
+                const content = fs.readFileSync(path.join(srcDir, file), 'utf8');
+                const re = /l10n\.t\(\s*(['"])((?:\\.|(?!\1).)*)\1/gs;
+                let match: RegExpExecArray | null;
+                while ((match = re.exec(content)) !== null) {
+                    const key = match[2]
+                        .replace(/\\n/g, '\n')
+                        .replace(/\\"/g, '"')
+                        .replace(/\\'/g, "'");
+                    if (!(key in bundleEn)) {
+                        missingKeys.push({ file, key });
+                    }
+                }
+            }
+
+            expect(
+                missingKeys,
+                `Missing keys in l10n/bundle.l10n.json: ${missingKeys.map(m => `${m.file}: ${m.key}`).join(', ')}`
+            ).to.be.empty;
+        });
     });
 
     describe('Runtime Translation and Interpolation (@vscode/l10n)', () => {

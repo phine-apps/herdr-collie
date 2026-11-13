@@ -45,7 +45,7 @@ export class HerdrTabTreeItem extends vscode.TreeItem {
     ) {
         super(label, vscode.TreeItemCollapsibleState.None);
         this.contextValue = 'tab';
-        this.id = `${workspaceId}:${tabId}:${isFocused ? '1' : '0'}`;
+        this.id = `${workspaceId}:${tabId}`;
         this.iconPath = new vscode.ThemeIcon(isFocused ? 'window' : 'terminal');
         this.description = isFocused ? l10n.t('(Active)') : (paneCount > 1 ? `${paneCount} panes` : undefined);
         this.tooltip = l10n.t('Tab {0} (ID: {1}, Panes: {2})', label, tabId, paneCount);
@@ -177,4 +177,79 @@ export class WorkspaceDragAndDropController implements vscode.TreeDragAndDropCon
             vscode.window.showErrorMessage(l10n.t('Failed to reorder workspace: {0}', err.message || String(err)));
         }
     }
+}
+
+export interface SelectionCandidate {
+    id?: string;
+    rawId?: string;
+    cwd?: string;
+    workspaceId?: string;
+    isFocused?: boolean;
+}
+
+export interface AutoSelectionState {
+    lastFocusedWorkspaceId?: string;
+}
+
+/**
+ * Resolves whether the workspaces TreeView should automatically reveal/select the
+ * Herdr-focused workspace, preserving intentional user selection of other workspaces
+ * unless no valid selection exists or Herdr focus moved to a different workspace.
+ */
+export function resolveWorkspaceAutoSelection<T extends SelectionCandidate>(
+    workspaces: T[],
+    currentSelection: T | undefined,
+    state: AutoSelectionState
+): { target: T | undefined; focusChanged: boolean } {
+    if (workspaces.length === 0) {
+        state.lastFocusedWorkspaceId = undefined;
+        return { target: undefined, focusChanged: false };
+    }
+
+    const focusedWs = workspaces.find(w => w.isFocused) || workspaces[0];
+    const focusedId = focusedWs.rawId || focusedWs.id;
+    const focusChanged = state.lastFocusedWorkspaceId !== undefined && state.lastFocusedWorkspaceId !== focusedId;
+    state.lastFocusedWorkspaceId = focusedId;
+
+    const currentId = currentSelection ? (currentSelection.rawId || currentSelection.id) : undefined;
+    const currentStillExists = Boolean(currentId && workspaces.some(w => (w.rawId || w.id) === currentId));
+
+    if ((!currentStillExists || focusChanged) && currentId !== focusedId) {
+        return { target: focusedWs, focusChanged };
+    }
+    return { target: undefined, focusChanged };
+}
+
+/**
+ * Resolves whether the agents TreeView should automatically reveal/select the
+ * matching agent for the focused workspace, preserving existing valid selections
+ * unless no valid selection exists or workspace focus changed.
+ */
+export function resolveAgentAutoSelection<T extends SelectionCandidate>(
+    agents: T[],
+    focusedWorkspace: SelectionCandidate | undefined,
+    currentSelection: T | undefined,
+    workspaceFocusChanged: boolean
+): T | undefined {
+    if (agents.length === 0 || !focusedWorkspace) {
+        return undefined;
+    }
+
+    const focusedId = focusedWorkspace.rawId || focusedWorkspace.id;
+    const matchingAgent = agents.find(a =>
+        (a.workspaceId && a.workspaceId === focusedId) ||
+        (a.cwd && focusedWorkspace.cwd && a.cwd === focusedWorkspace.cwd)
+    );
+    if (!matchingAgent) {
+        return undefined;
+    }
+
+    const currentId = currentSelection ? (currentSelection.rawId || currentSelection.id) : undefined;
+    const currentStillExists = Boolean(currentId && agents.some(a => (a.rawId || a.id) === currentId));
+    const matchingId = matchingAgent.rawId || matchingAgent.id;
+
+    if ((!currentStillExists || workspaceFocusChanged) && currentId !== matchingId) {
+        return matchingAgent;
+    }
+    return undefined;
 }

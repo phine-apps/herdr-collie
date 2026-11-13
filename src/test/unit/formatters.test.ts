@@ -21,7 +21,9 @@ import {
     getAgentStatusIconFile,
     sortAgents,
     formatCodeFence,
-    formatDurationCompact
+    formatDurationCompact,
+    findMatchingWorkspaceForCwd,
+    isSameOrSubPath
 } from '../../formatters';
 import { ParsedAgent, ParsedWorkspace, GitWorktreeInfo } from '../../parsers';
 
@@ -410,6 +412,60 @@ describe('formatters Unit Tests', () => {
             expect(result.iconId).to.equal('folder-active');
             expect(result.description).to.not.include('[Current Window]');
             expect(result.tooltip).to.include('VS Code Window: Matches current open folder');
+        });
+
+        it('does not falsely match sibling worktree directories with shared prefix as current VS Code window', () => {
+            const siblingWs: ParsedWorkspace = {
+                id: 'ws-sibling',
+                label: 'current-project-feat-auth',
+                cwd: '/path/to/current-project-feat-auth',
+                focused: false
+            };
+
+            const worktrees: GitWorktreeInfo[] = [
+                {
+                    worktree: '/path/to/current-project',
+                    head: '1111111',
+                    branch: 'main',
+                    isMain: true
+                },
+                {
+                    worktree: '/path/to/current-project-feat-auth',
+                    head: '2222222',
+                    branch: 'feat/auth',
+                    isMain: false
+                }
+            ];
+
+            const result = formatWorkspaceDisplay(siblingWs, worktrees, [], '/path/to/current-project');
+            expect(result.isWorktree).to.be.true;
+            expect(result.isCurrentWindow).to.be.false;
+            expect(result.iconId).to.equal('git-branch');
+            expect(result.tooltip).to.not.include('VS Code Window: Matches current open folder');
+            expect(isSameOrSubPath('/path/to/current-project/.worktrees/feat-auth', '/path/to/current-project')).to.be.true;
+            expect(isSameOrSubPath('/path/to/current-project-feat-auth', '/path/to/current-project')).to.be.false;
+        });
+
+        it('matches worktree branch in formatAgentDisplay even with trailing slash path differences', () => {
+            const agent: ParsedAgent = {
+                id: 'w2:p1',
+                name: 'claude',
+                status: 'idle',
+                statusType: 'idle',
+                statusIcon: '🟡',
+                isWorking: false,
+                isBlocked: false,
+                workspaceId: 'w2',
+                workspaceLabel: 'feat-auth',
+                workspaceCwd: '/path/to/repo-feat-auth/'
+            };
+            const worktrees: GitWorktreeInfo[] = [
+                { worktree: '/path/to/repo-feat-auth', head: 'abc', branch: 'feat/auth', isMain: false }
+            ];
+
+            const result = formatAgentDisplay(agent, worktrees);
+            expect(result.branchName).to.equal('feat/auth');
+            expect(result.description).to.equal('feat-auth (feat/auth)');
         });
 
         it('includes associated active agents in description and tooltip without text truncation', () => {
@@ -868,6 +924,50 @@ describe('formatters Unit Tests', () => {
             expect(display.description).to.include('Run migration script? (y/n)');
             expect(display.tooltip).to.include('Status: blocked (45s)');
             expect(display.tooltip).to.include('Latest Output: Run migration script? (y/n)');
+        });
+    });
+
+    describe('findMatchingWorkspaceForCwd', () => {
+        it('matches a renamed workspace by normalized cwd instead of duplicating on restart', () => {
+            const workspaces: ParsedWorkspace[] = [
+                {
+                    id: 'ws-1',
+                    label: 'Backend API (Renamed)',
+                    cwd: '/tmp/repos/my-project/',
+                    focused: false
+                }
+            ];
+
+            const matched = findMatchingWorkspaceForCwd(workspaces, '/tmp/repos/my-project', 'my-project');
+            expect(matched?.id).to.equal('ws-1');
+        });
+
+        it('does not collide with another directory that shares the same folder basename', () => {
+            const workspaces: ParsedWorkspace[] = [
+                {
+                    id: 'ws-a',
+                    label: 'app',
+                    cwd: '/tmp/org-a/app',
+                    focused: true
+                }
+            ];
+
+            const matched = findMatchingWorkspaceForCwd(workspaces, '/tmp/org-b/app', 'app');
+            expect(matched).to.be.undefined;
+        });
+
+        it('falls back to id or label match when existing workspace cwd is empty', () => {
+            const workspaces: ParsedWorkspace[] = [
+                {
+                    id: 'ws-empty',
+                    label: 'my-project',
+                    cwd: '',
+                    focused: false
+                }
+            ];
+
+            const matched = findMatchingWorkspaceForCwd(workspaces, '/tmp/repos/my-project', 'my-project');
+            expect(matched?.id).to.equal('ws-empty');
         });
     });
 });
