@@ -61,6 +61,24 @@ describe('HerdrSocketClient Unit Tests', function() {
                                 }) + '\n');
                             } else if (msg.method === 'pane.send_keys' || msg.method === 'pane.send_text' || msg.method === 'pane.send_input' || msg.method === 'agent.send_keys' || msg.method === 'agent.prompt') {
                                 socket.write(JSON.stringify({ id: msg.id, result: { success: true } }) + '\n');
+                            } else if (msg.method === 'integration.list') {
+                                socket.write(JSON.stringify({
+                                    id: msg.id,
+                                    result: {
+                                        integrations: [
+                                            { target: 'claude', installed: true, current: true },
+                                            { target: 'antigravity_cli', installed: true, current: false }
+                                        ]
+                                    }
+                                }) + '\n');
+                            } else if (
+                                msg.method === 'integration.install'
+                                || msg.method === 'agent.start'
+                                || msg.method === 'worktree.create'
+                                || msg.method === 'workspace.create'
+                                || msg.method === 'pane.split'
+                            ) {
+                                socket.write(JSON.stringify({ id: msg.id, result: { echoed: msg.params } }) + '\n');
                             } else if (msg.method === 'fail.method') {
                                 socket.write(JSON.stringify({
                                     id: msg.id,
@@ -214,6 +232,40 @@ describe('HerdrSocketClient Unit Tests', function() {
         } catch (e: any) {
             expect(e.message).to.include('disposed');
         }
+    });
+
+    it('supports Protocol 22 integration, agent.start, and worktree.create RPCs', async () => {
+        const client = createClient(tempSockPath);
+        await new Promise<void>((resolve) => {
+            client.on('connect', () => resolve());
+            client.connect();
+        });
+
+        const integrations = await client.listIntegrations();
+        expect(integrations).to.have.lengthOf(2);
+        expect(integrations[1].target).to.equal('antigravity_cli');
+
+        const installedRes = await client.installIntegration('antigravity-cli');
+        expect(installedRes.echoed).to.deep.equal({ target: 'antigravity_cli' });
+
+        const startedRes = await client.startAgent({ name: 'feat-a', kind: 'claude', paneId: 'w1:p1', timeoutMs: 25000 });
+        expect(startedRes.echoed).to.deep.equal({
+            name: 'feat-a',
+            kind: 'claude',
+            pane_id: 'w1:p1',
+            timeout_ms: 25000
+        });
+
+        const wtRes = await client.createWorktree({ branch: 'feat/test', base: 'main' });
+        expect(wtRes.echoed).to.deep.include({ branch: 'feat/test', base: 'main', focus: false, trust_repository: false });
+
+        const wsRes = await client.createWorkspace({ cwd: '/tmp/wt', label: 'feat/test', focus: true });
+        expect(wsRes.echoed).to.deep.equal({ cwd: '/tmp/wt', label: 'feat/test', focus: true });
+
+        const splitRes = await client.splitPane({ direction: 'right', targetPaneId: 'w1:p1', cwd: '/tmp/wt', focus: false });
+        expect(splitRes.echoed).to.deep.equal({ direction: 'right', target_pane_id: 'w1:p1', cwd: '/tmp/wt', focus: false });
+
+        client.dispose();
     });
 
     describe('getSessionSocketPath', () => {

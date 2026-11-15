@@ -97,6 +97,15 @@ export class MockThemeColor {
     constructor(public readonly id: string) {}
 }
 
+export class MockFileDecoration {
+    public propagate?: boolean;
+    constructor(
+        public badge?: string,
+        public tooltip?: string,
+        public color?: any
+    ) {}
+}
+
 export class MockTreeItem {
     public id?: string;
     public description?: string;
@@ -239,6 +248,7 @@ export const mockVscode = {
     },
     ThemeIcon: MockThemeIcon,
     ThemeColor: MockThemeColor,
+    FileDecoration: MockFileDecoration,
     Uri: MockUri,
     MarkdownString: MockMarkdownString,
     TreeItem: MockTreeItem,
@@ -337,7 +347,8 @@ export const mockVscode = {
             };
             mockState.treeViews.set(viewId, view);
             return view;
-        }
+        },
+        registerFileDecorationProvider: (_provider: any) => ({ dispose: () => {} })
     },
     workspace: {
         asRelativePath: (pathOrUri: any, _includeWorkspaceFolder?: boolean): string => {

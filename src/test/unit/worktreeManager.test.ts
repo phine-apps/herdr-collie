@@ -19,7 +19,10 @@ import {
     validateBranchName,
     parseMergeConflictFiles,
     formatMergeConflictPrompt,
-    openWorkspaceFolderInWindow
+    formatCreatePullRequestPrompt,
+    openWorkspaceFolderInWindow,
+    sanitizeAgentName,
+    startAgentInPane
 } from '../../worktreeManager';
 
 describe('worktreeManager Unit Tests', () => {
@@ -216,6 +219,140 @@ describe('worktreeManager Unit Tests', () => {
             } finally {
                 fs.rmSync(tempDir, { recursive: true, force: true });
             }
+        });
+    });
+
+    describe('Protocol 22 Agent Start & Integration Helpers', () => {
+        it('sanitizeAgentName produces valid [a-z][a-z0-9_-]{0,31} identifiers and avoids collisions', () => {
+            expect(sanitizeAgentName('feat/OAuth2-Login!')).to.equal('feat-oauth2-login');
+            expect(sanitizeAgentName('123-fix-bug')).to.equal('fix-bug');
+            expect(sanitizeAgentName('---')).to.equal('agent');
+
+            const longName = sanitizeAgentName('very-long-branch-name-that-exceeds-thirty-two-chars');
+            expect(longName.length).to.be.at.most(32);
+            expect(longName).to.match(/^[a-z][a-z0-9_-]{0,31}$/);
+
+            const existing = new Set(['feat-auth', 'feat-auth-2']);
+            const deduped = sanitizeAgentName('feat/auth', existing);
+            expect(deduped).to.equal('feat-auth-3');
+        });
+
+        it('getInstalledAgentOptions enriches installed agents with integration state badges', async () => {
+            cp.execFile = ((cmd: string, args: any, opts: any, cb: any) => {
+                const callback = typeof opts === 'function' ? opts : cb;
+                if (cmd === 'which' && (args?.[0] === 'claude' || args?.[0] === 'agy')) {
+                    callback(null, `/usr/local/bin/${args[0]}`, '');
+                    return {} as any;
+                }
+                callback(new Error('not found'), '', '');
+                return {} as any;
+            }) as any;
+
+            const integrations = [
+                {
+                    target: 'claude',
+                    cliTarget: 'claude',
+                    socketTarget: 'claude',
+                    label: 'Claude Code',
+                    command: 'claude',
+                    available: true,
+                    state: 'current' as const
+                },
+                {
+                    target: 'antigravity-cli',
+                    cliTarget: 'antigravity-cli',
+                    socketTarget: 'antigravity_cli',
+                    label: 'Antigravity CLI',
+                    command: 'agy',
+                    available: true,
+                    state: 'outdated' as const
+                }
+            ];
+
+            const options = await getInstalledAgentOptions(undefined, integrations);
+            const claudeOpt = options.find(o => o.cmd === 'claude');
+            const agyOpt = options.find(o => o.cmd === 'agy');
+            expect(claudeOpt?.description).to.include('✓');
+            expect(claudeOpt?.description).to.include('integrated');
+            expect(agyOpt?.description).to.include('⚠️');
+            expect(agyOpt?.description).to.include('integration outdated');
+        });
+
+        it('startAgentInPane uses native agent.start + agent.prompt over socket when agentKind is known', async () => {
+            const calls: Array<{ method: string; args: any[] }> = [];
+            const fakeSocket = {
+                isConnected: true,
+                startAgent: async (params: any) => {
+                    calls.push({ method: 'startAgent', args: [params] });
+                    return {};
+                },
+                sendAgentPrompt: async (agentId: string, prompt: string) => {
+                    calls.push({ method: 'sendAgentPrompt', args: [agentId, prompt] });
+                },
+                sendPaneInput: async (paneId: string, text: string, keys?: string[]) => {
+                    calls.push({ method: 'sendPaneInput', args: [paneId, text, keys] });
+                }
+            } as any;
+
+            const result = await startAgentInPane({
+                sessionName: 'vscode',
+                paneId: 'w1:p1',
+                agentName: 'feat-auth',
+                agentCmd: 'claude',
+                agentKind: 'claude',
+                prompt: 'Implement login',
+                cwd: '/repo',
+                socketClient: fakeSocket
+            });
+
+            expect(result).to.deep.equal({ method: 'native', started: true, prompted: true });
+            expect(calls).to.have.lengthOf(2);
+            expect(calls[0].method).to.equal('startAgent');
+            expect(calls[0].args[0]).to.deep.include({
+                name: 'feat-auth',
+                kind: 'claude',
+                paneId: 'w1:p1'
+            });
+            expect(calls[1].method).to.equal('sendAgentPrompt');
+            expect(calls[1].args).to.deep.equal(['feat-auth', 'Implement login']);
+        });
+
+        it('startAgentInPane falls back to pane.send_input when agent.start fails or custom command is used', async () => {
+            const calls: Array<{ method: string; args: any[] }> = [];
+            const fakeSocket = {
+                isConnected: true,
+                startAgent: async () => {
+                    throw new Error('unsupported');
+                },
+                sendPaneInput: async (paneId: string, text: string, keys?: string[]) => {
+                    calls.push({ method: 'sendPaneInput', args: [paneId, text, keys] });
+                }
+            } as any;
+
+            const result = await startAgentInPane({
+                sessionName: 'vscode',
+                paneId: 'w1:p1',
+                agentName: 'custom-run',
+                agentCmd: 'custom-agent',
+                prompt: 'Fix tests\nnow',
+                cwd: '/repo',
+                socketClient: fakeSocket
+            });
+
+            expect(result).to.deep.equal({ method: 'fallback', started: true, prompted: true });
+            expect(calls).to.have.lengthOf(1);
+            expect(calls[0].method).to.equal('sendPaneInput');
+            expect(calls[0].args[0]).to.equal('w1:p1');
+            expect(calls[0].args[1]).to.equal("custom-agent 'Fix tests now'");
+            expect(calls[0].args[2]).to.deep.equal(['enter']);
+        });
+
+        it('formatCreatePullRequestPrompt generates structured gh pr create instructions', () => {
+            const prompt = formatCreatePullRequestPrompt('feat/cross-review', 'main', 'Mark as draft PR');
+            expect(prompt).to.include('`feat/cross-review`');
+            expect(prompt).to.include('`main`');
+            expect(prompt).to.include('gh pr create --base');
+            expect(prompt).to.include('Mark as draft PR');
         });
     });
 });

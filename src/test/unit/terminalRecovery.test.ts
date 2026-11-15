@@ -153,6 +153,27 @@ describe('Terminal Recovery & Health Unit Tests', () => {
             ]);
             expect(clipboardValue).to.equal('prior clipboard');
         });
+
+        it('skips selectAll fallback when selectAllFallback is false and restores clipboard', async () => {
+            let clipboardValue = 'prior clipboard';
+            const executedCommands: string[] = [];
+            const mockClipboard = {
+                readText: async () => clipboardValue,
+                writeText: async (v: string) => { clipboardValue = v; }
+            };
+
+            const result = await captureTerminalOutputWithClipboard(
+                mockClipboard,
+                async (cmd: string) => {
+                    executedCommands.push(cmd);
+                },
+                { selectAllFallback: false }
+            );
+
+            expect(result).to.equal('');
+            expect(executedCommands).to.deep.equal(['workbench.action.terminal.copySelection']);
+            expect(clipboardValue).to.equal('prior clipboard');
+        });
     });
 
     describe('Multi-root Git Context Resolution', () => {

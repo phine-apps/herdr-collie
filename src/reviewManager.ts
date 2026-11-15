@@ -257,11 +257,18 @@ export class HerdrReviewController implements vscode.Disposable {
         startLine: number,
         endLine: number,
         commentText: string,
-        codeSnippet?: string
+        codeSnippet?: string,
+        targetRootPath?: string
     ): ReviewCommentItem {
         const id = `comment_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
         let relPath = uri.fsPath;
-        if (vscode && vscode.workspace && typeof vscode.workspace.asRelativePath === 'function') {
+        if (targetRootPath && uri.fsPath) {
+            const candidate = path.relative(targetRootPath, uri.fsPath).replace(/\\/g, '/');
+            if (candidate && !candidate.startsWith('..') && !path.isAbsolute(candidate)) {
+                relPath = candidate;
+            }
+        }
+        if (relPath === uri.fsPath && vscode && vscode.workspace && typeof vscode.workspace.asRelativePath === 'function') {
             relPath = vscode.workspace.asRelativePath(uri);
         }
 
@@ -499,6 +506,177 @@ export async function getRepoChangedFiles(repoRoot: string): Promise<ChangedFile
     } catch {
         return [];
     }
+}
+
+export interface ReviewTarget {
+    kind: 'current' | 'worktree';
+    repoRoot: string;
+    worktreePath: string;
+    branchName?: string;
+    baseBranch?: string;
+    label: string;
+    agentId?: string;
+    agentName?: string;
+}
+
+/**
+ * Parses `git diff --name-status` output into structured ChangedFileInfo list.
+ */
+export function parseGitDiffNameStatus(output: string, repoRoot: string): ChangedFileInfo[] {
+    if (!output || !output.trim()) return [];
+
+    const lines = output.split(/\r?\n/).filter(Boolean);
+    const results: ChangedFileInfo[] = [];
+
+    for (const line of lines) {
+        const parts = line.split('\t');
+        if (parts.length < 2) continue;
+
+        const code = parts[0].trim();
+        const kind = code[0];
+
+        if ((kind === 'R' || kind === 'C') && parts.length >= 3) {
+            const origPath = unquoteGitPath(parts[1]);
+            const newPath = unquoteGitPath(parts[2]);
+            results.push({
+                filePath: newPath,
+                originalFilePath: origPath,
+                fileName: path.basename(newPath),
+                status: kind === 'R' ? 'R' : 'A',
+                statusLabel: kind === 'R' ? 'Renamed' : 'Added',
+                fullPath: path.resolve(repoRoot, newPath)
+            });
+            continue;
+        }
+
+        const filePath = unquoteGitPath(parts[1]);
+        let status: ChangedFileInfo['status'] = 'M';
+        let statusLabel = 'Modified';
+        if (kind === 'A') {
+            status = 'A';
+            statusLabel = 'Added';
+        } else if (kind === 'D') {
+            status = 'D';
+            statusLabel = 'Deleted';
+        } else if (kind === 'R') {
+            status = 'R';
+            statusLabel = 'Renamed';
+        }
+
+        results.push({
+            filePath,
+            fileName: path.basename(filePath),
+            status,
+            statusLabel,
+            fullPath: path.resolve(repoRoot, filePath)
+        });
+    }
+
+    return results;
+}
+
+/**
+ * Resolves the merge-base commit hash and display label for cross-worktree review diffing.
+ */
+export async function resolveWorktreeMergeBase(
+    worktreePath: string,
+    preferredBaseBranch?: string,
+    currentBranchHint?: string
+): Promise<{ baseRef: string; baseLabel: string; baseBranch?: string }> {
+    let activeBranch = currentBranchHint;
+    if (!activeBranch) {
+        try {
+            activeBranch = (await runGitCmd(['rev-parse', '--abbrev-ref', 'HEAD'], worktreePath)).trim();
+        } catch {
+            activeBranch = undefined;
+        }
+    }
+
+    const candidates: string[] = [];
+    if (preferredBaseBranch && validateCheckpointRef(preferredBaseBranch)) {
+        candidates.push(preferredBaseBranch.trim());
+    }
+    for (const fallback of ['main', 'master', 'origin/main', 'origin/master', 'develop']) {
+        if (!candidates.includes(fallback) && fallback !== activeBranch) {
+            candidates.push(fallback);
+        }
+    }
+
+    for (const candidate of candidates) {
+        if (candidate === activeBranch) continue;
+        try {
+            const exists = (await runGitCmd(['rev-parse', '--verify', '--quiet', candidate], worktreePath)).trim();
+            if (!exists) continue;
+            const mergeBase = (await runGitCmd(['merge-base', candidate, 'HEAD'], worktreePath)).trim();
+            if (mergeBase && validateCheckpointRef(mergeBase)) {
+                return {
+                    baseRef: mergeBase,
+                    baseLabel: candidate,
+                    baseBranch: candidate
+                };
+            }
+        } catch {
+            // Try next candidate
+        }
+    }
+
+    return {
+        baseRef: 'HEAD',
+        baseLabel: 'HEAD'
+    };
+}
+
+/**
+ * Lists all changed files in a target worktree relative to `baseRef` (committed + staged + unstaged + untracked).
+ */
+export async function getWorktreeChangedFiles(
+    worktreePath: string,
+    baseRef: string = 'HEAD'
+): Promise<ChangedFileInfo[]> {
+    const safeRef = validateCheckpointRef(baseRef) ? baseRef.trim() : 'HEAD';
+    const changes: ChangedFileInfo[] = [];
+    const seenPaths = new Set<string>();
+
+    try {
+        const diffOut = await runGitCmd(['diff', '--name-status', safeRef], worktreePath);
+        for (const item of parseGitDiffNameStatus(diffOut, worktreePath)) {
+            if (!seenPaths.has(item.filePath)) {
+                seenPaths.add(item.filePath);
+                changes.push(item);
+            }
+        }
+    } catch {
+        // Fallback to working tree status if diff fails (e.g. unborn HEAD)
+        const fallback = await getRepoChangedFiles(worktreePath);
+        for (const item of fallback) {
+            if (!seenPaths.has(item.filePath)) {
+                seenPaths.add(item.filePath);
+                changes.push(item);
+            }
+        }
+    }
+
+    try {
+        const untrackedOut = await runGitCmd(['ls-files', '--others', '--exclude-standard'], worktreePath);
+        const lines = untrackedOut.split(/\r?\n/).filter(Boolean);
+        for (const raw of lines) {
+            const filePath = unquoteGitPath(raw);
+            if (!seenPaths.has(filePath)) {
+                seenPaths.add(filePath);
+                changes.push({
+                    filePath,
+                    fileName: path.basename(filePath),
+                    status: '??',
+                    statusLabel: 'Untracked',
+                    fullPath: path.resolve(worktreePath, filePath)
+                });
+            }
+        }
+    } catch {
+        // Ignore untracked listing errors
+    }
+
+    return changes;
 }
 
 /**
@@ -756,6 +934,9 @@ export class HerdrReviewChangesProvider implements vscode.TreeDataProvider<Revie
     public readonly onDidChangeTreeData: vscode.Event<ReviewChangeTreeItem | undefined | null | void>;
     private viewMode: ReviewViewMode;
     private baseCheckpoint: ReviewCheckpoint | null = null;
+    private reviewTarget: ReviewTarget | null = null;
+    private resolvedTargetBaseRef: string = 'HEAD';
+    private resolvedTargetBaseLabel: string = 'HEAD';
 
     constructor(
         private readonly getRepoRoot: () => Promise<string | null>,
@@ -787,6 +968,25 @@ export class HerdrReviewChangesProvider implements vscode.TreeDataProvider<Revie
         return this.viewMode;
     }
 
+    public getReviewTarget(): ReviewTarget | null {
+        return this.reviewTarget;
+    }
+
+    public setReviewTarget(target: ReviewTarget | null): void {
+        this.reviewTarget = (target && target.kind === 'worktree') ? target : null;
+        this.baseCheckpoint = null;
+        this.resolvedTargetBaseRef = 'HEAD';
+        this.resolvedTargetBaseLabel = this.reviewTarget?.baseBranch || 'HEAD';
+        this.refresh();
+    }
+
+    public async getEffectiveRepoRoot(): Promise<string | null> {
+        if (this.reviewTarget && this.reviewTarget.worktreePath) {
+            return this.reviewTarget.worktreePath;
+        }
+        return await this.getRepoRoot();
+    }
+
     public getBaseCheckpoint(): ReviewCheckpoint | null {
         return this.baseCheckpoint;
     }
@@ -797,13 +997,23 @@ export class HerdrReviewChangesProvider implements vscode.TreeDataProvider<Revie
     }
 
     public getEffectiveBaseRef(): string {
-        return (this.baseCheckpoint && validateCheckpointRef(this.baseCheckpoint.hash))
-            ? this.baseCheckpoint.hash
-            : 'HEAD';
+        if (this.baseCheckpoint && validateCheckpointRef(this.baseCheckpoint.hash)) {
+            return this.baseCheckpoint.hash;
+        }
+        if (this.reviewTarget && this.reviewTarget.kind === 'worktree' && validateCheckpointRef(this.resolvedTargetBaseRef)) {
+            return this.resolvedTargetBaseRef;
+        }
+        return 'HEAD';
     }
 
     public getEffectiveBaseLabel(): string {
-        return this.baseCheckpoint ? this.baseCheckpoint.id : 'HEAD';
+        if (this.baseCheckpoint) {
+            return this.baseCheckpoint.id;
+        }
+        if (this.reviewTarget && this.reviewTarget.kind === 'worktree') {
+            return this.resolvedTargetBaseLabel || this.reviewTarget.baseBranch || 'HEAD';
+        }
+        return 'HEAD';
     }
 
     public refresh(): void {
@@ -820,6 +1030,33 @@ export class HerdrReviewChangesProvider implements vscode.TreeDataProvider<Revie
                 return element.children;
             }
             return [];
+        }
+
+        if (this.reviewTarget && this.reviewTarget.kind === 'worktree') {
+            const wtPath = this.reviewTarget.worktreePath;
+            if (!wtPath) return [];
+
+            if (this.baseCheckpoint && validateCheckpointRef(this.baseCheckpoint.hash)) {
+                this.resolvedTargetBaseRef = this.baseCheckpoint.hash;
+                this.resolvedTargetBaseLabel = this.baseCheckpoint.id;
+            } else {
+                const resolved = await resolveWorktreeMergeBase(
+                    wtPath,
+                    this.reviewTarget.baseBranch,
+                    this.reviewTarget.branchName
+                );
+                this.resolvedTargetBaseRef = resolved.baseRef;
+                this.resolvedTargetBaseLabel = resolved.baseLabel;
+                if (resolved.baseBranch && !this.reviewTarget.baseBranch) {
+                    this.reviewTarget.baseBranch = resolved.baseBranch;
+                }
+            }
+
+            const changes = await getWorktreeChangedFiles(wtPath, this.resolvedTargetBaseRef);
+            if (this.viewMode === 'flat') {
+                return changes.map(c => new ReviewChangeTreeItem(c, wtPath, 'flat'));
+            }
+            return buildReviewChangeTree(changes, wtPath);
         }
 
         const repoRoot = await this.getRepoRoot();

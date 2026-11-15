@@ -13,6 +13,7 @@ import {
     HerdrReviewController,
     ReviewCommentItem,
     parseGitStatusPorcelain,
+    parseGitDiffNameStatus,
     validateCheckpointRef,
     cleanDiffCache,
     getDiffCacheDir,
@@ -461,6 +462,35 @@ describe('reviewManager Unit Tests', () => {
             const directFile = srcFolder.children[1];
             expect(directFile.isFolder).to.be.false;
             expect(directFile.change.fileName).to.equal('extension.ts');
+        });
+    });
+
+    describe('Cross-Worktree Diff Parsing & Comment Root Pathing', () => {
+        it('parseGitDiffNameStatus parses added, modified, deleted, and renamed entries', () => {
+            const output = [
+                'A\tsrc/newFile.ts',
+                'M\tsrc/existing.ts',
+                'D\tsrc/removed.ts',
+                'R100\tsrc/oldName.ts\tsrc/newName.ts'
+            ].join('\n');
+
+            const parsed = parseGitDiffNameStatus(output, '/tmp/wt-feature');
+            expect(parsed).to.have.lengthOf(4);
+            expect(parsed[0]).to.include({ filePath: 'src/newFile.ts', status: 'A' });
+            expect(parsed[1]).to.include({ filePath: 'src/existing.ts', status: 'M' });
+            expect(parsed[2]).to.include({ filePath: 'src/removed.ts', status: 'D' });
+            expect(parsed[3]).to.include({ filePath: 'src/newName.ts', originalFilePath: 'src/oldName.ts', status: 'R' });
+        });
+
+        it('addCommentFromEditor resolves relative path using explicit targetRootPath when reviewing a worktree', () => {
+            const controller = new HerdrReviewController();
+            const vscodeMock = require('vscode');
+            const wtRoot = path.join('/tmp', 'project-feat-review');
+            const uri = vscodeMock.Uri.file(path.join(wtRoot, 'src', 'auth.ts'));
+
+            const added = controller.addCommentFromEditor(uri, 12, 15, 'Add rate limit', 'login()', wtRoot);
+            expect(added.filePath).to.equal(path.join('src', 'auth.ts'));
+            controller.dispose();
         });
     });
 });

@@ -17,6 +17,8 @@ import {
     prepareOriginalFileForDiff,
     resolveDiffTargets,
     getRepoChangedFiles,
+    resolveWorktreeMergeBase,
+    getWorktreeChangedFiles,
     createReviewCheckpoint,
     rollbackReviewCheckpoint,
     listReviewCheckpoints
@@ -373,5 +375,56 @@ describe('Integrated Review & Diff-to-Prompt Integration Tests (P3)', function()
         expect(ok1).to.be.true;
         expect(fs.existsSync(notesPath)).to.be.true;
         expect(fs.readFileSync(notesPath, 'utf8')).to.equal('first checkpoint untracked\n');
+    });
+
+    it('reviews combined committed, uncommitted, and untracked changes of a linked Git worktree against merge-base', async () => {
+        const wtDir = path.join(os.tmpdir(), `collie-review-wt-${Date.now()}`);
+        try {
+            await runGitCmd(['worktree', 'add', '-b', 'feat/cross-review', '--', wtDir, 'main'], tempRepoDir);
+
+            // 1. Committed change inside the linked worktree
+            fs.writeFileSync(path.join(wtDir, 'feature.ts'), 'export const featureFlag = true;\n', 'utf8');
+            await runGitCmd(['add', 'feature.ts'], wtDir);
+            await runGitCmd(['commit', '-m', 'Add feature flag in worktree'], wtDir);
+
+            // 2. Uncommitted modification in the worktree
+            fs.writeFileSync(path.join(wtDir, 'config.ts'), 'export const config = { port: 9090 };\n', 'utf8');
+
+            // 3. Untracked file in the worktree
+            fs.writeFileSync(path.join(wtDir, 'notes-wt.txt'), 'wip notes\n', 'utf8');
+
+            const provider = new HerdrReviewChangesProvider(async () => tempRepoDir);
+            provider.setReviewTarget({
+                kind: 'worktree',
+                repoRoot: tempRepoDir,
+                worktreePath: wtDir,
+                branchName: 'feat/cross-review',
+                baseBranch: 'main',
+                label: 'feat/cross-review'
+            });
+
+            const items = await provider.getChildren();
+            const filePaths = items.map(i => (i as any).change?.filePath);
+            expect(filePaths).to.include('feature.ts');
+            expect(filePaths).to.include('config.ts');
+            expect(filePaths).to.include('notes-wt.txt');
+
+            const mergeBase = await resolveWorktreeMergeBase(wtDir, 'main');
+            const wtChanges = await getWorktreeChangedFiles(wtDir, mergeBase.baseRef);
+            const committedItem = wtChanges.find(c => c.filePath === 'feature.ts');
+            expect(committedItem?.status).to.equal('A');
+
+            const baseRef = provider.getEffectiveBaseRef();
+            const baseLabel = provider.getEffectiveBaseLabel();
+            const configItem = wtChanges.find(c => c.filePath === 'config.ts')!;
+            const diffTargets = await resolveDiffTargets(configItem, wtDir, baseRef, baseLabel);
+            expect(fs.readFileSync(diffTargets.originalPath, 'utf8')).to.include('port: 8080');
+            expect(fs.readFileSync(diffTargets.workingPath, 'utf8')).to.include('port: 9090');
+
+            provider.dispose();
+        } finally {
+            await runGitCmd(['worktree', 'remove', '--force', '--', wtDir], tempRepoDir).catch(() => {});
+            fs.rmSync(wtDir, { recursive: true, force: true });
+        }
     });
 });

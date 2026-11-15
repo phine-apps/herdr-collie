@@ -40,6 +40,13 @@
   "command.fixTestWithAgent": "Herdr Collie: テスト修正 / エッジケース生成をエージェントに依頼",
   "command.completeTodoWithAgent": "Herdr Collie: TODO の実装をエージェントに依頼",
   "command.dispatchContextTask": "Herdr Collie: コンテキストに応じたスマート即時委派",
+  "command.selectReviewTarget": "Herdr Collie: レビュー対象を選択 (Worktree / 現在のワークスペース)",
+  "command.reviewWorktree": "Herdr Collie: Worktree の変更をレビュー",
+  "command.createPullRequestFromWorktree": "Herdr Collie: Pull Request 作成 / Worktree 統合",
+  "command.manageIntegrations": "Herdr Collie: Herdr エージェント統合 (Hooks) を管理",
+  "command.fixLastFailedCommand": "Herdr Collie: 直近の失敗コマンドの修正をエージェントに依頼",
+  "command.showConflictRadar": "Herdr Collie: 並列 Worktree ファイル衝突レーダー",
+  "command.launchSwarmPlaybook": "Herdr Collie: Swarm プレイブック起動 (Best-of-N / 実装＋レビュー)",
   "viewsContainers.activitybar.title": "Herdr Collie",
   "view.sessions": "セッション",
   "view.workspaces": "ワークスペース",
@@ -57,5 +64,7 @@
   "config.reviewChanges.viewMode": "レビュー変更一覧サイドバーの表示形式: 'tree' (コンパクトフォルダによる階層表示) または 'flat' (フラットなファイル一覧)",
   "config.codeLens.enable": "テスト定義や TODO コメントの上にインライン CodeLens を表示し、エージェントへの委派をトリガーできるようにする",
   "config.quickFix.enable": "コンパイラ/リンターのエラー・警告の電球メニューに「Herdr エージェントに修正を依頼」クイックフィックスを表示する",
-  "config.autoRestoreTerminal": "VS Code 再起動時に復元されたターミナル上で Herdr を自動的に再開・再アタッチする"
+  "config.autoRestoreTerminal": "VS Code 再起動時に復元されたターミナル上で Herdr を自動的に再開・再アタッチする",
+  "config.terminal.failureAction": "VS Code ターミナルのコマンドが非ゼロで終了した際の動作 (Shell Integration): 'prompt' (通知とステータスバーに QuickFix を表示)、'statusbar' (ステータスバー表示のみ)、または 'off' (無効)",
+  "config.worktree.conflictRadar": "複数の Git Worktree 間で重複編集されているファイルを自動スキャンし、Explorer バッジとステータスバー警告を表示する"
 }

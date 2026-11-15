@@ -40,6 +40,13 @@
   "command.fixTestWithAgent": "Herdr Collie: Fix Test / Generate Edge Cases with Agent",
   "command.completeTodoWithAgent": "Herdr Collie: Complete TODO with Agent",
   "command.dispatchContextTask": "Herdr Collie: Smart Context Dispatch to Agent",
+  "command.selectReviewTarget": "Herdr Collie: Select Review Target (Worktree / Current)",
+  "command.reviewWorktree": "Herdr Collie: Review Worktree Changes",
+  "command.createPullRequestFromWorktree": "Herdr Collie: Create Pull Request / Integrate Worktree",
+  "command.manageIntegrations": "Herdr Collie: Manage Herdr Agent Integrations",
+  "command.fixLastFailedCommand": "Herdr Collie: Fix Last Failed Terminal Command with Agent",
+  "command.showConflictRadar": "Herdr Collie: Parallel Worktree Conflict Radar",
+  "command.launchSwarmPlaybook": "Herdr Collie: Launch Swarm Playbook (Best-of-N / Impl + Review)",
   "viewsContainers.activitybar.title": "Herdr Collie",
   "view.sessions": "Sessions",
   "view.workspaces": "Workspaces",
@@ -57,5 +64,7 @@
   "config.reviewChanges.viewMode": "Display mode for the Review Changes sidebar view: 'tree' (hierarchical compact folders) or 'flat' (flat file list)",
   "config.codeLens.enable": "Show inline CodeLens above test definitions and TODO comments to trigger AI agent assistance",
   "config.quickFix.enable": "Show 'Delegate Fix to Herdr Agent' Quick-Fix action in Lightbulb menu for compiler/linter diagnostics",
-  "config.autoRestoreTerminal": "Automatically restore and re-attach Herdr in terminals preserved across VS Code restarts"
+  "config.autoRestoreTerminal": "Automatically restore and re-attach Herdr in terminals preserved across VS Code restarts",
+  "config.terminal.failureAction": "Action when a VS Code terminal command exits with a non-zero status (Shell Integration): 'prompt' (notification & status bar QuickFix), 'statusbar' (status bar badge only), or 'off'",
+  "config.worktree.conflictRadar": "Automatically scan Git worktrees for overlapping file edits and surface conflict radar badges and warnings"
 }

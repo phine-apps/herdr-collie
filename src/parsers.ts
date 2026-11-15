@@ -495,3 +495,161 @@ export function parseGitWorktrees(stdout: string): GitWorktreeInfo[] {
 
     return worktrees;
 }
+
+export type IntegrationState = 'current' | 'outdated' | 'not_installed';
+
+export interface ParsedIntegrationInfo {
+    target: string;
+    cliTarget: string;
+    socketTarget: string;
+    label: string;
+    command: string;
+    available: boolean;
+    state: IntegrationState;
+    experimental?: boolean;
+    details?: string;
+    path?: string;
+}
+
+const CLI_TARGET_ALIASES: Record<string, string> = {
+    'antigravity_cli': 'antigravity-cli',
+    'agy': 'antigravity-cli',
+    'cursor-agent': 'cursor',
+    'gh copilot': 'copilot'
+};
+
+const SOCKET_TARGET_ALIASES: Record<string, string> = {
+    'antigravity-cli': 'antigravity_cli',
+    'agy': 'antigravity_cli',
+    'cursor-agent': 'cursor',
+    'gh copilot': 'copilot'
+};
+
+/**
+ * Normalizes an agent/integration identifier to the Herdr CLI `integration install <TARGET>` name.
+ */
+export function normalizeIntegrationTargetForCli(target: string): string {
+    const trimmed = (target || '').trim().toLowerCase();
+    if (!trimmed) return '';
+    return CLI_TARGET_ALIASES[trimmed] || trimmed.replace(/_/g, '-');
+}
+
+/**
+ * Normalizes an agent/integration identifier to the Herdr socket API `IntegrationTarget` enum name.
+ */
+export function normalizeIntegrationTargetForSocket(target: string): string {
+    const trimmed = (target || '').trim().toLowerCase();
+    if (!trimmed) return '';
+    return SOCKET_TARGET_ALIASES[trimmed] || trimmed.replace(/-/g, '_');
+}
+
+/**
+ * Maps an agent command string (e.g. `claude --flag`, `gh copilot`, `agy`) to its Herdr integration target.
+ */
+export function mapAgentCmdToIntegrationTarget(agentCmd: string): string | undefined {
+    const trimmed = (agentCmd || '').trim();
+    if (!trimmed) return undefined;
+    const lower = trimmed.toLowerCase();
+    if (lower.startsWith('gh copilot')) return 'copilot';
+    const firstToken = lower.split(/\s+/)[0].replace(/^.*[\\/]/, '');
+    if (!firstToken) return undefined;
+    return normalizeIntegrationTargetForCli(firstToken);
+}
+
+/**
+ * Parses `herdr integration status` CLI output into structured integration entries.
+ */
+export function parseIntegrationStatus(stdout: string): ParsedIntegrationInfo[] {
+    if (!stdout || !stdout.trim()) return [];
+
+    const results: ParsedIntegrationInfo[] = [];
+    const lines = stdout.split(/\r?\n/);
+
+    for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+
+        const colonIdx = line.indexOf(':');
+        if (colonIdx <= 0) continue;
+
+        const left = line.slice(0, colonIdx).trim();
+        let right = line.slice(colonIdx + 1).trim();
+
+        const targetMatch = left.match(/^([a-zA-Z0-9_-]+)(?:\s+\((experimental)\))?$/i);
+        if (!targetMatch) continue;
+
+        const rawTarget = targetMatch[1];
+        const experimental = Boolean(targetMatch[2]);
+
+        let hookPath: string | undefined;
+        const pathMatch = right.match(/\s+\(((?:\/|~|[a-zA-Z]:[\\/])[^)]+)\)$/);
+        if (pathMatch) {
+            hookPath = pathMatch[1].trim();
+            right = right.slice(0, pathMatch.index).trim();
+        }
+
+        const lowerRight = right.toLowerCase();
+        let state: IntegrationState = 'current';
+        if (lowerRight.includes('not installed') || lowerRight.includes('not_installed')) {
+            state = 'not_installed';
+        } else if (lowerRight.includes('outdated') || lowerRight.includes('legacy')) {
+            state = 'outdated';
+        }
+
+        const cliTarget = normalizeIntegrationTargetForCli(rawTarget);
+        const socketTarget = normalizeIntegrationTargetForSocket(rawTarget);
+
+        results.push({
+            target: cliTarget,
+            cliTarget,
+            socketTarget,
+            label: rawTarget,
+            command: cliTarget === 'antigravity-cli' ? 'agy' : (cliTarget === 'cursor' ? 'cursor-agent' : cliTarget),
+            available: state !== 'not_installed',
+            state,
+            experimental,
+            details: right || undefined,
+            path: hookPath
+        });
+    }
+
+    return results;
+}
+
+/**
+ * Parses socket API `integration.list` response payload into structured integration entries.
+ */
+export function parseIntegrationListResult(result: any): ParsedIntegrationInfo[] {
+    const rawList = Array.isArray(result?.integrations)
+        ? result.integrations
+        : (Array.isArray(result) ? result : []);
+
+    const results: ParsedIntegrationInfo[] = [];
+    for (const item of rawList) {
+        if (!item || typeof item !== 'object') continue;
+        const rawTarget = String(item.target || '').trim();
+        if (!rawTarget) continue;
+
+        const rawState = String(item.state || 'not_installed').toLowerCase();
+        let state: IntegrationState = 'not_installed';
+        if (rawState === 'current' || rawState === 'installed') {
+            state = 'current';
+        } else if (rawState === 'outdated') {
+            state = 'outdated';
+        }
+
+        const cliTarget = normalizeIntegrationTargetForCli(rawTarget);
+        const socketTarget = normalizeIntegrationTargetForSocket(rawTarget);
+
+        results.push({
+            target: cliTarget,
+            cliTarget,
+            socketTarget,
+            label: String(item.label || rawTarget),
+            command: String(item.command || cliTarget),
+            available: Boolean(item.available),
+            state
+        });
+    }
+    return results;
+}

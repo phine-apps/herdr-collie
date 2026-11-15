@@ -13,7 +13,12 @@ import {
     parseTabs,
     parseSessions,
     parseGitWorktrees,
-    extractCleanOutputSummary
+    extractCleanOutputSummary,
+    parseIntegrationStatus,
+    parseIntegrationListResult,
+    normalizeIntegrationTargetForCli,
+    normalizeIntegrationTargetForSocket,
+    mapAgentCmdToIntegrationTarget
 } from '../../parsers';
 
 describe('parsers Unit Tests', () => {
@@ -549,6 +554,72 @@ detached
                 ]
             });
             expect(parsedSnap[0].latestOutput).to.equal('Compiling TypeScript modules...');
+        });
+    });
+
+    describe('integration parsing & target normalization', () => {
+        it('normalizes integration target names between CLI (hyphen) and socket (underscore)', () => {
+            expect(normalizeIntegrationTargetForCli('antigravity_cli')).to.equal('antigravity-cli');
+            expect(normalizeIntegrationTargetForCli('claude')).to.equal('claude');
+            expect(normalizeIntegrationTargetForSocket('antigravity-cli')).to.equal('antigravity_cli');
+            expect(normalizeIntegrationTargetForSocket('claude')).to.equal('claude');
+            expect(mapAgentCmdToIntegrationTarget('agy')).to.equal('antigravity-cli');
+            expect(mapAgentCmdToIntegrationTarget('claude --dangerously-skip-permissions')).to.equal('claude');
+            expect(mapAgentCmdToIntegrationTarget('gh copilot')).to.equal('copilot');
+            expect(mapAgentCmdToIntegrationTarget('cursor-agent')).to.equal('cursor');
+        });
+
+        it('parseIntegrationStatus classifies current, outdated, and not_installed items', () => {
+            const cliText = [
+                'claude: installed (~/.claude/settings.json)',
+                'antigravity-cli (experimental): outdated (~/.gemini/settings.json)',
+                'codex: not installed'
+            ].join('\n');
+
+            const parsed = parseIntegrationStatus(cliText);
+            expect(parsed).to.have.lengthOf(3);
+            expect(parsed[0]).to.include({
+                target: 'claude',
+                cliTarget: 'claude',
+                socketTarget: 'claude',
+                state: 'current',
+                available: true
+            });
+            expect(parsed[0].path).to.equal('~/.claude/settings.json');
+            expect(parsed[1]).to.include({
+                target: 'antigravity-cli',
+                cliTarget: 'antigravity-cli',
+                socketTarget: 'antigravity_cli',
+                state: 'outdated',
+                experimental: true
+            });
+            expect(parsed[2]).to.include({
+                target: 'codex',
+                state: 'not_installed',
+                available: false
+            });
+        });
+
+        it('parseIntegrationListResult parses socket JSON-RPC array responses', () => {
+            const parsed = parseIntegrationListResult({
+                integrations: [
+                    { target: 'antigravity_cli', label: 'Antigravity CLI', command: 'agy', available: true, state: 'current' },
+                    { target: 'cursor', label: 'Cursor', command: 'cursor-agent', available: false, state: 'outdated' }
+                ]
+            });
+
+            expect(parsed).to.have.lengthOf(2);
+            expect(parsed[0]).to.include({
+                cliTarget: 'antigravity-cli',
+                socketTarget: 'antigravity_cli',
+                state: 'current',
+                available: true
+            });
+            expect(parsed[1]).to.include({
+                cliTarget: 'cursor',
+                state: 'outdated',
+                available: false
+            });
         });
     });
 });

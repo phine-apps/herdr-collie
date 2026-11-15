@@ -44,9 +44,13 @@ import {
     mergeWorktreeBranch,
     verifyWorktreeMerge,
     formatMergeConflictPrompt,
+    formatCreatePullRequestPrompt,
+    pushAndCreatePullRequestWithGh,
+    manageIntegrationsWizard,
     getCurrentGitBranch,
     openWorkspaceFolderInWindow
 } from './worktreeManager';
+import { launchSwarmPlaybookWizard } from './swarmPlaybooks';
 import {
     HerdrWorkspaceTreeItem,
     HerdrTabTreeItem,
@@ -60,7 +64,9 @@ import {
     HerdrReviewChangesProvider,
     ReviewChangeTreeItem,
     ReviewViewMode,
+    ReviewTarget,
     resolveDiffTargets,
+    resolveWorktreeMergeBase,
     createReviewCheckpoint,
     rollbackReviewCheckpoint,
     listReviewCheckpoints,
@@ -76,6 +82,8 @@ import {
     formatTestPrompt,
     formatTodoPrompt
 } from './microTaskManager';
+import { TerminalShellMonitor } from './terminalShellManager';
+import { WorktreeConflictRadar } from './conflictRadar';
 
 interface TargetQuickPickItem extends vscode.QuickPickItem {
     targetId: string;
@@ -83,6 +91,7 @@ interface TargetQuickPickItem extends vscode.QuickPickItem {
     isAgent?: boolean;
     displayLabel?: string;
     workspaceId?: string;
+    priority?: number;
 }
 
 function getSessionName(): string {
@@ -274,8 +283,10 @@ export async function resolveGitContextForUri(
  */
 export async function captureTerminalOutputWithClipboard(
     clipboard: { readText(): Thenable<string> | Promise<string>; writeText(value: string): Thenable<void> | Promise<void> },
-    executeCommand: (command: string) => Thenable<any> | Promise<any>
+    executeCommand: (command: string) => Thenable<any> | Promise<any>,
+    options?: { selectAllFallback?: boolean }
 ): Promise<string> {
+    const selectAllFallback = options?.selectAllFallback ?? true;
     let originalClipboard = '';
     try {
         originalClipboard = await clipboard.readText();
@@ -303,7 +314,7 @@ export async function captureTerminalOutputWithClipboard(
 
         if (hasSelection) {
             outputText = selectionText;
-        } else {
+        } else if (selectAllFallback) {
             await executeCommand('workbench.action.terminal.selectAll');
             await executeCommand('workbench.action.terminal.copySelection');
             await executeCommand('workbench.action.terminal.clearSelection');
@@ -910,81 +921,108 @@ export function activate(context: vscode.ExtensionContext) {
         richText: string,
         successMsg: string,
         quickPickTitle: string,
-        options?: { stageOnly?: boolean }
+        options?: { stageOnly?: boolean; preferredCwd?: string; preferredAgentId?: string }
     ): Promise<boolean> {
         const defaultSession = activeSidebarSession;
         const sessions = await fetchActiveSessions(defaultSession);
-        const currentCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const preferredCwd = options?.preferredCwd;
+        const preferredAgentId = options?.preferredAgentId;
+        const currentCwd = preferredCwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         
         const allItems: TargetQuickPickItem[] = [];
         const primaryItems: TargetQuickPickItem[] = [];
         const otherItems: TargetQuickPickItem[] = [];
 
-        await Promise.all(sessions.map(sessionName => {
-            return new Promise<void>((resolve) => {
-                const sessionArgs = ['--session', sessionName];
-                let pending = 2;
-                const checkDone = () => {
-                    pending--;
-                    if (pending === 0) resolve();
+        await Promise.all(sessions.map(async (sessionName) => {
+            const sessionArgs = ['--session', sessionName];
+            const [workspaces, panes, agents] = await Promise.all([
+                new Promise<ReturnType<typeof parseWorkspaces>>((resolve) => {
+                    execHerdr([...sessionArgs, 'workspace', 'list'], (error: any, stdout: any) => {
+                        resolve(!error && stdout ? parseWorkspaces(stdout) : []);
+                    });
+                }),
+                new Promise<ReturnType<typeof parsePanes>>((resolve) => {
+                    execHerdr([...sessionArgs, 'pane', 'list'], (error: any, stdout: any) => {
+                        resolve(!error && stdout ? parsePanes(stdout) : []);
+                    });
+                }),
+                new Promise<ReturnType<typeof parseAgents>>((resolve) => {
+                    execHerdr([...sessionArgs, 'agent', 'list'], (error: any, stdout: any) => {
+                        resolve(!error && stdout ? parseAgents(stdout) : []);
+                    });
+                })
+            ]);
+
+            const workspaceCwdById = new Map<string, string>();
+            for (const ws of workspaces) {
+                if (ws.id && ws.cwd) {
+                    workspaceCwdById.set(ws.id, ws.cwd);
+                }
+            }
+
+            const isCurrentSession = sessionName === defaultSession;
+
+            panes.forEach(p => {
+                const isMatchedCwd = Boolean(currentCwd && p.cwd && isSameOrSubPath(p.cwd, currentCwd));
+                const isPreferredMatch = Boolean(preferredCwd && p.cwd && isSameOrSubPath(p.cwd, preferredCwd));
+                const tag = isPreferredMatch
+                    ? ` (${l10n.t('Target Worktree')})`
+                    : (isMatchedCwd ? ' (Current Project)' : '');
+                const priority =
+                    (isPreferredMatch ? 4 : 0) +
+                    (isMatchedCwd ? 2 : 0) +
+                    (isCurrentSession ? 1 : 0);
+                const item: TargetQuickPickItem = {
+                    label: `[${sessionName}] $(terminal) Pane: ${p.name || p.id}`,
+                    description: `Session: ${sessionName}${p.command ? ` | ${p.command}` : ''}${tag}`,
+                    targetId: p.id,
+                    sessionName,
+                    isAgent: false,
+                    priority
                 };
+                allItems.push(item);
 
-                execHerdr([...sessionArgs, 'pane', 'list'], (error: any, stdout: any) => {
-                    if (!error && stdout) {
-                        const panes = parsePanes(stdout);
-                        panes.forEach(p => {
-                            const isCurrentSession = sessionName === defaultSession;
-                            const isCurrentCwd = isSameOrSubPath(p.cwd, currentCwd);
-                            const item: TargetQuickPickItem = {
-                                label: `[${sessionName}] $(terminal) Pane: ${p.name || p.id}`,
-                                description: `Session: ${sessionName}${p.command ? ` | ${p.command}` : ''}${isCurrentCwd ? ' (Current Project)' : ''}`,
-                                targetId: p.id,
-                                sessionName,
-                                isAgent: false
-                            };
-                            allItems.push(item);
-                            
-                            // For primary list: prioritize panes in the current session associated with this project
-                            if (isCurrentSession && isCurrentCwd) {
-                                primaryItems.push(item);
-                            } else {
-                                otherItems.push(item);
-                            }
-                        });
-                    }
-                    checkDone();
-                });
+                if ((isCurrentSession && isMatchedCwd) || isPreferredMatch) {
+                    primaryItems.push(item);
+                } else {
+                    otherItems.push(item);
+                }
+            });
 
-                execHerdr([...sessionArgs, 'agent', 'list'], (error: any, stdout: any) => {
-                    if (!error && stdout) {
-                        const agents = parseAgents(stdout);
-                        agents.forEach(a => {
-                            const isCurrentSession = sessionName === defaultSession;
-                            const item: TargetQuickPickItem = {
-                                label: `[${sessionName}] $(hubot) Agent: ${a.name || a.id}`,
-                                description: `Session: ${sessionName} | Status: ${a.status}`,
-                                targetId: a.id,
-                                sessionName,
-                                isAgent: true
-                            };
-                            allItems.push(item);
-                            
-                            // Agents in the current session are high priority
-                            if (isCurrentSession) {
-                                primaryItems.push(item);
-                            } else {
-                                otherItems.push(item);
-                            }
-                        });
-                    }
-                    checkDone();
-                });
+            agents.forEach(a => {
+                const agentCwd = a.workspaceCwd || (a.workspaceId ? workspaceCwdById.get(a.workspaceId) : undefined);
+                const isMatchedCwd = Boolean(currentCwd && agentCwd && isSameOrSubPath(agentCwd, currentCwd));
+                const isPreferredAgent = Boolean(preferredAgentId && a.id === preferredAgentId);
+                const isPreferredCwd = Boolean(preferredCwd && agentCwd && isSameOrSubPath(agentCwd, preferredCwd));
+                const isPreferredMatch = isPreferredAgent || isPreferredCwd;
+                const tag = isPreferredMatch ? ` (${l10n.t('Target Worktree')})` : '';
+                const priority =
+                    (isPreferredAgent ? 8 : 0) +
+                    (isPreferredCwd ? 6 : 0) +
+                    4 + // Agents above panes by default
+                    (isMatchedCwd ? 2 : 0) +
+                    (isCurrentSession ? 1 : 0);
+                const item: TargetQuickPickItem = {
+                    label: `[${sessionName}] $(hubot) Agent: ${a.name || a.id}`,
+                    description: `Session: ${sessionName} | Status: ${a.status}${tag}`,
+                    targetId: a.id,
+                    sessionName,
+                    isAgent: true,
+                    priority
+                };
+                allItems.push(item);
+
+                if (isCurrentSession || isPreferredMatch) {
+                    primaryItems.push(item);
+                } else {
+                    otherItems.push(item);
+                }
             });
         }));
 
-        // Sort items: Agents first, then Panes
-        primaryItems.sort((a, b) => (b.isAgent ? 1 : 0) - (a.isAgent ? 1 : 0));
-        allItems.sort((a, b) => (b.isAgent ? 1 : 0) - (a.isAgent ? 1 : 0));
+        // Sort items by match priority (Target Worktree -> Agents -> Current Session -> Panes)
+        primaryItems.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || (b.isAgent ? 1 : 0) - (a.isAgent ? 1 : 0));
+        allItems.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || (b.isAgent ? 1 : 0) - (a.isAgent ? 1 : 0));
 
         let displayItems: TargetQuickPickItem[] = [];
         const hasOtherOptions = otherItems.length > 0;
@@ -1262,13 +1300,47 @@ export function activate(context: vscode.ExtensionContext) {
         await sendToHerdr(richText, l10n.t('Symbol Hover Info sent successfully'), l10n.t('Send Symbol Info to Herdr'));
     });
 
+    const terminalShellMonitor = new TerminalShellMonitor(
+        (prompt, successMsg, quickPickTitle, options) => sendToHerdr(prompt, successMsg, quickPickTitle, options),
+        async () => {
+            await vscode.commands.executeCommand('herdr-collie.sendTerminalOutput');
+        }
+    );
+
     let sendTerminalOutputDisposable = vscode.commands.registerCommand('herdr-collie.sendTerminalOutput', async (terminalArg?: vscode.Terminal) => {
         const terminal = terminalArg || vscode.window.activeTerminal;
         if (!terminal) {
+            const latestAny = terminalShellMonitor.getLatestExecution();
+            if (latestAny) {
+                await terminalShellMonitor.sendExecutionRecord(latestAny, false);
+                return;
+            }
             vscode.window.showInformationMessage(l10n.t('No active terminal found.'));
             return;
         }
 
+        // 1. Prefer explicit terminal selection if the user highlighted output
+        const selectedText = await captureTerminalOutputWithClipboard(
+            vscode.env.clipboard,
+            (cmd) => vscode.commands.executeCommand(cmd),
+            { selectAllFallback: false }
+        );
+        if (selectedText && selectedText.trim()) {
+            const lines = selectedText.split('\n');
+            const recentText = lines.length > 200 ? lines.slice(-200).join('\n') : selectedText;
+            const richText = formatTerminalOutput(terminal.name, recentText);
+            await sendToHerdr(richText, l10n.t('Terminal Output sent successfully'), l10n.t('Send Terminal Output to Herdr'));
+            return;
+        }
+
+        // 2. Next prefer VS Code Shell Integration recorded execution (with command & exitCode metadata)
+        const latestExecution = terminalShellMonitor.getLatestExecution(terminal);
+        if (latestExecution && (latestExecution.output.trim() || latestExecution.commandLine)) {
+            await terminalShellMonitor.sendExecutionRecord(latestExecution, false);
+            return;
+        }
+
+        // 3. Fallback to full-terminal clipboard capture when Shell Integration is unavailable
         const outputText = await captureTerminalOutputWithClipboard(
             vscode.env.clipboard,
             (cmd) => vscode.commands.executeCommand(cmd)
@@ -1279,12 +1351,15 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        // Tail the terminal output to the most recent lines if very long
         const lines = outputText.split('\n');
         const recentText = lines.length > 200 ? lines.slice(-200).join('\n') : outputText;
 
         const richText = formatTerminalOutput(terminal.name, recentText);
         await sendToHerdr(richText, l10n.t('Terminal Output sent successfully'), l10n.t('Send Terminal Output to Herdr'));
+    });
+
+    let fixLastFailedCommandDisposable = vscode.commands.registerCommand('herdr-collie.fixLastFailedCommand', async () => {
+        await terminalShellMonitor.fixFailedExecutionWizard();
     });
 
     context.subscriptions.push(
@@ -1295,7 +1370,9 @@ export function activate(context: vscode.ExtensionContext) {
         sendBranchContextDisposable, 
         sendWorkspaceProblemsDisposable, 
         sendHoverInfoDisposable, 
-        sendTerminalOutputDisposable
+        sendTerminalOutputDisposable,
+        fixLastFailedCommandDisposable,
+        terminalShellMonitor
     );
 
 // Feature 3: GUI Sidebar Manager (Socket-driven) & Agent/Workspace HUD
@@ -1510,7 +1587,13 @@ export function activate(context: vscode.ExtensionContext) {
         const sort = agentProvider.getSortOrder();
         agentTreeView.description = sort === 'priority' ? l10n.t('Priority') : l10n.t('Grouped');
         const reviewMode = reviewChangesProvider.getViewMode();
-        reviewChangesTreeView.description = reviewMode === 'tree' ? l10n.t('Tree') : l10n.t('Flat');
+        const modeLabel = reviewMode === 'tree' ? l10n.t('Tree') : l10n.t('Flat');
+        const reviewTarget = reviewChangesProvider.getReviewTarget();
+        if (reviewTarget && reviewTarget.kind === 'worktree') {
+            reviewChangesTreeView.description = `${reviewTarget.label} (${modeLabel})`;
+        } else {
+            reviewChangesTreeView.description = modeLabel;
+        }
     };
     updateTreeViewDescriptions();
 
@@ -1537,6 +1620,8 @@ export function activate(context: vscode.ExtensionContext) {
         }, delayMs);
     };
 
+    let conflictRadar: WorktreeConflictRadar | undefined;
+
     refreshAllProviders = (options?: { includeHUDs?: boolean; snapshotMaxAgeMs?: number }) => {
         const includeHUDs = options?.includeHUDs ?? true;
         const maxAgeMs = options?.snapshotMaxAgeMs ?? 0;
@@ -1549,6 +1634,7 @@ export function activate(context: vscode.ExtensionContext) {
         if (includeHUDs) {
             void agentHUD.refresh({ maxAgeMs });
             void workspaceHUD.refresh({ maxAgeMs });
+            conflictRadar?.scheduleScan(800);
         }
     };
 
@@ -2040,7 +2126,11 @@ export function activate(context: vscode.ExtensionContext) {
 
     // P1: Smart Swarm & Worktree Commands
     let launchWorktreeAgentDisposable = vscode.commands.registerCommand('herdr-collie.launchWorktreeAgent', async () => {
-        await launchWorktreeAgentWizard(getActiveSidebarSession(), () => refreshAllProviders());
+        await launchWorktreeAgentWizard(getActiveSidebarSession(), () => refreshAllProviders(), socketClient);
+    });
+
+    let launchSwarmPlaybookDisposable = vscode.commands.registerCommand('herdr-collie.launchSwarmPlaybook', async () => {
+        await launchSwarmPlaybookWizard(getActiveSidebarSession(), () => refreshAllProviders(), socketClient);
     });
 
     let mergeWorktreeDisposable = vscode.commands.registerCommand('herdr-collie.mergeWorktree', async (item?: HerdrWorkspaceTreeItem) => {
@@ -2251,7 +2341,15 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (!comment || !comment.trim()) return;
 
-        reviewController.addCommentFromEditor(uri, startLine, endLine, comment.trim(), snippet || undefined);
+        const effectiveRepoRoot = await reviewChangesProvider.getEffectiveRepoRoot();
+        reviewController.addCommentFromEditor(
+            uri,
+            startLine,
+            endLine,
+            comment.trim(),
+            snippet || undefined,
+            effectiveRepoRoot || undefined
+        );
         vscode.window.showInformationMessage(l10n.t('Added review comment on {0} ({1})', path.basename(uri.fsPath), lineRangeText));
     });
 
@@ -2307,9 +2405,21 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         const workspaceFolders = vscode.workspace.workspaceFolders;
+        const reviewTarget = reviewChangesProvider.getReviewTarget();
         let currentBranch: string | undefined;
         let repoRoot: string | null = null;
-        if (workspaceFolders && workspaceFolders.length > 0) {
+        if (reviewTarget && reviewTarget.kind === 'worktree') {
+            repoRoot = reviewTarget.worktreePath;
+            try {
+                currentBranch = reviewTarget.branchName || await getCurrentGitBranch(repoRoot);
+                if (submitModePick.mode !== 'clipboard') {
+                    const cp = await createReviewCheckpoint(repoRoot, 'pre-review-submit');
+                    if (cp) {
+                        reviewChangesProvider.setBaseCheckpoint(cp);
+                    }
+                }
+            } catch {}
+        } else if (workspaceFolders && workspaceFolders.length > 0) {
             try {
                 repoRoot = await getRepoRoot(workspaceFolders[0].uri.fsPath);
                 if (repoRoot) {
@@ -2324,6 +2434,10 @@ export function activate(context: vscode.ExtensionContext) {
             } catch {}
         }
 
+        const sendTargetOptions = reviewTarget && reviewTarget.kind === 'worktree'
+            ? { preferredCwd: reviewTarget.worktreePath, preferredAgentId: reviewTarget.agentId }
+            : {};
+
         await reviewController.submitSafely(
             async (prompt) => {
                 if (submitModePick.mode === 'clipboard') {
@@ -2336,13 +2450,14 @@ export function activate(context: vscode.ExtensionContext) {
                         prompt,
                         l10n.t('Staged review ({0} comments) in input', count),
                         l10n.t('Select agent to stage review feedback:'),
-                        { stageOnly: true }
+                        { stageOnly: true, ...sendTargetOptions }
                     );
                 }
                 return await sendToHerdr(
                     prompt,
                     l10n.t('Submitted review ({0} comments)', count),
-                    l10n.t('Select agent to receive review feedback:')
+                    l10n.t('Select agent to receive review feedback:'),
+                    sendTargetOptions
                 );
             },
             {
@@ -2390,7 +2505,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let createReviewCheckpointDisposable = vscode.commands.registerCommand('herdr-collie.createReviewCheckpoint', async () => {
-        const repoRoot = await getActiveRepoRoot();
+        const repoRoot = await reviewChangesProvider.getEffectiveRepoRoot();
         if (!repoRoot) {
             vscode.window.showWarningMessage(l10n.t('The current workspace is not a Git repository.'));
             return;
@@ -2405,7 +2520,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let rollbackReviewCheckpointDisposable = vscode.commands.registerCommand('herdr-collie.rollbackReviewCheckpoint', async () => {
-        const repoRoot = await getActiveRepoRoot();
+        const repoRoot = await reviewChangesProvider.getEffectiveRepoRoot();
         if (!repoRoot) {
             vscode.window.showWarningMessage(l10n.t('The current workspace is not a Git repository.'));
             return;
@@ -2442,6 +2557,292 @@ export function activate(context: vscode.ExtensionContext) {
         } else {
             vscode.window.showErrorMessage(l10n.t('Failed to rollback to checkpoint: {0}', picked.checkpoint.id));
         }
+    });
+
+    const resolveMainRepoRoot = async (hintPath?: string): Promise<string | null> => {
+        if (hintPath) {
+            const fromHint = await getRepoRoot(hintPath).catch(() => null);
+            if (fromHint) return fromHint;
+        }
+        const fromActive = await getActiveRepoRoot();
+        if (fromActive) return fromActive;
+        const firstFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        return firstFolder ? await getRepoRoot(firstFolder).catch(() => null) : null;
+    };
+
+    const activateWorktreeReviewTarget = async (
+        repoRoot: string,
+        worktreePath: string,
+        branchName?: string,
+        labelHint?: string
+    ): Promise<void> => {
+        const matchedAgent = agentProvider.getCurrentItems().find(
+            a => a.cwd && isSameOrSubPath(a.cwd, worktreePath)
+        );
+        const currentBranch = await getCurrentGitBranch(repoRoot).catch(() => undefined);
+        const mergeBase = await resolveWorktreeMergeBase(worktreePath, undefined, currentBranch);
+        const label = labelHint || branchName || path.basename(worktreePath);
+        const target: ReviewTarget = {
+            kind: 'worktree',
+            repoRoot,
+            worktreePath,
+            branchName: branchName || path.basename(worktreePath),
+            baseBranch: mergeBase.baseBranch,
+            label,
+            agentId: matchedAgent?.rawId || (matchedAgent?.id ? matchedAgent.id.split(':')[0] : undefined),
+            agentName: typeof matchedAgent?.label === 'string' ? matchedAgent.label : undefined
+        };
+        reviewChangesProvider.setReviewTarget(target);
+        updateTreeViewDescriptions();
+        await vscode.commands.executeCommand('herdr-collie.reviewChanges.focus').then(undefined, () => {});
+        vscode.window.setStatusBarMessage(
+            l10n.t('Reviewing worktree: {0} (base: {1})', target.label, mergeBase.baseLabel),
+            5000
+        );
+    };
+
+    let selectReviewTargetDisposable = vscode.commands.registerCommand('herdr-collie.selectReviewTarget', async () => {
+        const repoRoot = await resolveMainRepoRoot();
+        if (!repoRoot) {
+            vscode.window.showWarningMessage(l10n.t('The current workspace is not a Git repository.'));
+            return;
+        }
+
+        const worktrees = await listGitWorktrees(repoRoot);
+        const linkedWorktrees = worktrees.filter(w => !w.isMain && w.worktree !== repoRoot);
+        const currentAgents = agentProvider.getCurrentItems();
+        const activeTarget = reviewChangesProvider.getReviewTarget();
+
+        type ReviewTargetPick = vscode.QuickPickItem & {
+            targetKind: 'current' | 'worktree';
+            worktreePath?: string;
+            branchName?: string;
+            labelText?: string;
+        };
+
+        const items: ReviewTargetPick[] = [
+            {
+                label: `$(home) ${l10n.t('Current Workspace')}`,
+                description: !activeTarget || activeTarget.kind === 'current' ? l10n.t('(active)') : path.basename(repoRoot),
+                detail: l10n.t('Review uncommitted changes in the open workspace'),
+                targetKind: 'current'
+            },
+            ...linkedWorktrees.map(wt => {
+                const branchLabel = wt.branch || path.basename(wt.worktree);
+                const matchedAgent = currentAgents.find(a => a.cwd && isSameOrSubPath(a.cwd, wt.worktree));
+                const agentText = matchedAgent
+                    ? l10n.t('Agent: {0}', typeof matchedAgent.label === 'string' ? matchedAgent.label : (matchedAgent.rawId || ''))
+                    : undefined;
+                const isSelected = activeTarget?.kind === 'worktree' && activeTarget.worktreePath === wt.worktree;
+                return {
+                    label: `$(git-branch) ${branchLabel}`,
+                    description: isSelected ? `${l10n.t('(active)')} | ${wt.worktree}` : wt.worktree,
+                    detail: agentText,
+                    targetKind: 'worktree' as const,
+                    worktreePath: wt.worktree,
+                    branchName: wt.branch,
+                    labelText: branchLabel
+                };
+            })
+        ];
+
+        const picked = await vscode.window.showQuickPick(items, {
+            title: l10n.t('Select Worktree to Review'),
+            placeHolder: l10n.t('Choose Current Workspace or a linked Git worktree')
+        });
+        if (!picked) return;
+
+        if (picked.targetKind === 'current') {
+            reviewChangesProvider.setReviewTarget(null);
+            updateTreeViewDescriptions();
+            vscode.window.setStatusBarMessage(l10n.t('Reviewing current workspace'), 3000);
+            return;
+        }
+
+        if (picked.worktreePath) {
+            await activateWorktreeReviewTarget(repoRoot, picked.worktreePath, picked.branchName, picked.labelText);
+        }
+    });
+
+    let reviewWorktreeDisposable = vscode.commands.registerCommand('herdr-collie.reviewWorktree', async (item?: HerdrWorkspaceTreeItem) => {
+        if (item?.cwd) {
+            const repoRoot = await resolveMainRepoRoot(item.cwd);
+            if (!repoRoot) {
+                vscode.window.showWarningMessage(l10n.t('The current workspace is not a Git repository.'));
+                return;
+            }
+            const labelHint = item.branchName || (typeof item.label === 'string' ? item.label : path.basename(item.cwd));
+            await activateWorktreeReviewTarget(repoRoot, item.cwd, item.branchName, labelHint);
+            return;
+        }
+        await vscode.commands.executeCommand('herdr-collie.selectReviewTarget');
+    });
+
+    let createPullRequestFromWorktreeDisposable = vscode.commands.registerCommand('herdr-collie.createPullRequestFromWorktree', async (item?: HerdrWorkspaceTreeItem) => {
+        const repoRoot = await resolveMainRepoRoot(item?.cwd);
+        if (!repoRoot) {
+            vscode.window.showWarningMessage(l10n.t('The current workspace is not a Git repository.'));
+            return;
+        }
+
+        let worktreePath = item?.cwd;
+        let branchName = item?.branchName;
+
+        if (!worktreePath || !branchName) {
+            const activeReview = reviewChangesProvider.getReviewTarget();
+            if (activeReview?.kind === 'worktree' && (!item || item.cwd === activeReview.worktreePath)) {
+                worktreePath = activeReview.worktreePath;
+                branchName = activeReview.branchName;
+            }
+        }
+
+        if (worktreePath && !branchName) {
+            branchName = await getCurrentGitBranch(worktreePath).catch(() => undefined);
+        }
+
+        if (!worktreePath || !branchName) {
+            const worktrees = await listGitWorktrees(repoRoot);
+            const candidates = worktrees.filter(w => w.branch && !w.isMain && w.worktree !== repoRoot);
+            if (candidates.length === 0) {
+                vscode.window.showInformationMessage(l10n.t('No active Git worktree branches found.'));
+                return;
+            }
+            const selectedWt = await vscode.window.showQuickPick(
+                candidates.map(c => ({
+                    label: `$(git-branch) ${c.branch}`,
+                    description: c.worktree,
+                    worktree: c.worktree,
+                    branch: c.branch!
+                })),
+                {
+                    title: l10n.t('Select Worktree Branch for PR'),
+                    placeHolder: l10n.t('Select Worktree Branch for PR')
+                }
+            );
+            if (!selectedWt) return;
+            worktreePath = selectedWt.worktree;
+            branchName = selectedWt.branch;
+        }
+
+        const currentMainBranch = await getCurrentGitBranch(repoRoot).catch(() => 'main');
+        const mergeBase = await resolveWorktreeMergeBase(worktreePath, undefined, currentMainBranch);
+        const baseBranch = mergeBase.baseBranch || currentMainBranch || 'main';
+
+        const actionPick = await vscode.window.showQuickPick([
+            {
+                label: `$(hubot) ${l10n.t('Delegate Commit, Push & PR to Agent')}`,
+                description: `gh pr create (${branchName} -> ${baseBranch})`,
+                detail: l10n.t('Ask the worktree agent to review diff, commit, push, and run gh pr create'),
+                action: 'delegate' as const
+            },
+            {
+                label: `$(git-pull-request-create) ${l10n.t('Push & Create PR via GitHub CLI (gh)')}`,
+                description: `${branchName} -> ${baseBranch}`,
+                detail: l10n.t('Push branch {0} and create a PR against {1}', branchName, baseBranch),
+                action: 'gh' as const
+            },
+            {
+                label: `$(git-merge) ${l10n.t('Merge Branch into Current Branch')}`,
+                description: `${branchName} -> ${currentMainBranch}`,
+                detail: l10n.t('Merge {0} locally into the current branch', branchName),
+                action: 'merge' as const
+            }
+        ], {
+            title: l10n.t('Create Pull Request / Integrate Worktree ({0})', branchName),
+            placeHolder: l10n.t('Select how to integrate or publish worktree changes')
+        });
+
+        if (!actionPick) return;
+
+        if (actionPick.action === 'merge') {
+            await vscode.commands.executeCommand(
+                'herdr-collie.mergeWorktree',
+                item || ({ cwd: worktreePath, branchName } as HerdrWorkspaceTreeItem)
+            );
+            return;
+        }
+
+        if (actionPick.action === 'delegate') {
+            const customInstruction = await vscode.window.showInputBox({
+                title: l10n.t('Create Pull Request / Integrate Worktree ({0})', branchName),
+                prompt: l10n.t('Additional instruction for PR (optional)'),
+                placeHolder: l10n.t('e.g. Include unit test results and mark as draft')
+            });
+            if (customInstruction === undefined) return;
+
+            const prompt = formatCreatePullRequestPrompt(branchName, baseBranch, customInstruction.trim() || undefined);
+            const matchedAgent = agentProvider.getCurrentItems().find(
+                a => a.cwd && isSameOrSubPath(a.cwd, worktreePath!)
+            );
+            await sendToHerdr(
+                prompt,
+                l10n.t('Prompt sent to agent to create PR for {0}', branchName),
+                l10n.t('Select target agent to create PR for {0}:', branchName),
+                {
+                    preferredCwd: worktreePath,
+                    preferredAgentId: matchedAgent?.rawId || (matchedAgent?.id ? matchedAgent.id.split(':')[0] : undefined)
+                }
+            );
+            return;
+        }
+
+        const prTitle = await vscode.window.showInputBox({
+            title: l10n.t('Pull Request Title'),
+            prompt: l10n.t('Enter title for Pull Request ({0} -> {1})', branchName, baseBranch),
+            value: branchName
+        });
+        if (!prTitle || !prTitle.trim()) return;
+
+        try {
+            const prUrl = await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: l10n.t('Pushing {0} and creating Pull Request...', branchName),
+                    cancellable: false
+                },
+                async () => await pushAndCreatePullRequestWithGh(worktreePath!, branchName!, baseBranch, prTitle.trim())
+            );
+            const openBtn = l10n.t('Open PR');
+            if (/^https?:\/\//i.test(prUrl)) {
+                const choice = await vscode.window.showInformationMessage(
+                    l10n.t('Created Pull Request: {0}', prUrl),
+                    openBtn
+                );
+                if (choice === openBtn) {
+                    await vscode.env.openExternal(vscode.Uri.parse(prUrl));
+                }
+            } else {
+                vscode.window.showInformationMessage(l10n.t('Created Pull Request: {0}', prUrl));
+            }
+        } catch (err: any) {
+            vscode.window.showErrorMessage(l10n.t('Failed to create Pull Request: {0}', err?.message || String(err)));
+        }
+    });
+
+    let manageIntegrationsDisposable = vscode.commands.registerCommand('herdr-collie.manageIntegrations', async () => {
+        await manageIntegrationsWizard(socketClient);
+    });
+
+    conflictRadar = new WorktreeConflictRadar({
+        getRepoRoot: () => resolveMainRepoRoot(),
+        getActiveAgents: () => agentProvider.getCurrentItems().map(a => ({
+            id: a.rawId || (a.id ? a.id.split(':')[0] : undefined),
+            name: typeof a.label === 'string' ? a.label : undefined,
+            cwd: a.cwd
+        })),
+        dispatchPrompt: (prompt, successMsg, quickPickTitle, options) =>
+            sendToHerdr(prompt, successMsg, quickPickTitle, options),
+        openWorktreeReview: async (worktreePath, branchName) => {
+            const root = await resolveMainRepoRoot(worktreePath);
+            if (root) {
+                await activateWorktreeReviewTarget(root, worktreePath, branchName, branchName);
+            }
+        }
+    });
+    conflictRadar.scheduleScan(1200);
+
+    let showConflictRadarDisposable = vscode.commands.registerCommand('herdr-collie.showConflictRadar', async () => {
+        await conflictRadar?.showConflictRadarWizard();
     });
 
     // P4: Micro-Task CodeLens & Quick-Fix (コードレンズ & インライン即時委譲)
@@ -2552,6 +2953,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(closeTabDisposable);
     context.subscriptions.push(peekAgentOutputDisposable);
     context.subscriptions.push(launchWorktreeAgentDisposable);
+    context.subscriptions.push(launchSwarmPlaybookDisposable);
     context.subscriptions.push(mergeWorktreeDisposable);
     context.subscriptions.push(removeWorktreeDisposable);
     context.subscriptions.push(showAgentHUDDisposable);
@@ -2563,6 +2965,12 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(refreshReviewChangesDisposable);
     context.subscriptions.push(createReviewCheckpointDisposable);
     context.subscriptions.push(rollbackReviewCheckpointDisposable);
+    context.subscriptions.push(selectReviewTargetDisposable);
+    context.subscriptions.push(reviewWorktreeDisposable);
+    context.subscriptions.push(createPullRequestFromWorktreeDisposable);
+    context.subscriptions.push(manageIntegrationsDisposable);
+    context.subscriptions.push(showConflictRadarDisposable);
+    context.subscriptions.push(conflictRadar);
     context.subscriptions.push(
         quickFixDisposable,
         codeLensDisposable,

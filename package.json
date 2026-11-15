@@ -236,6 +236,41 @@
       {
         "command": "herdr-collie.dispatchContextTask",
         "title": "%command.dispatchContextTask%"
+      },
+      {
+        "command": "herdr-collie.selectReviewTarget",
+        "title": "%command.selectReviewTarget%",
+        "icon": "$(git-compare)"
+      },
+      {
+        "command": "herdr-collie.reviewWorktree",
+        "title": "%command.reviewWorktree%",
+        "icon": "$(preview)"
+      },
+      {
+        "command": "herdr-collie.createPullRequestFromWorktree",
+        "title": "%command.createPullRequestFromWorktree%",
+        "icon": "$(git-pull-request-create)"
+      },
+      {
+        "command": "herdr-collie.manageIntegrations",
+        "title": "%command.manageIntegrations%",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "herdr-collie.fixLastFailedCommand",
+        "title": "%command.fixLastFailedCommand%",
+        "icon": "$(wrench)"
+      },
+      {
+        "command": "herdr-collie.showConflictRadar",
+        "title": "%command.showConflictRadar%",
+        "icon": "$(warning)"
+      },
+      {
+        "command": "herdr-collie.launchSwarmPlaybook",
+        "title": "%command.launchSwarmPlaybook%",
+        "icon": "$(organization)"
       }
     ],
     "menus": {
@@ -360,6 +395,28 @@
         {
           "command": "herdr-collie.dispatchContextTask",
           "when": "editorTextFocus"
+        },
+        {
+          "command": "herdr-collie.selectReviewTarget"
+        },
+        {
+          "command": "herdr-collie.reviewWorktree"
+        },
+        {
+          "command": "herdr-collie.createPullRequestFromWorktree"
+        },
+        {
+          "command": "herdr-collie.manageIntegrations"
+        },
+        {
+          "command": "herdr-collie.fixLastFailedCommand"
+        },
+        {
+          "command": "herdr-collie.showConflictRadar"
+        },
+        {
+          "command": "herdr-collie.launchSwarmPlaybook",
+          "when": "gitOpenRepositoryCount > 0"
         }
       ],
       "editor/context": [
@@ -427,34 +484,59 @@
           "group": "navigation@2"
         },
         {
+          "command": "herdr-collie.launchSwarmPlaybook",
+          "when": "view == herdr-collie.workspaces && gitOpenRepositoryCount > 0",
+          "group": "1_actions@0"
+        },
+        {
+          "command": "herdr-collie.showConflictRadar",
+          "when": "view == herdr-collie.workspaces",
+          "group": "1_actions@1"
+        },
+        {
           "command": "herdr-collie.toggleAgentSort",
           "when": "view == herdr-collie.agents",
           "group": "navigation@0"
         },
         {
-          "command": "herdr-collie.toggleReviewViewMode",
+          "command": "herdr-collie.manageIntegrations",
+          "when": "view == herdr-collie.agents",
+          "group": "navigation@1"
+        },
+        {
+          "command": "herdr-collie.selectReviewTarget",
           "when": "view == herdr-collie.reviewChanges",
           "group": "navigation@0"
         },
         {
-          "command": "herdr-collie.createReviewCheckpoint",
+          "command": "herdr-collie.toggleReviewViewMode",
           "when": "view == herdr-collie.reviewChanges",
           "group": "navigation@1"
         },
         {
-          "command": "herdr-collie.rollbackReviewCheckpoint",
+          "command": "herdr-collie.createReviewCheckpoint",
           "when": "view == herdr-collie.reviewChanges",
           "group": "navigation@2"
         },
         {
-          "command": "herdr-collie.submitReview",
+          "command": "herdr-collie.rollbackReviewCheckpoint",
           "when": "view == herdr-collie.reviewChanges",
           "group": "navigation@3"
         },
         {
-          "command": "herdr-collie.refreshReviewChanges",
+          "command": "herdr-collie.submitReview",
           "when": "view == herdr-collie.reviewChanges",
           "group": "navigation@4"
+        },
+        {
+          "command": "herdr-collie.refreshReviewChanges",
+          "when": "view == herdr-collie.reviewChanges",
+          "group": "navigation@5"
+        },
+        {
+          "command": "herdr-collie.createPullRequestFromWorktree",
+          "when": "view == herdr-collie.reviewChanges",
+          "group": "1_actions@1"
         }
       ],
       "view/item/context": [
@@ -464,14 +546,24 @@
           "group": "inline@1"
         },
         {
-          "command": "herdr-collie.mergeWorktree",
+          "command": "herdr-collie.reviewWorktree",
+          "when": "view == herdr-collie.workspaces && viewItem == worktreeWorkspace",
+          "group": "inline@0"
+        },
+        {
+          "command": "herdr-collie.createPullRequestFromWorktree",
           "when": "view == herdr-collie.workspaces && viewItem == worktreeWorkspace",
           "group": "inline@1"
         },
         {
-          "command": "herdr-collie.removeWorktree",
+          "command": "herdr-collie.mergeWorktree",
           "when": "view == herdr-collie.workspaces && viewItem == worktreeWorkspace",
           "group": "inline@2"
+        },
+        {
+          "command": "herdr-collie.removeWorktree",
+          "when": "view == herdr-collie.workspaces && viewItem == worktreeWorkspace",
+          "group": "inline@3"
         },
         {
           "command": "herdr-collie.renameWorkspace",
@@ -536,6 +628,10 @@
         {
           "command": "herdr-collie.sendTerminalOutput",
           "group": "herdr@1"
+        },
+        {
+          "command": "herdr-collie.fixLastFailedCommand",
+          "group": "herdr@2"
         }
       ]
     },
@@ -649,6 +745,21 @@
           "type": "boolean",
           "default": true,
           "description": "%config.autoRestoreTerminal%"
+        },
+        "herdr-collie.terminal.failureAction": {
+          "type": "string",
+          "enum": [
+            "prompt",
+            "statusbar",
+            "off"
+          ],
+          "default": "prompt",
+          "description": "%config.terminal.failureAction%"
+        },
+        "herdr-collie.worktree.conflictRadar": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.worktree.conflictRadar%"
         }
       }
     },
@@ -707,6 +818,11 @@
         "command": "herdr-collie.submitReview",
         "key": "ctrl+alt+h r",
         "mac": "ctrl+alt+h r"
+      },
+      {
+        "command": "herdr-collie.fixLastFailedCommand",
+        "key": "ctrl+alt+h f",
+        "mac": "ctrl+alt+h f"
       }
     ]
   },

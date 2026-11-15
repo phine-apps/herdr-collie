@@ -6,6 +6,7 @@ import * as net from 'net';
 import * as path from 'path';
 import * as os from 'os';
 import { EventEmitter } from 'events';
+import { normalizeIntegrationTargetForSocket } from './parsers';
 
 export interface HerdrSnapshotWorkspace {
     workspace_id: string;
@@ -37,6 +38,57 @@ export interface HerdrSnapshotAgent {
     pane_id?: string;
     status?: string;
     agent_status?: string;
+}
+
+export interface HerdrIntegrationInfo {
+    target: string;
+    label: string;
+    command: string;
+    available: boolean;
+    state: 'not_installed' | 'current' | 'outdated' | string;
+}
+
+export interface HerdrAgentManifestInfo {
+    agent: string;
+    source: string;
+    source_kind: string;
+    active_version?: string | null;
+    warning?: string | null;
+}
+
+export interface HerdrWorktreeCreateParams {
+    workspaceId?: string;
+    cwd?: string;
+    branch?: string;
+    base?: string;
+    path?: string;
+    label?: string;
+    focus?: boolean;
+    trustRepository?: boolean;
+}
+
+export interface HerdrWorkspaceCreateParams {
+    cwd?: string;
+    label?: string;
+    focus?: boolean;
+    sourceWorkspaceId?: string;
+}
+
+export interface HerdrPaneSplitParams {
+    direction: 'right' | 'down';
+    targetPaneId?: string;
+    workspaceId?: string;
+    cwd?: string;
+    ratio?: number;
+    focus?: boolean;
+}
+
+export interface HerdrAgentStartParams {
+    name: string;
+    kind: string;
+    paneId: string;
+    args?: string[];
+    timeoutMs?: number;
 }
 
 export interface HerdrSessionSnapshot {
@@ -443,6 +495,112 @@ export class HerdrSocketClient extends EventEmitter {
             workspace_ids: workspaceIds,
             before_workspace_id: beforeWorkspaceId
         });
+    }
+
+    /**
+     * Lists Herdr built-in agent integrations and their installation state.
+     */
+    public async listIntegrations(): Promise<HerdrIntegrationInfo[]> {
+        const res = await this.request<{ integrations?: HerdrIntegrationInfo[] }>('integration.list', {});
+        return Array.isArray(res?.integrations) ? res.integrations : [];
+    }
+
+    /**
+     * Installs or updates a Herdr built-in agent integration.
+     */
+    public async installIntegration(target: string): Promise<any> {
+        const socketTarget = normalizeIntegrationTargetForSocket(target) || target;
+        return await this.request('integration.install', { target: socketTarget }, 15000);
+    }
+
+    /**
+     * Uninstalls a Herdr built-in agent integration.
+     */
+    public async uninstallIntegration(target: string): Promise<any> {
+        const socketTarget = normalizeIntegrationTargetForSocket(target) || target;
+        return await this.request('integration.uninstall', { target: socketTarget }, 15000);
+    }
+
+    /**
+     * Queries active agent manifests loaded by the Herdr server.
+     */
+    public async getAgentManifests(): Promise<HerdrAgentManifestInfo[]> {
+        const res = await this.request<{ manifests?: HerdrAgentManifestInfo[] }>('server.agent_manifests', {});
+        return Array.isArray(res?.manifests) ? res.manifests : [];
+    }
+
+    /**
+     * Starts a supported interactive agent inside an existing shell pane and waits until it is ready for input.
+     */
+    public async startAgent(params: HerdrAgentStartParams): Promise<any> {
+        const startupTimeoutMs = params.timeoutMs !== undefined
+            ? Math.min(300000, Math.max(3001, params.timeoutMs))
+            : 30000;
+        return await this.request(
+            'agent.start',
+            {
+                name: params.name,
+                kind: params.kind,
+                pane_id: params.paneId,
+                ...(params.args && params.args.length > 0 ? { args: params.args } : {}),
+                timeout_ms: startupTimeoutMs
+            },
+            startupTimeoutMs + 5000
+        );
+    }
+
+    /**
+     * Creates and opens a Git worktree-backed workspace via Herdr native worktree API.
+     */
+    public async createWorktree(params: HerdrWorktreeCreateParams): Promise<any> {
+        return await this.request(
+            'worktree.create',
+            {
+                ...(params.workspaceId ? { workspace_id: params.workspaceId } : {}),
+                ...(params.cwd ? { cwd: params.cwd } : {}),
+                ...(params.branch ? { branch: params.branch } : {}),
+                ...(params.base ? { base: params.base } : {}),
+                ...(params.path ? { path: params.path } : {}),
+                ...(params.label ? { label: params.label } : {}),
+                focus: Boolean(params.focus),
+                trust_repository: Boolean(params.trustRepository)
+            },
+            15000
+        );
+    }
+
+    /**
+     * Creates a new Herdr workspace in the active session.
+     */
+    public async createWorkspace(params: HerdrWorkspaceCreateParams): Promise<any> {
+        return await this.request(
+            'workspace.create',
+            {
+                ...(params.cwd ? { cwd: params.cwd } : {}),
+                ...(params.label ? { label: params.label } : {}),
+                ...(params.sourceWorkspaceId ? { source_workspace_id: params.sourceWorkspaceId } : {}),
+                focus: Boolean(params.focus)
+            },
+            15000
+        );
+    }
+
+    /**
+     * Splits an existing Herdr pane (`right` or `down`) and returns the newly created pane metadata.
+     */
+    public async splitPane(params: HerdrPaneSplitParams): Promise<any> {
+        return await this.request(
+            'pane.split',
+            {
+                direction: params.direction,
+                ...(params.targetPaneId ? { target_pane_id: params.targetPaneId } : {}),
+                ...(params.workspaceId ? { workspace_id: params.workspaceId } : {}),
+                ...(params.cwd ? { cwd: params.cwd } : {}),
+                ...(params.ratio !== undefined ? { ratio: params.ratio } : {}),
+                focus: Boolean(params.focus)
+            },
+            15000
+        );
     }
 
     public dispose(): void {
