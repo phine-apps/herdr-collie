@@ -40,6 +40,13 @@
   "command.fixTestWithAgent": "Herdr Collie: 使用智能体修复测试/生成边界用例",
   "command.completeTodoWithAgent": "Herdr Collie: 使用智能体实现 TODO",
   "command.dispatchContextTask": "Herdr Collie: 智能上下文即时委派给智能体",
+  "command.selectReviewTarget": "Herdr Collie: 选择审查目标 (Worktree / 当前工作区)",
+  "command.reviewWorktree": "Herdr Collie: 审查 Worktree 变更",
+  "command.createPullRequestFromWorktree": "Herdr Collie: 创建 Pull Request / 集成 Worktree",
+  "command.manageIntegrations": "Herdr Collie: 管理 Herdr 智能体集成 (Hooks)",
+  "command.fixLastFailedCommand": "Herdr Collie: 使用智能体修复最近失败的终端命令",
+  "command.showConflictRadar": "Herdr Collie: 并行 Worktree 文件冲突雷达",
+  "command.launchSwarmPlaybook": "Herdr Collie: 启动 Swarm 剧本 (Best-of-N / 实现+审查)",
   "viewsContainers.activitybar.title": "Herdr Collie",
   "view.sessions": "会话",
   "view.workspaces": "工作区",
@@ -57,5 +64,7 @@
   "config.reviewChanges.viewMode": "审查变更列表侧边栏的显示模式: 'tree' (紧凑文件夹层级视图) 或 'flat' (扁平文件列表)",
   "config.codeLens.enable": "在测试定义和 TODO 注释上方显示内联 CodeLens，以便触发智能体协助",
   "config.quickFix.enable": "在编译器/代码检查诊断的灯泡菜单中显示“委派 Herdr 智能体修复”快速修复操作",
-  "config.autoRestoreTerminal": "在 VS Code 重启后自动在恢复的终端中恢复并重新附加 Herdr"
+  "config.autoRestoreTerminal": "在 VS Code 重启后自动在恢复的终端中恢复并重新附加 Herdr",
+  "config.terminal.failureAction": "VS Code 终端命令以非零状态退出时的操作 (Shell Integration): 'prompt' (显示通知和状态栏 QuickFix)、'statusbar' (仅状态栏标记) 或 'off' (关闭)",
+  "config.worktree.conflictRadar": "自动扫描多个 Git Worktree 中的重叠文件编辑，并显示冲突雷达徽标与警告"
 }
