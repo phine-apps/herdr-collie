@@ -33,6 +33,9 @@ Stop context-switching between terminals or manually copying file paths. Superch
 ### 1. Smart Swarm & Git Worktree Isolation
 Parallelize AI agent tasks effortlessly without touching your active working directory or dealing with dirty working trees:
 - **One-Click Worktree Provisioning** (`Ctrl+Alt+H L`): Creates an isolated Git worktree on a new or existing branch, configures a dedicated Herdr workspace, launches the specified AI agent (`claude`, `agy`, `cursor-agent`, `copilot`, or custom CLI), and starts execution automatically.
+- **Automatic Worktree Bootstrap (`.env` & Setup Command)**: Automatically copies configured untracked files (such as `.env` and `.env.local` via `herdr-collie.worktree.copyFiles`) from the main repository into newly created worktrees and optionally runs `herdr-collie.worktree.postCreateCommand` (e.g., `pnpm install --prefer-offline`).
+- **GitHub Issue & PR CI Integration (`gh` CLI)**: Optionally select an open GitHub Issue when launching a worktree (`Create from GitHub Issue...`) to pre-fill the branch name and issue context, create PRs directly (`herdr-collie.createPullRequestFromWorktree`), or dispatch failing PR CI checks and workflow log tails (`Send Failing PR Checks to Agent`) back to the worktree agent.
+- **Worktree Comparison Scorecards**: Worktree selection menus (Review Target, PR creation, and Merge) surface live single-line scorecards (`N files (+X/-Y) • ✓ Clean merge • 0 LSP errors`) so you can compare parallel candidate worktrees at a glance.
 - **Open in New VS Code Window**: Open any Herdr workspace or worktree directory in a brand-new VS Code window with a single click (`$(link-external)`) or command (`herdr-collie.openWorkspaceInNewWindow`).
 - **Worktree Sidebar Integration**: Worktrees are automatically tagged with their branch name in the Workspaces view, featuring inline actions to open in a new window, merge (`$(git-merge)`), or safely delete (`$(trash)`).
 - **Pre-Merge Verification & Conflict Delegation**: Validates mergeability and uncommitted changes before merging. If merge blockers arise, delegate resolution directly to the worktree agent with a structured prompt.
@@ -170,6 +173,7 @@ Herdr Collie provides conflict-free 2-stroke chord shortcuts prefixed by `Ctrl +
   - Visual Studio Code 1.90.0 or higher
   - Herdr CLI available in your system `PATH`
   - Git CLI installed (for Git Worktree and SCM integration)
+  - GitHub CLI (`gh`, optional — enables creating worktrees from GitHub Issues, creating PRs, and sending failing PR checks to agents)
   - Agent integration installed via `herdr integration install <target>`
 
 - **Configuration Settings**:
@@ -179,6 +183,10 @@ Herdr Collie provides conflict-free 2-stroke chord shortcuts prefixed by `Ctrl +
     Default AI agent command used when launching agents in Git worktrees (`"claude"`, `"agy"`, `"cursor-agent"`, `"copilot"`, etc.).
   - `herdr-collie.worktreeLocation` (default: `"sibling"`):
     Directory layout for Git worktrees (`"sibling"` creates `../<repo>-<branch>`, `".worktrees"` creates inside repository).
+  - `herdr-collie.worktree.copyFiles` (default: `[".env", ".env.local", ".env.development.local", ".env.test.local"]`):
+    Relative file paths automatically copied from the main repository into newly created Git worktrees if present.
+  - `herdr-collie.worktree.postCreateCommand` (default: `""`):
+    Optional shell command executed inside a newly created Git worktree right after provisioning (e.g., `"pnpm install --prefer-offline"`).
   - `herdr-collie.agentSortOrder` (default: `"grouped"`):
     Default sort order in the Agents view (`"grouped"` or `"priority"`).
   - `herdr-collie.agentHUD.enableNotifications` (default: `true`):

@@ -258,6 +258,111 @@ describe('swarmPlaybooks Unit Tests', () => {
                 { paneId: 'w9:p2', agentName: 'review-feat-duo', cwd: plan.worktreePath }
             ]);
         });
+
+        it('invokes bootstrapWorktreeFn after worktree creation and surfaces non-fatal setup warnings', async () => {
+            const bootCalls: Array<{ repoRoot: string; wtPath: string }> = [];
+            const candidates = buildBestOfNPlan({
+                repoRoot: '/repos/demo',
+                baseBranch: 'main',
+                branchPrefix: 'swarm/boot',
+                existingBranches: [],
+                locationPref: 'sibling',
+                agents: [{ cmd: 'claude', agentKind: 'claude' }],
+                taskPrompt: 'Bootstrap test'
+            });
+
+            const bestOfNRes = await executeBestOfNPlaybook({
+                sessionName: 'vscode',
+                repoRoot: '/repos/demo',
+                baseBranch: 'main',
+                locationPref: 'sibling',
+                candidates,
+                bootstrapOptions: { copyFiles: ['.env'], postCreateCommand: 'pnpm install' },
+                deps: {
+                    createWorktreeFn: async () => {},
+                    bootstrapWorktreeFn: async (repoRoot, wtPath) => {
+                        bootCalls.push({ repoRoot, wtPath });
+                        return {
+                            copiedFiles: ['.env'],
+                            skippedFiles: [],
+                            postCreateRan: true,
+                            postCreateSucceeded: false,
+                            warnings: ['postCreateCommand failed: offline']
+                        };
+                    },
+                    createHerdrWorkspaceFn: async () => ({ workspaceId: 'w1', rootPaneId: 'w1:p1' }),
+                    startAgentInPaneFn: async () => ({ method: 'native', started: true, prompted: true })
+                }
+            });
+
+            expect(bootCalls).to.have.lengthOf(1);
+            expect(bootCalls[0].wtPath).to.equal(candidates[0].worktreePath);
+            expect(bestOfNRes.launched).to.have.lengthOf(1);
+            expect(bestOfNRes.warnings).to.deep.equal(['postCreateCommand failed: offline']);
+
+            const implPlan = buildImplementReviewPlan({
+                topology: 'new-worktree',
+                repoRoot: '/repos/demo',
+                branchName: 'feat/boot-duo',
+                baseBranch: 'main',
+                locationPref: 'sibling',
+                implementer: { cmd: 'claude', agentKind: 'claude' },
+                reviewer: { cmd: 'codex', agentKind: 'codex' },
+                taskPrompt: 'Bootstrap duo test'
+            });
+
+            const implRes = await executeImplementReviewPlaybook({
+                sessionName: 'vscode',
+                repoRoot: '/repos/demo',
+                locationPref: 'sibling',
+                plan: implPlan,
+                bootstrapOptions: { copyFiles: ['.env'], postCreateCommand: '' },
+                deps: {
+                    createWorktreeFn: async () => {},
+                    bootstrapWorktreeFn: async (repoRoot, wtPath) => {
+                        bootCalls.push({ repoRoot, wtPath });
+                        return {
+                            copiedFiles: ['.env'],
+                            skippedFiles: [],
+                            postCreateRan: false,
+                            postCreateSucceeded: true,
+                            warnings: []
+                        };
+                    },
+                    createHerdrWorkspaceFn: async () => ({ workspaceId: 'w2', rootPaneId: 'w2:p1' }),
+                    splitHerdrPaneFn: async () => 'w2:p2',
+                    startAgentInPaneFn: async () => ({ method: 'native', started: true, prompted: true })
+                }
+            });
+
+            expect(bootCalls).to.have.lengthOf(2);
+            expect(bootCalls[1].wtPath).to.equal(implPlan.worktreePath);
+            expect(implRes.launched).to.have.lengthOf(2);
+            expect(implRes.warnings).to.be.undefined;
+
+            const failWsRes = await executeImplementReviewPlaybook({
+                sessionName: 'vscode',
+                repoRoot: '/repos/demo',
+                locationPref: 'sibling',
+                plan: implPlan,
+                bootstrapOptions: { copyFiles: ['.env'], postCreateCommand: 'pnpm install' },
+                deps: {
+                    createWorktreeFn: async () => {},
+                    bootstrapWorktreeFn: async () => ({
+                        copiedFiles: [],
+                        skippedFiles: [],
+                        postCreateRan: true,
+                        postCreateSucceeded: false,
+                        warnings: ['postCreateCommand failed: offline']
+                    }),
+                    createHerdrWorkspaceFn: async () => {
+                        throw new Error('daemon unavailable');
+                    }
+                }
+            });
+            expect(failWsRes.failures).to.have.lengthOf(1);
+            expect(failWsRes.warnings).to.deep.equal(['postCreateCommand failed: offline']);
+        });
     });
 
     describe('createHerdrWorkspace & splitHerdrPane helpers', () => {

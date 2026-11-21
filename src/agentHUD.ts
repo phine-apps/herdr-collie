@@ -60,8 +60,12 @@ export function collectWorkspaceErrorsForAgent(agentCwd?: string): AutoVerifyDia
         const [uri, fileDiagnostics] = entry;
         if (fileDiagnostics.length === 0) continue;
 
+        const scheme = typeof uri === 'object' && uri !== null ? uri.scheme : undefined;
         const fsPath: string = typeof uri === 'string' ? uri : (uri.fsPath || uri.path || '');
-        if (hasAbsoluteCwd && fsPath && path.isAbsolute(fsPath)) {
+        if (hasAbsoluteCwd) {
+            if ((scheme && scheme !== 'file') || !fsPath || !path.isAbsolute(fsPath)) {
+                continue;
+            }
             const fileNorm = normalizePathForMatch(fsPath);
             if (fileNorm !== cwdNorm && !fileNorm.startsWith(cwdNorm + path.sep)) {
                 continue;

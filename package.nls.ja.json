@@ -66,5 +66,7 @@
   "config.quickFix.enable": "コンパイラ/リンターのエラー・警告の電球メニューに「Herdr エージェントに修正を依頼」クイックフィックスを表示する",
   "config.autoRestoreTerminal": "VS Code 再起動時に復元されたターミナル上で Herdr を自動的に再開・再アタッチする",
   "config.terminal.failureAction": "VS Code ターミナルのコマンドが非ゼロで終了した際の動作 (Shell Integration): 'prompt' (通知とステータスバーに QuickFix を表示)、'statusbar' (ステータスバー表示のみ)、または 'off' (無効)",
-  "config.worktree.conflictRadar": "複数の Git Worktree 間で重複編集されているファイルを自動スキャンし、Explorer バッジとステータスバー警告を表示する"
+  "config.worktree.conflictRadar": "複数の Git Worktree 間で重複編集されているファイルを自動スキャンし、Explorer バッジとステータスバー警告を表示する",
+  "config.worktree.copyFiles": "新しい Git Worktree を作成した際、メインリポジトリに存在すれば自動的にコピーする相対ファイルパス (例: '.env', '.env.local')",
+  "config.worktree.postCreateCommand": "新しい Git Worktree の作成直後にそのディレクトリ内で実行する任意のシェルコマンド (例: 'pnpm install --prefer-offline')"
 }

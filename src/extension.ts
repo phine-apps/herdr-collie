@@ -3,7 +3,7 @@ import * as l10n from '@vscode/l10n';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { execHerdr, runGitCmd, ensureSessionServerRunning, isProcessDescendantRunning } from './executors';
+import { execHerdr, runGitCmd, ensureSessionServerRunning, isProcessDescendantRunning, isCommandAvailable } from './executors';
 import {
     formatSelectionContext,
     formatFileDiagnostics,
@@ -17,7 +17,8 @@ import {
     findMatchingWorkspaceForCwd,
     isSameOrSubPath,
     sortAgents,
-    AgentSortOrder
+    AgentSortOrder,
+    formatFailingPrChecksPrompt
 } from './formatters';
 import { 
     parseWorkspaces, 
@@ -48,7 +49,11 @@ import {
     pushAndCreatePullRequestWithGh,
     manageIntegrationsWizard,
     getCurrentGitBranch,
-    openWorkspaceFolderInWindow
+    openWorkspaceFolderInWindow,
+    collectWorktreeScorecardMap,
+    formatWorktreeScorecardBadge,
+    WorktreeScorecard,
+    fetchFailingPrChecksWithLogs
 } from './worktreeManager';
 import { launchSwarmPlaybookWizard } from './swarmPlaybooks';
 import {
@@ -2148,16 +2153,21 @@ export function activate(context: vscode.ExtensionContext) {
         let branchToMerge = item?.branchName;
         if (!branchToMerge) {
             const worktrees = await listGitWorktrees(repoRoot);
-            const candidates = worktrees.filter(w => w.branch && w.worktree !== repoRoot);
+            const candidates = worktrees.filter(w => w.branch && !w.isMain && w.worktree !== repoRoot);
             if (candidates.length === 0) {
                 vscode.window.showInformationMessage(l10n.t('No active Git worktree branches found to merge.'));
                 return;
             }
-            const selected = await vscode.window.showQuickPick(candidates.map(c => ({
-                label: `$(git-branch) ${c.branch}`,
-                description: c.worktree,
-                branch: c.branch!
-            })), {
+            const scorecards = await loadWorktreeScorecards(repoRoot, candidates);
+            const selected = await vscode.window.showQuickPick(candidates.map(c => {
+                const card = scorecards.get(c.worktree);
+                return {
+                    label: `$(git-branch) ${c.branch}`,
+                    description: c.worktree,
+                    detail: card ? formatWorktreeScorecardBadge(card) : undefined,
+                    branch: c.branch!
+                };
+            }), {
                 title: l10n.t('Merge Branch'),
                 placeHolder: l10n.t('Select Git Worktree branch to merge into current branch ({0})', path.basename(repoRoot))
             });
@@ -2559,6 +2569,22 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+    const loadWorktreeScorecards = async (
+        repoRoot: string,
+        candidates: GitWorktreeInfo[]
+    ): Promise<Map<string, WorktreeScorecard>> => {
+        if (candidates.length === 0) {
+            return new Map();
+        }
+        return await vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Window,
+                title: l10n.t('Analyzing worktree candidates...')
+            },
+            async () => await collectWorktreeScorecardMap(repoRoot, candidates)
+        );
+    };
+
     const resolveMainRepoRoot = async (hintPath?: string): Promise<string | null> => {
         if (hintPath) {
             const fromHint = await getRepoRoot(hintPath).catch(() => null);
@@ -2580,7 +2606,7 @@ export function activate(context: vscode.ExtensionContext) {
             a => a.cwd && isSameOrSubPath(a.cwd, worktreePath)
         );
         const currentBranch = await getCurrentGitBranch(repoRoot).catch(() => undefined);
-        const mergeBase = await resolveWorktreeMergeBase(worktreePath, undefined, currentBranch);
+        const mergeBase = await resolveWorktreeMergeBase(worktreePath, currentBranch, branchName);
         const label = labelHint || branchName || path.basename(worktreePath);
         const target: ReviewTarget = {
             kind: 'worktree',
@@ -2612,6 +2638,7 @@ export function activate(context: vscode.ExtensionContext) {
         const linkedWorktrees = worktrees.filter(w => !w.isMain && w.worktree !== repoRoot);
         const currentAgents = agentProvider.getCurrentItems();
         const activeTarget = reviewChangesProvider.getReviewTarget();
+        const scorecards = await loadWorktreeScorecards(repoRoot, linkedWorktrees);
 
         type ReviewTargetPick = vscode.QuickPickItem & {
             targetKind: 'current' | 'worktree';
@@ -2633,11 +2660,14 @@ export function activate(context: vscode.ExtensionContext) {
                 const agentText = matchedAgent
                     ? l10n.t('Agent: {0}', typeof matchedAgent.label === 'string' ? matchedAgent.label : (matchedAgent.rawId || ''))
                     : undefined;
+                const card = scorecards.get(wt.worktree);
+                const badgeText = card ? formatWorktreeScorecardBadge(card) : undefined;
+                const detail = [badgeText, agentText].filter(Boolean).join(' | ') || undefined;
                 const isSelected = activeTarget?.kind === 'worktree' && activeTarget.worktreePath === wt.worktree;
                 return {
                     label: `$(git-branch) ${branchLabel}`,
                     description: isSelected ? `${l10n.t('(active)')} | ${wt.worktree}` : wt.worktree,
-                    detail: agentText,
+                    detail,
                     targetKind: 'worktree' as const,
                     worktreePath: wt.worktree,
                     branchName: wt.branch,
@@ -2707,13 +2737,18 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showInformationMessage(l10n.t('No active Git worktree branches found.'));
                 return;
             }
+            const scorecards = await loadWorktreeScorecards(repoRoot, candidates);
             const selectedWt = await vscode.window.showQuickPick(
-                candidates.map(c => ({
-                    label: `$(git-branch) ${c.branch}`,
-                    description: c.worktree,
-                    worktree: c.worktree,
-                    branch: c.branch!
-                })),
+                candidates.map(c => {
+                    const card = scorecards.get(c.worktree);
+                    return {
+                        label: `$(git-branch) ${c.branch}`,
+                        description: c.worktree,
+                        detail: card ? formatWorktreeScorecardBadge(card) : undefined,
+                        worktree: c.worktree,
+                        branch: c.branch!
+                    };
+                }),
                 {
                     title: l10n.t('Select Worktree Branch for PR'),
                     placeHolder: l10n.t('Select Worktree Branch for PR')
@@ -2725,7 +2760,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         const currentMainBranch = await getCurrentGitBranch(repoRoot).catch(() => 'main');
-        const mergeBase = await resolveWorktreeMergeBase(worktreePath, undefined, currentMainBranch);
+        const mergeBase = await resolveWorktreeMergeBase(worktreePath, currentMainBranch, branchName);
         const baseBranch = mergeBase.baseBranch || currentMainBranch || 'main';
 
         const actionPick = await vscode.window.showQuickPick([
@@ -2746,6 +2781,12 @@ export function activate(context: vscode.ExtensionContext) {
                 description: `${branchName} -> ${currentMainBranch}`,
                 detail: l10n.t('Merge {0} locally into the current branch', branchName),
                 action: 'merge' as const
+            },
+            {
+                label: `$(error) ${l10n.t('Send Failing PR Checks to Agent')}`,
+                description: `gh pr checks (${branchName})`,
+                detail: l10n.t('Fetch failing CI checks and logs for {0} and send to the worktree agent', branchName),
+                action: 'fix-checks' as const
             }
         ], {
             title: l10n.t('Create Pull Request / Integrate Worktree ({0})', branchName),
@@ -2753,6 +2794,47 @@ export function activate(context: vscode.ExtensionContext) {
         });
 
         if (!actionPick) return;
+
+        if (actionPick.action === 'fix-checks') {
+            if (!(await isCommandAvailable('gh'))) {
+                vscode.window.showWarningMessage(
+                    l10n.t('GitHub CLI (gh) is not installed or not in PATH.')
+                );
+                return;
+            }
+            const checkResult = await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: l10n.t('Checking failing PR checks for {0}...', branchName),
+                    cancellable: false
+                },
+                async () => await fetchFailingPrChecksWithLogs(worktreePath!, branchName!)
+            );
+
+            if (checkResult.prError) {
+                vscode.window.showWarningMessage(checkResult.prError);
+                return;
+            }
+            if (checkResult.checks.length === 0) {
+                vscode.window.showInformationMessage(l10n.t('No failing PR checks found for {0}.', branchName));
+                return;
+            }
+
+            const prompt = formatFailingPrChecksPrompt(branchName, checkResult.checks, checkResult.logSnippet);
+            const matchedAgent = agentProvider.getCurrentItems().find(
+                a => a.cwd && isSameOrSubPath(a.cwd, worktreePath!)
+            );
+            await sendToHerdr(
+                prompt,
+                l10n.t('Prompt sent to agent to fix {0} failing PR check(s) on {1}', checkResult.checks.length, branchName),
+                l10n.t('Select target agent to fix failing PR checks on {0}:', branchName),
+                {
+                    preferredCwd: worktreePath,
+                    preferredAgentId: matchedAgent?.rawId || (matchedAgent?.id ? matchedAgent.id.split(':')[0] : undefined)
+                }
+            );
+            return;
+        }
 
         if (actionPick.action === 'merge') {
             await vscode.commands.executeCommand(

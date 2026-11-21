@@ -2,6 +2,8 @@
  * Copyright (c) 2026 Herdr Collie Authors
  * Licensed under the MIT License.
  */
+import '../helpers/mockVscode'; // Must be first to install global mock
+import { resetMockState } from '../helpers/mockVscode';
 import { expect } from 'chai';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -17,7 +19,10 @@ import {
     mergeWorktreeBranch,
     verifyWorktreeMerge,
     resolveWorktreePath,
-    sanitizeBranchSlug
+    sanitizeBranchSlug,
+    bootstrapWorktreeEnvironment,
+    collectWorktreeScorecardMap,
+    formatWorktreeScorecardBadge
 } from '../../worktreeManager';
 
 describe('Smart Swarm & Git Worktree Integration Tests (W-01 ~ W-06, A-02, A-05)', function() {
@@ -27,6 +32,7 @@ describe('Smart Swarm & Git Worktree Integration Tests (W-01 ~ W-06, A-02, A-05)
     let mainRepoDir: string;
 
     beforeEach(async () => {
+        resetMockState();
         tempRootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collie-wt-int-'));
         mainRepoDir = path.join(tempRootDir, 'main-repo');
         fs.mkdirSync(mainRepoDir, { recursive: true });
@@ -229,6 +235,74 @@ describe('Smart Swarm & Git Worktree Integration Tests (W-01 ~ W-06, A-02, A-05)
             // Verify mainRepoDir working tree remained completely untouched by pre-verification
             const mainStatus = await runGitCmd(['status', '--porcelain'], mainRepoDir);
             expect(mainStatus.trim()).to.equal('');
+        });
+
+        it('bootstraps ignored .env files from main repository into newly created worktree', async () => {
+            fs.writeFileSync(path.join(mainRepoDir, '.gitignore'), '.env*\n', 'utf8');
+            await runGitCmd(['add', '.gitignore'], mainRepoDir);
+            await runGitCmd(['commit', '-m', 'chore: ignore env files'], mainRepoDir);
+
+            fs.writeFileSync(path.join(mainRepoDir, '.env'), 'API_KEY=local-dev\n', 'utf8');
+            fs.writeFileSync(path.join(mainRepoDir, '.env.local'), 'DEBUG=true\n', 'utf8');
+
+            const branchName = 'feature/bootstrap-env';
+            const worktreePath = resolveWorktreePath(mainRepoDir, branchName, 'sibling');
+            await createWorktree(mainRepoDir, branchName, worktreePath, 'main');
+
+            const bootRes = await bootstrapWorktreeEnvironment(mainRepoDir, worktreePath);
+            expect(bootRes.copiedFiles).to.deep.equal(['.env', '.env.local']);
+            expect(bootRes.warnings).to.be.empty;
+            expect(fs.readFileSync(path.join(worktreePath, '.env'), 'utf8')).to.equal('API_KEY=local-dev\n');
+            expect(fs.readFileSync(path.join(worktreePath, '.env.local'), 'utf8')).to.equal('DEBUG=true\n');
+
+            // Ignored files must not dirty git status in either repo or worktree
+            const wtStatus = await runGitCmd(['status', '--porcelain'], worktreePath);
+            expect(wtStatus.trim()).to.equal('');
+        });
+
+        it('collects comparison scorecards across parallel candidate worktrees (diff stats, conflicts, untracked)', async () => {
+            const cleanBranch = 'swarm/cand-clean';
+            const cleanWt = resolveWorktreePath(mainRepoDir, cleanBranch, 'sibling');
+            await createWorktree(mainRepoDir, cleanBranch, cleanWt, 'main');
+            fs.writeFileSync(path.join(cleanWt, 'feature.ts'), 'export const a = 1;\nexport const b = 2;\n', 'utf8');
+            await runGitCmd(['add', 'feature.ts'], cleanWt);
+            await runGitCmd(['commit', '-m', 'feat: add feature.ts'], cleanWt);
+
+            const conflictBranch = 'swarm/cand-conflict';
+            const conflictWt = resolveWorktreePath(mainRepoDir, conflictBranch, 'sibling');
+            await createWorktree(mainRepoDir, conflictBranch, conflictWt, 'main');
+            fs.writeFileSync(path.join(conflictWt, 'README.md'), '# Conflict candidate\n', 'utf8');
+            await runGitCmd(['add', 'README.md'], conflictWt);
+            await runGitCmd(['commit', '-m', 'feat: edit readme in conflictWt'], conflictWt);
+            fs.writeFileSync(path.join(conflictWt, 'draft.tmp'), 'pending\n', 'utf8');
+
+            fs.writeFileSync(path.join(mainRepoDir, 'README.md'), '# Main updated\n', 'utf8');
+            await runGitCmd(['add', 'README.md'], mainRepoDir);
+            await runGitCmd(['commit', '-m', 'fix: update readme in main'], mainRepoDir);
+
+            const scorecards = await collectWorktreeScorecardMap(mainRepoDir, [
+                { worktree: cleanWt, branch: cleanBranch },
+                { worktree: conflictWt, branch: conflictBranch }
+            ]);
+
+            const cleanCard = scorecards.get(cleanWt)!;
+            expect(cleanCard).to.not.be.undefined;
+            expect(cleanCard.filesChanged).to.equal(1);
+            expect(cleanCard.insertions).to.equal(2);
+            expect(cleanCard.deletions).to.equal(0);
+            expect(cleanCard.canMerge).to.be.true;
+            expect(cleanCard.hasConflicts).to.be.false;
+            expect(formatWorktreeScorecardBadge(cleanCard)).to.equal('1 file (+2/-0) • ✓ Clean merge • 0 LSP errors');
+
+            const conflictCard = scorecards.get(conflictWt)!;
+            expect(conflictCard).to.not.be.undefined;
+            expect(conflictCard.filesChanged).to.equal(2); // README.md + untracked draft.tmp
+            expect(conflictCard.untrackedFiles).to.equal(1);
+            expect(conflictCard.canMerge).to.be.false;
+            expect(conflictCard.hasConflicts).to.be.true;
+            expect(conflictCard.hasUncommittedChanges).to.be.true;
+            expect(formatWorktreeScorecardBadge(conflictCard)).to.include('2 files');
+            expect(formatWorktreeScorecardBadge(conflictCard)).to.include('conflict');
         });
     });
 });

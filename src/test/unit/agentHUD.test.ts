@@ -166,10 +166,12 @@ describe('AgentHUD & Status Classification Unit Tests', () => {
         it('scopes diagnostics to agent workspace CWD and excludes other worktrees', () => {
             const wtAUri = MockUri.file('/workspace/repo-wt-a/src/auth.ts');
             const wtBUri = MockUri.file('/workspace/repo-wt-b/src/billing.ts');
+            const untitledUri = { scheme: 'untitled', fsPath: 'Untitled-1', path: 'Untitled-1' };
 
             mockState.workspaceDiagnostics = [
                 [wtAUri, [new MockDiagnostic(new MockRange(4, 0, 4, 8), 'Type error in auth', MockDiagnosticSeverity.Error)]],
-                [wtBUri, [new MockDiagnostic(new MockRange(11, 0, 11, 8), 'Type error in billing', MockDiagnosticSeverity.Error)]]
+                [wtBUri, [new MockDiagnostic(new MockRange(11, 0, 11, 8), 'Type error in billing', MockDiagnosticSeverity.Error)]],
+                [untitledUri, [new MockDiagnostic(new MockRange(0, 0, 0, 5), 'Untitled error', MockDiagnosticSeverity.Error)]]
             ];
 
             const summaryA = collectWorkspaceErrorsForAgent('/workspace/repo-wt-a');
@@ -177,6 +179,7 @@ describe('AgentHUD & Status Classification Unit Tests', () => {
             expect(summaryA.fileCount).to.equal(1);
             expect(summaryA.problemsByFile).to.have.property('src/auth.ts');
             expect(summaryA.problemsByFile).to.not.have.property('src/billing.ts');
+            expect(summaryA.problemsByFile).to.not.have.property('Untitled-1');
         });
 
         it('formats auto-verify prompt with loop iteration header when attempt and maxRetries are provided', () => {

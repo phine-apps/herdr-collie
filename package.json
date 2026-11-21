@@ -760,6 +760,25 @@
           "type": "boolean",
           "default": true,
           "description": "%config.worktree.conflictRadar%"
+        },
+        "herdr-collie.worktree.copyFiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            ".env",
+            ".env.local",
+            ".env.development.local",
+            ".env.test.local"
+          ],
+          "description": "%config.worktree.copyFiles%"
+        },
+        "herdr-collie.worktree.postCreateCommand": {
+          "type": "string",
+          "default": "",
+          "restricted": true,
+          "description": "%config.worktree.postCreateCommand%"
         }
       }
     },

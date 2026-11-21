@@ -23,7 +23,9 @@ import {
     formatCodeFence,
     formatDurationCompact,
     findMatchingWorkspaceForCwd,
-    isSameOrSubPath
+    isSameOrSubPath,
+    formatGitHubIssueTaskPrompt,
+    formatFailingPrChecksPrompt
 } from '../../formatters';
 import { ParsedAgent, ParsedWorkspace, GitWorktreeInfo } from '../../parsers';
 
@@ -968,6 +970,72 @@ describe('formatters Unit Tests', () => {
 
             const matched = findMatchingWorkspaceForCwd(workspaces, '/tmp/repos/my-project', 'my-project');
             expect(matched?.id).to.equal('ws-empty');
+        });
+    });
+
+    describe('GitHub Issue & Failing PR Checks Prompt Formatters', () => {
+        it('formatGitHubIssueTaskPrompt formats issue metadata, escapes embedded code fences, and includes additional instructions', () => {
+            const prompt = formatGitHubIssueTaskPrompt(
+                {
+                    number: 42,
+                    title: 'Fix OAuth token refresh',
+                    url: 'https://github.com/org/repo/issues/42',
+                    labels: ['bug', 'auth'],
+                    body: 'Repro:\n```ts\nrefreshToken()\n```\nFails on 401.'
+                },
+                'Keep backward compatibility'
+            );
+
+            expect(prompt).to.include('## 🎯 GitHub Issue #42: Fix OAuth token refresh');
+            expect(prompt).to.include('https://github.com/org/repo/issues/42');
+            expect(prompt).to.include('bug, auth');
+            expect(prompt).to.include('````markdown');
+            expect(prompt).to.include('Keep backward compatibility');
+        });
+
+        it('formatFailingPrChecksPrompt escapes code fences and preserves tail of long CI logs', () => {
+            const longPrefix = 'ok line\n'.repeat(1000);
+            const tailError = 'FAIL src/auth.test.ts\n```text\nExpected 200 got 401\n```';
+            const prompt = formatFailingPrChecksPrompt(
+                'fix/oauth',
+                [
+                    {
+                        name: 'unit-tests',
+                        state: 'FAILURE',
+                        description: 'Vitest suite failed',
+                        link: 'https://github.com/org/repo/actions/runs/987654/job/1'
+                    }
+                ],
+                longPrefix + tailError
+            );
+
+            expect(prompt).to.include('## 🔴 Failing PR Checks (`fix/oauth`)');
+            expect(prompt).to.include('**unit-tests** [FAILURE]');
+            expect(prompt).to.include('[earlier logs truncated]');
+            expect(prompt).to.include('Expected 200 got 401');
+            expect(prompt).to.include('````text');
+        });
+
+        it('sanitizes inline markdown fields and strips ANSI sequences from CI logs', () => {
+            const issuePrompt = formatGitHubIssueTaskPrompt({
+                number: 77,
+                title: 'Fix\n### Injected Header `cmd`',
+                url: 'https://github.com/org/repo/issues/77\n## Evil',
+                labels: ['bug\n`evil`', 'security']
+            });
+            expect(issuePrompt).to.include("## 🎯 GitHub Issue #77: Fix ### Injected Header 'cmd'");
+            expect(issuePrompt).to.include('- URL: https://github.com/org/repo/issues/77 ## Evil');
+            expect(issuePrompt).to.include("- Labels: bug 'evil', security");
+
+            const prPrompt = formatFailingPrChecksPrompt(
+                'fix/`inject`\nbranch',
+                [{ name: 'test\n### bad `x`', state: 'FAILURE\n', link: 'https://ci.example/1\n##' }],
+                '\x1b[31mError:\x1b[0m test failed\x1b]0;title\x07'
+            );
+            expect(prPrompt).to.include("## 🔴 Failing PR Checks (`fix/'inject' branch`)");
+            expect(prPrompt).to.include("- **test ### bad 'x'** [FAILURE] (https://ci.example/1 ##)");
+            expect(prPrompt).to.include('Error: test failed');
+            expect(prPrompt).to.not.include('\x1b');
         });
     });
 });
