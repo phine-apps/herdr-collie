@@ -10,6 +10,7 @@ import { ParsedIntegrationInfo } from './parsers';
 import { HerdrSocketClient } from './socketClient';
 import {
     AgentOptionItem,
+    bootstrapWorktreeEnvironment,
     collectExistingAgentNames,
     createHerdrWorkspace,
     CreateHerdrWorkspaceOptions,
@@ -20,6 +21,7 @@ import {
     getCurrentGitBranch,
     getInstalledAgentOptions,
     getRepoRoot,
+    getWorktreeBootstrapOptions,
     listGitBranches,
     resolveWorktreePath,
     sanitizeAgentName,
@@ -29,7 +31,9 @@ import {
     startAgentInPane,
     StartAgentInPaneOptions,
     StartAgentInPaneResult,
-    validateBranchName
+    validateBranchName,
+    WorktreeBootstrapOptions,
+    WorktreeBootstrapResult
 } from './worktreeManager';
 
 let vscode: typeof vscodeTypes;
@@ -98,10 +102,12 @@ export interface PlaybookLaunchResult {
     failures: PlaybookAgentLaunchOutcome[];
     primaryWorkspaceId?: string;
     primaryWorktreePath?: string;
+    warnings?: string[];
 }
 
 export interface PlaybookExecutionDeps {
     createWorktreeFn?: (repoRoot: string, branchName: string, worktreePath: string, baseBranch?: string) => Promise<void>;
+    bootstrapWorktreeFn?: (repoRoot: string, worktreePath: string, options?: WorktreeBootstrapOptions) => Promise<WorktreeBootstrapResult>;
     createHerdrWorkspaceFn?: (options: CreateHerdrWorkspaceOptions) => Promise<CreateHerdrWorkspaceResult>;
     splitHerdrPaneFn?: (options: SplitHerdrPaneOptions) => Promise<string>;
     startAgentInPaneFn?: (options: StartAgentInPaneOptions) => Promise<StartAgentInPaneResult>;
@@ -471,6 +477,7 @@ export async function executeBestOfNPlaybook(options: {
     candidates: BestOfNCandidatePlan[];
     socketClient?: HerdrSocketClient;
     progress?: vscodeTypes.Progress<{ message?: string }>;
+    bootstrapOptions?: WorktreeBootstrapOptions;
     deps?: PlaybookExecutionDeps;
 }): Promise<PlaybookLaunchResult> {
     const {
@@ -481,17 +488,25 @@ export async function executeBestOfNPlaybook(options: {
         candidates,
         socketClient,
         progress,
+        bootstrapOptions,
         deps = {}
     } = options;
 
     const createWt = deps.createWorktreeFn || createWorktree;
+    const bootstrapWt = deps.bootstrapWorktreeFn || bootstrapWorktreeEnvironment;
     const createWs = deps.createHerdrWorkspaceFn || createHerdrWorkspace;
     const startAgent = deps.startAgentInPaneFn || startAgentInPane;
+    const resolvedBootstrapOpts = bootstrapOptions ?? getWorktreeBootstrapOptions();
+    const shouldBootstrap =
+        Boolean(deps.bootstrapWorktreeFn) ||
+        Boolean(resolvedBootstrapOpts.copyFiles && resolvedBootstrapOpts.copyFiles.length > 0) ||
+        Boolean(resolvedBootstrapOpts.postCreateCommand && resolvedBootstrapOpts.postCreateCommand.trim());
 
     ensureWorktreesDirIfNeeded(repoRoot, locationPref);
 
     const launched: PlaybookAgentLaunchOutcome[] = [];
     const failures: PlaybookAgentLaunchOutcome[] = [];
+    const warnings: string[] = [];
     let fallbackWorkspaceId: string | undefined;
     let fallbackWorktreePath: string | undefined;
 
@@ -502,6 +517,13 @@ export async function executeBestOfNPlaybook(options: {
 
         try {
             await createWt(repoRoot, cand.branchName, cand.worktreePath, baseBranch);
+            if (shouldBootstrap) {
+                progress?.report({ message: l10n.t('Bootstrapping worktree environment...') });
+                const bootRes = await bootstrapWt(repoRoot, cand.worktreePath, resolvedBootstrapOpts);
+                if (bootRes.warnings.length > 0) {
+                    warnings.push(...bootRes.warnings);
+                }
+            }
             const ws = await createWs({
                 sessionName,
                 cwd: cand.worktreePath,
@@ -566,7 +588,8 @@ export async function executeBestOfNPlaybook(options: {
         launched,
         failures,
         primaryWorkspaceId: launched[0]?.workspaceId || fallbackWorkspaceId,
-        primaryWorktreePath: launched[0]?.worktreePath || fallbackWorktreePath
+        primaryWorktreePath: launched[0]?.worktreePath || fallbackWorktreePath,
+        ...(warnings.length > 0 ? { warnings } : {})
     };
 }
 
@@ -580,6 +603,7 @@ export async function executeImplementReviewPlaybook(options: {
     plan: ImplementReviewPlan;
     socketClient?: HerdrSocketClient;
     progress?: vscodeTypes.Progress<{ message?: string }>;
+    bootstrapOptions?: WorktreeBootstrapOptions;
     deps?: PlaybookExecutionDeps;
 }): Promise<PlaybookLaunchResult> {
     const {
@@ -589,16 +613,24 @@ export async function executeImplementReviewPlaybook(options: {
         plan,
         socketClient,
         progress,
+        bootstrapOptions,
         deps = {}
     } = options;
 
     const createWt = deps.createWorktreeFn || createWorktree;
+    const bootstrapWt = deps.bootstrapWorktreeFn || bootstrapWorktreeEnvironment;
     const createWs = deps.createHerdrWorkspaceFn || createHerdrWorkspace;
     const splitPane = deps.splitHerdrPaneFn || splitHerdrPane;
     const startAgent = deps.startAgentInPaneFn || startAgentInPane;
+    const resolvedBootstrapOpts = bootstrapOptions ?? getWorktreeBootstrapOptions();
+    const shouldBootstrap =
+        Boolean(deps.bootstrapWorktreeFn) ||
+        Boolean(resolvedBootstrapOpts.copyFiles && resolvedBootstrapOpts.copyFiles.length > 0) ||
+        Boolean(resolvedBootstrapOpts.postCreateCommand && resolvedBootstrapOpts.postCreateCommand.trim());
 
     const launched: PlaybookAgentLaunchOutcome[] = [];
     const failures: PlaybookAgentLaunchOutcome[] = [];
+    const warnings: string[] = [];
 
     let ws: CreateHerdrWorkspaceResult;
     try {
@@ -606,6 +638,13 @@ export async function executeImplementReviewPlaybook(options: {
             ensureWorktreesDirIfNeeded(repoRoot, locationPref);
             progress?.report({ message: l10n.t('Creating Git Worktree...') });
             await createWt(repoRoot, plan.branchName, plan.worktreePath, plan.baseBranch);
+            if (shouldBootstrap) {
+                progress?.report({ message: l10n.t('Bootstrapping worktree environment...') });
+                const bootRes = await bootstrapWt(repoRoot, plan.worktreePath, resolvedBootstrapOpts);
+                if (bootRes.warnings.length > 0) {
+                    warnings.push(...bootRes.warnings);
+                }
+            }
         }
 
         progress?.report({ message: l10n.t('Creating Herdr Workspace & Split Panes...') });
@@ -631,7 +670,8 @@ export async function executeImplementReviewPlaybook(options: {
                     error: err?.message || String(err)
                 }
             ],
-            primaryWorktreePath: plan.worktreePath
+            primaryWorktreePath: plan.worktreePath,
+            ...(warnings.length > 0 ? { warnings } : {})
         };
     }
 
@@ -651,7 +691,8 @@ export async function executeImplementReviewPlaybook(options: {
             launched: [],
             failures: [errOutcome],
             primaryWorkspaceId: ws.workspaceId,
-            primaryWorktreePath: plan.worktreePath
+            primaryWorktreePath: plan.worktreePath,
+            ...(warnings.length > 0 ? { warnings } : {})
         };
     }
 
@@ -733,7 +774,8 @@ export async function executeImplementReviewPlaybook(options: {
         launched,
         failures,
         primaryWorkspaceId: ws.workspaceId,
-        primaryWorktreePath: plan.worktreePath
+        primaryWorktreePath: plan.worktreePath,
+        ...(warnings.length > 0 ? { warnings } : {})
     };
 }
 
@@ -1006,6 +1048,12 @@ async function runBestOfNWizard(
 
     onSuccess?.();
 
+    if (result.warnings && result.warnings.length > 0) {
+        vscode.window.showWarningMessage(
+            l10n.t('Worktree created with setup warnings: {0}', Array.from(new Set(result.warnings)).join('; '))
+        );
+    }
+
     if (result.failures.length > 0 && result.launched.length === 0) {
         vscode.window.showErrorMessage(
             l10n.t('Best-of-{0} playbook failed to launch: {1}', plan.length, result.failures[0].error || 'Unknown error')
@@ -1155,6 +1203,12 @@ async function runImplementReviewWizard(
     );
 
     onSuccess?.();
+
+    if (result.warnings && result.warnings.length > 0) {
+        vscode.window.showWarningMessage(
+            l10n.t('Worktree created with setup warnings: {0}', Array.from(new Set(result.warnings)).join('; '))
+        );
+    }
 
     if (result.failures.length > 0 && result.launched.length === 0) {
         vscode.window.showErrorMessage(

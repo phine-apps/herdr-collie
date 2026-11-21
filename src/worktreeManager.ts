@@ -7,7 +7,7 @@ import * as l10n from '@vscode/l10n';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as cp from 'child_process';
-import { runGitCmd, execHerdr, isCommandAvailable } from './executors';
+import { execHerdr, isCommandAvailable, runGitCmd } from './executors';
 import {
     parseGitWorktrees,
     GitWorktreeInfo,
@@ -22,7 +22,15 @@ import {
     mapAgentCmdToIntegrationTarget
 } from './parsers';
 import { HerdrSocketClient } from './socketClient';
-import { formatCodeFence } from './formatters';
+import {
+    FailingPrCheckSummary,
+    formatCodeFence,
+    formatGitHubIssueTaskPrompt,
+    GitHubIssueSummary,
+    stripTerminalControlSequences
+} from './formatters';
+
+export type { FailingPrCheckSummary, GitHubIssueSummary };
 
 let vscode: typeof vscodeTypes;
 try {
@@ -348,6 +356,247 @@ export async function createWorktree(
     await runGitCmd(args, repoRoot);
 }
 
+export const DEFAULT_WORKTREE_COPY_FILES: string[] = [
+    '.env',
+    '.env.local',
+    '.env.development.local',
+    '.env.test.local'
+];
+
+export interface WorktreeBootstrapOptions {
+    copyFiles?: string[];
+    postCreateCommand?: string;
+    timeoutMs?: number;
+}
+
+export interface WorktreeBootstrapResult {
+    copiedFiles: string[];
+    skippedFiles: string[];
+    postCreateRan: boolean;
+    postCreateSucceeded: boolean;
+    warnings: string[];
+}
+
+/**
+ * Reads worktree bootstrap settings (`worktree.copyFiles` and `worktree.postCreateCommand`) from VS Code configuration.
+ */
+export function getWorktreeBootstrapOptions(): WorktreeBootstrapOptions {
+    const config = vscode?.workspace?.getConfiguration
+        ? vscode.workspace.getConfiguration('herdr-collie')
+        : undefined;
+    const configuredCopyFiles = config?.get<unknown>('worktree.copyFiles');
+    const copyFiles = Array.isArray(configuredCopyFiles)
+        ? configuredCopyFiles.filter((f): f is string => typeof f === 'string')
+        : [...DEFAULT_WORKTREE_COPY_FILES];
+    const rawCmd = config?.get<string>('worktree.postCreateCommand', '');
+    const postCreateCommand = typeof rawCmd === 'string' ? rawCmd.trim() : '';
+    return { copyFiles, postCreateCommand };
+}
+
+function isPathInsideRoot(rootDir: string, candidatePath: string): boolean {
+    const rel = path.relative(rootDir, candidatePath);
+    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+function safeRealpathOrResolve(targetPath: string): string {
+    const resolved = path.resolve(targetPath);
+    try {
+        return fs.realpathSync(resolved);
+    } catch {
+        return resolved;
+    }
+}
+
+/**
+ * Bootstraps a newly created Git worktree by copying configured untracked files (e.g. `.env*`)
+ * from `repoRoot` and optionally running `postCreateCommand` in `worktreePath`.
+ * Failures are captured as non-fatal warnings so agent provisioning can proceed.
+ */
+export async function bootstrapWorktreeEnvironment(
+    repoRoot: string,
+    worktreePath: string,
+    options?: WorktreeBootstrapOptions
+): Promise<WorktreeBootstrapResult> {
+    const copiedFiles: string[] = [];
+    const skippedFiles: string[] = [];
+    const warnings: string[] = [];
+
+    const copyFiles = options?.copyFiles ?? DEFAULT_WORKTREE_COPY_FILES;
+    const realRepoRoot = safeRealpathOrResolve(repoRoot);
+    const realWorktreeRoot = safeRealpathOrResolve(worktreePath);
+    const seen = new Set<string>();
+
+    for (const rawEntry of copyFiles) {
+        if (typeof rawEntry !== 'string') continue;
+        const trimmed = rawEntry.trim();
+        if (!trimmed) continue;
+
+        if (
+            trimmed.includes('\0') ||
+            path.isAbsolute(trimmed) ||
+            /^[a-zA-Z]:/.test(trimmed) ||
+            /^[\\/]/.test(trimmed)
+        ) {
+            skippedFiles.push(trimmed);
+            warnings.push(l10n.t('Skipped unsafe path: {0}', trimmed));
+            continue;
+        }
+
+        const normalizedRel = path.normalize(trimmed).replace(/\\/g, '/').replace(/^\.\//, '');
+        if (!normalizedRel || normalizedRel === '.' || normalizedRel === '..' || normalizedRel.startsWith('../')) {
+            skippedFiles.push(trimmed);
+            warnings.push(l10n.t('Skipped unsafe path: {0}', trimmed));
+            continue;
+        }
+
+        if (seen.has(normalizedRel)) {
+            continue;
+        }
+        seen.add(normalizedRel);
+
+        const srcCandidate = path.resolve(realRepoRoot, normalizedRel);
+        if (!isPathInsideRoot(realRepoRoot, srcCandidate)) {
+            skippedFiles.push(normalizedRel);
+            warnings.push(l10n.t('Skipped unsafe path: {0}', trimmed));
+            continue;
+        }
+
+        if (!fs.existsSync(srcCandidate)) {
+            skippedFiles.push(normalizedRel);
+            continue;
+        }
+
+        let realSrc: string;
+        try {
+            realSrc = fs.realpathSync(srcCandidate);
+            if (!isPathInsideRoot(realRepoRoot, realSrc)) {
+                skippedFiles.push(normalizedRel);
+                warnings.push(l10n.t('Skipped unsafe path: {0}', trimmed));
+                continue;
+            }
+            const stat = fs.statSync(realSrc);
+            if (!stat.isFile()) {
+                skippedFiles.push(normalizedRel);
+                continue;
+            }
+        } catch (err: any) {
+            skippedFiles.push(normalizedRel);
+            warnings.push(l10n.t('Failed to copy {0}: {1}', normalizedRel, err?.message || String(err)));
+            continue;
+        }
+
+        const destCandidate = path.resolve(realWorktreeRoot, normalizedRel);
+        if (!isPathInsideRoot(realWorktreeRoot, destCandidate)) {
+            skippedFiles.push(normalizedRel);
+            warnings.push(l10n.t('Skipped unsafe path: {0}', trimmed));
+            continue;
+        }
+
+        let destLstat: fs.Stats | undefined;
+        try {
+            destLstat = fs.lstatSync(destCandidate);
+        } catch {
+            destLstat = undefined;
+        }
+        if (destLstat) {
+            skippedFiles.push(normalizedRel);
+            if (destLstat.isSymbolicLink()) {
+                warnings.push(l10n.t('Skipped unsafe path: {0}', trimmed));
+            }
+            continue;
+        }
+
+        const destDir = path.dirname(destCandidate);
+        let probeDir = destDir;
+        while (!fs.existsSync(probeDir)) {
+            const parent = path.dirname(probeDir);
+            if (parent === probeDir) break;
+            probeDir = parent;
+        }
+        const realProbeDir = safeRealpathOrResolve(probeDir);
+        if (realProbeDir !== realWorktreeRoot && !isPathInsideRoot(realWorktreeRoot, realProbeDir)) {
+            skippedFiles.push(normalizedRel);
+            warnings.push(l10n.t('Skipped unsafe path: {0}', trimmed));
+            continue;
+        }
+
+        try {
+            fs.mkdirSync(destDir, { recursive: true });
+            const realDestDir = safeRealpathOrResolve(destDir);
+            if (realDestDir !== realWorktreeRoot && !isPathInsideRoot(realWorktreeRoot, realDestDir)) {
+                skippedFiles.push(normalizedRel);
+                warnings.push(l10n.t('Skipped unsafe path: {0}', trimmed));
+                continue;
+            }
+            fs.copyFileSync(realSrc, destCandidate);
+            copiedFiles.push(normalizedRel);
+        } catch (err: any) {
+            skippedFiles.push(normalizedRel);
+            warnings.push(l10n.t('Failed to copy {0}: {1}', normalizedRel, err?.message || String(err)));
+        }
+    }
+
+    const postCreateCmd = (options?.postCreateCommand || '').trim();
+    if (!postCreateCmd) {
+        return {
+            copiedFiles,
+            skippedFiles,
+            postCreateRan: false,
+            postCreateSucceeded: true,
+            warnings
+        };
+    }
+
+    if (vscode?.workspace && vscode.workspace.isTrusted === false) {
+        warnings.push(l10n.t('Skipped postCreateCommand because the workspace is not trusted.'));
+        return {
+            copiedFiles,
+            skippedFiles,
+            postCreateRan: false,
+            postCreateSucceeded: false,
+            warnings
+        };
+    }
+
+    const timeoutMs = options?.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : 60000;
+    const env = Object.assign({}, process.env);
+    delete env['HERDR_WORKSPACE'];
+    delete env['HERDR_PANE_ID'];
+    delete env['HERDR_PANE'];
+    delete env['HERDR_AGENT'];
+    delete env['HERDR_SESSION'];
+
+    const isWin = process.platform === 'win32';
+    const shellBin = isWin ? (process.env.ComSpec || 'cmd.exe') : '/bin/sh';
+    const shellArgs = isWin ? ['/d', '/s', '/c', postCreateCmd] : ['-c', postCreateCmd];
+
+    const postCreateSucceeded = await new Promise<boolean>((resolve) => {
+        cp.execFile(
+            shellBin,
+            shellArgs,
+            { cwd: worktreePath, env, timeout: timeoutMs, maxBuffer: 5 * 1024 * 1024 },
+            (error: any, stdout: string, stderr: string) => {
+                if (error) {
+                    const rawDetail = (stderr && stderr.trim()) || (stdout && stdout.trim()) || error.message || String(error);
+                    const compact = rawDetail.replace(/[\r\n]+/g, ' ').trim().slice(0, 240);
+                    warnings.push(l10n.t('postCreateCommand failed: {0}', compact));
+                    resolve(false);
+                    return;
+                }
+                resolve(true);
+            }
+        );
+    });
+
+    return {
+        copiedFiles,
+        skippedFiles,
+        postCreateRan: true,
+        postCreateSucceeded,
+        warnings
+    };
+}
+
 /**
  * Removes a git worktree
  */
@@ -477,6 +726,219 @@ export async function verifyWorktreeMerge(
         targetBranch,
         errorDetails
     };
+}
+
+export interface GitDiffShortStat {
+    filesChanged: number;
+    insertions: number;
+    deletions: number;
+}
+
+export interface WorktreeScorecard {
+    branchName: string;
+    worktreePath: string;
+    baseBranch: string;
+    filesChanged: number;
+    insertions: number;
+    deletions: number;
+    untrackedFiles: number;
+    canMerge: boolean;
+    hasConflicts: boolean;
+    conflictingFilesCount: number;
+    hasUncommittedChanges: boolean;
+    uncommittedFilesCount: number;
+    lspErrorCount: number;
+}
+
+/**
+ * Parses `git diff --shortstat` output into file count, insertions, and deletions.
+ */
+export function parseGitDiffShortStat(output: string): GitDiffShortStat {
+    if (!output || !output.trim()) {
+        return { filesChanged: 0, insertions: 0, deletions: 0 };
+    }
+    const filesMatch = output.match(/(\d+)\s+files?\s+changed/i);
+    const insMatch = output.match(/(\d+)\s+insertions?\(\+\)/i);
+    const delMatch = output.match(/(\d+)\s+deletions?\(-\)/i);
+    return {
+        filesChanged: filesMatch ? parseInt(filesMatch[1], 10) : 0,
+        insertions: insMatch ? parseInt(insMatch[1], 10) : 0,
+        deletions: delMatch ? parseInt(delMatch[1], 10) : 0
+    };
+}
+
+async function resolveWorktreeMergeBaseSafe(
+    worktreePath: string,
+    baseBranchHint?: string,
+    branchName?: string
+): Promise<{ baseRef: string; baseLabel: string; baseBranch?: string }> {
+    if (vscode) {
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const mod = require('./reviewManager');
+            if (mod && typeof mod.resolveWorktreeMergeBase === 'function') {
+                return await mod.resolveWorktreeMergeBase(worktreePath, baseBranchHint, branchName);
+            }
+        } catch {
+            // Fall through to lightweight git fallback
+        }
+    }
+
+    const candidates = [baseBranchHint, 'main', 'master', 'origin/main', 'origin/master', 'develop']
+        .filter((c): c is string => Boolean(c && c !== branchName));
+    for (const candidate of candidates) {
+        try {
+            const exists = (await runGitCmd(['rev-parse', '--verify', '--quiet', candidate], worktreePath)).trim();
+            if (!exists) continue;
+            const mergeBase = (await runGitCmd(['merge-base', candidate, 'HEAD'], worktreePath)).trim();
+            if (mergeBase) {
+                return { baseRef: mergeBase, baseLabel: candidate, baseBranch: candidate };
+            }
+        } catch {
+            // Try next candidate
+        }
+    }
+    return { baseRef: 'HEAD', baseLabel: 'HEAD', baseBranch: baseBranchHint };
+}
+
+function collectWorkspaceErrorsSafe(worktreePath: string): { totalErrors: number } {
+    if (!vscode) {
+        return { totalErrors: 0 };
+    }
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const mod = require('./agentHUD');
+        if (mod && typeof mod.collectWorkspaceErrorsForAgent === 'function') {
+            return mod.collectWorkspaceErrorsForAgent(worktreePath);
+        }
+    } catch {
+        // Ignore when agentHUD/vscode is unavailable
+    }
+    return { totalErrors: 0 };
+}
+
+/**
+ * Collects a comparison scorecard for a candidate Git worktree:
+ * diff scale against merge-base, merge readiness/conflicts, and VS Code LSP error count.
+ */
+export async function collectWorktreeScorecard(
+    repoRoot: string,
+    worktreePath: string,
+    branchName: string,
+    baseBranchHint?: string
+): Promise<WorktreeScorecard> {
+    const worktreeExists = fs.existsSync(worktreePath);
+    const [mergeBase, verification] = await Promise.all([
+        worktreeExists
+            ? resolveWorktreeMergeBaseSafe(worktreePath, baseBranchHint, branchName).catch(() => ({
+                baseRef: 'HEAD',
+                baseLabel: 'HEAD',
+                baseBranch: baseBranchHint
+            }))
+            : Promise.resolve({ baseRef: 'HEAD', baseLabel: 'HEAD', baseBranch: baseBranchHint }),
+        verifyWorktreeMerge(repoRoot, branchName, worktreePath).catch(() => ({
+            canMerge: false,
+            hasUncommittedWorktreeChanges: false,
+            uncommittedFiles: [] as string[],
+            hasConflicts: false,
+            conflictingFiles: [] as string[],
+            targetBranch: baseBranchHint || 'main'
+        }))
+    ]);
+
+    const [shortStatOut, untrackedOut] = worktreeExists
+        ? await Promise.all([
+            runGitCmd(['diff', '--shortstat', mergeBase.baseRef], worktreePath).catch(() => ''),
+            runGitCmd(['ls-files', '--others', '--exclude-standard'], worktreePath).catch(() => '')
+        ])
+        : ['', ''];
+
+    const stat = parseGitDiffShortStat(shortStatOut);
+    const untrackedFiles = untrackedOut.split(/\r?\n/).filter(Boolean).length;
+    const lspSummary = collectWorkspaceErrorsSafe(worktreePath);
+
+    return {
+        branchName,
+        worktreePath,
+        baseBranch: mergeBase.baseBranch || verification.targetBranch || 'HEAD',
+        filesChanged: stat.filesChanged + untrackedFiles,
+        insertions: stat.insertions,
+        deletions: stat.deletions,
+        untrackedFiles,
+        canMerge: worktreeExists && verification.canMerge,
+        hasConflicts: verification.hasConflicts,
+        conflictingFilesCount: verification.conflictingFiles.length,
+        hasUncommittedChanges: verification.hasUncommittedWorktreeChanges,
+        uncommittedFilesCount: verification.uncommittedFiles.length,
+        lspErrorCount: lspSummary.totalErrors
+    };
+}
+
+/**
+ * Collects scorecards for multiple worktree candidates in parallel, keyed by `worktreePath`.
+ */
+export async function collectWorktreeScorecardMap(
+    repoRoot: string,
+    candidates: Array<{ worktree: string; branch?: string }>
+): Promise<Map<string, WorktreeScorecard>> {
+    const result = new Map<string, WorktreeScorecard>();
+    if (!candidates || candidates.length === 0) {
+        return result;
+    }
+
+    const baseBranchHint = await getCurrentGitBranch(repoRoot).catch(() => undefined);
+    const entries = await Promise.all(
+        candidates
+            .filter(c => Boolean(c.worktree && c.branch))
+            .map(async (c) => {
+                try {
+                    const card = await collectWorktreeScorecard(repoRoot, c.worktree, c.branch!, baseBranchHint);
+                    return [c.worktree, card] as const;
+                } catch {
+                    return null;
+                }
+            })
+    );
+
+    for (const entry of entries) {
+        if (entry) {
+            result.set(entry[0], entry[1]);
+        }
+    }
+    return result;
+}
+
+/**
+ * Formats a concise single-line scorecard badge for QuickPick comparison UIs.
+ */
+export function formatWorktreeScorecardBadge(scorecard: WorktreeScorecard): string {
+    let diffSegment: string;
+    if (scorecard.filesChanged === 0 && scorecard.insertions === 0 && scorecard.deletions === 0) {
+        diffSegment = l10n.t('No changes');
+    } else if (scorecard.filesChanged === 1) {
+        diffSegment = l10n.t('1 file (+{0}/-{1})', scorecard.insertions, scorecard.deletions);
+    } else {
+        diffSegment = l10n.t('{0} files (+{1}/-{2})', scorecard.filesChanged, scorecard.insertions, scorecard.deletions);
+    }
+
+    let mergeSegment: string;
+    if (scorecard.hasConflicts) {
+        mergeSegment = scorecard.conflictingFilesCount > 0
+            ? l10n.t('⚠️ {0} conflicts', scorecard.conflictingFilesCount)
+            : l10n.t('⚠️ Merge conflict');
+    } else if (scorecard.hasUncommittedChanges) {
+        mergeSegment = l10n.t('⚠️ {0} uncommitted', scorecard.uncommittedFilesCount);
+    } else if (!scorecard.canMerge) {
+        mergeSegment = l10n.t('⚠️ Cannot merge');
+    } else {
+        mergeSegment = l10n.t('✓ Clean merge');
+    }
+
+    const lspSegment = scorecard.lspErrorCount > 0
+        ? l10n.t('🔴 {0} LSP errors', scorecard.lspErrorCount)
+        : l10n.t('0 LSP errors');
+
+    return `${diffSegment} • ${mergeSegment} • ${lspSegment}`;
 }
 
 /**
@@ -1149,6 +1611,203 @@ export async function pushAndCreatePullRequestWithGh(
 }
 
 /**
+ * Parses `gh issue list --json number,title,body,labels,url` output safely.
+ */
+export function parseGitHubIssuesJson(rawJson: string): GitHubIssueSummary[] {
+    if (!rawJson || !rawJson.trim()) {
+        return [];
+    }
+    try {
+        const parsed = JSON.parse(rawJson);
+        if (!Array.isArray(parsed)) {
+            return [];
+        }
+        const issues: GitHubIssueSummary[] = [];
+        for (const item of parsed) {
+            if (!item || typeof item.number !== 'number' || typeof item.title !== 'string') {
+                continue;
+            }
+            const labels = Array.isArray(item.labels)
+                ? item.labels
+                    .map((l: any) => (typeof l === 'string' ? l : (l && typeof l.name === 'string' ? l.name : '')))
+                    .filter(Boolean)
+                : [];
+            issues.push({
+                number: item.number,
+                title: item.title,
+                body: typeof item.body === 'string' ? item.body : undefined,
+                url: typeof item.url === 'string' ? item.url : undefined,
+                labels
+            });
+        }
+        return issues;
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * Suggests a valid, concise Git branch name from a GitHub issue (e.g. `issue-42-fix-oauth`).
+ */
+export function suggestBranchNameFromIssue(issue: Pick<GitHubIssueSummary, 'number' | 'title'>): string {
+    const asciiSlug = (issue.title || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 40)
+        .replace(/-+$/g, '');
+    const candidate = asciiSlug ? `issue-${issue.number}-${asciiSlug}` : `issue-${issue.number}`;
+    return validateBranchName(candidate) === null ? candidate : `issue-${issue.number}`;
+}
+
+/**
+ * Fetches open GitHub issues via `gh issue list` without shell interpolation.
+ * Returns an empty list if `gh` is unavailable, unauthenticated, or the repo has no GitHub remote.
+ */
+export async function fetchOpenGitHubIssues(repoRoot: string, limit: number = 25): Promise<GitHubIssueSummary[]> {
+    const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+    return await new Promise<GitHubIssueSummary[]>((resolve) => {
+        cp.execFile(
+            'gh',
+            ['issue', 'list', '--state', 'open', '--limit', String(safeLimit), '--json', 'number,title,body,labels,url'],
+            { cwd: repoRoot, timeout: 8000, maxBuffer: 5 * 1024 * 1024 },
+            (error: any, stdout: string) => {
+                if (error || !stdout) {
+                    resolve([]);
+                    return;
+                }
+                resolve(parseGitHubIssuesJson(stdout));
+            }
+        );
+    });
+}
+
+const FAILING_PR_CHECK_STATES = /^(fail|failure|error|timed_out|action_required|startup_failure|cancelled)$/i;
+
+/**
+ * Parses `gh pr checks --json name,state,link,description` output and filters failing checks.
+ */
+export function parseFailingPrChecksJson(rawJson: string): FailingPrCheckSummary[] {
+    if (!rawJson || !rawJson.trim()) {
+        return [];
+    }
+    try {
+        const parsed = JSON.parse(rawJson);
+        if (!Array.isArray(parsed)) {
+            return [];
+        }
+        const failing: FailingPrCheckSummary[] = [];
+        for (const item of parsed) {
+            if (!item || typeof item.name !== 'string') {
+                continue;
+            }
+            const state = typeof item.state === 'string' ? item.state : '';
+            const bucket = typeof item.bucket === 'string' ? item.bucket : '';
+            if (!FAILING_PR_CHECK_STATES.test(state.trim()) && bucket.toLowerCase() !== 'fail') {
+                continue;
+            }
+            failing.push({
+                name: item.name,
+                state: state || 'FAIL',
+                link: typeof item.link === 'string' ? item.link : undefined,
+                description: typeof item.description === 'string' ? item.description : undefined
+            });
+        }
+        return failing;
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * Extracts a numeric GitHub Actions workflow run ID from a check link URL if present.
+ */
+export function extractGitHubRunIdFromUrl(link?: string): string | null {
+    if (!link) return null;
+    const match = link.match(/\/actions\/runs\/(\d+)/i);
+    return match && /^\d+$/.test(match[1]) ? match[1] : null;
+}
+
+/**
+ * Fetches failing Pull Request CI checks (and failed workflow log tail when available) via `gh`.
+ */
+export async function fetchFailingPrChecksWithLogs(
+    worktreePath: string,
+    branchName: string
+): Promise<{ checks: FailingPrCheckSummary[]; logSnippet?: string; prError?: string }> {
+    const branchErr = validateBranchName(branchName);
+    if (branchErr) {
+        return { checks: [], prError: branchErr };
+    }
+
+    const runPrChecks = (jsonFields: string): Promise<{ checks: FailingPrCheckSummary[]; prError?: string; unknownField?: boolean }> =>
+        new Promise((resolve) => {
+            cp.execFile(
+                'gh',
+                ['pr', 'checks', branchName, '--json', jsonFields],
+                { cwd: worktreePath, timeout: 8000, maxBuffer: 5 * 1024 * 1024 },
+                (error: any, stdout: string, stderr: string) => {
+                    // `gh pr checks` may exit non-zero when checks are failing even if JSON stdout is valid
+                    if (stdout && stdout.trim().startsWith('[')) {
+                        resolve({ checks: parseFailingPrChecksJson(stdout) });
+                        return;
+                    }
+                    if (error) {
+                        const msg = (stderr && stderr.trim()) || (stdout && stdout.trim()) || error.message || 'gh pr checks failed';
+                        resolve({
+                            checks: [],
+                            prError: msg,
+                            unknownField: /unknown\s+json\s+field/i.test(msg)
+                        });
+                        return;
+                    }
+                    resolve({ checks: parseFailingPrChecksJson(stdout || '') });
+                }
+            );
+        });
+
+    let checksResult = await runPrChecks('name,state,bucket,link,description');
+    if (checksResult.unknownField) {
+        checksResult = await runPrChecks('name,state,link,description');
+    }
+
+    if (checksResult.prError || checksResult.checks.length === 0) {
+        return { checks: checksResult.checks, ...(checksResult.prError ? { prError: checksResult.prError } : {}) };
+    }
+
+    const firstRunId = checksResult.checks
+        .map(c => extractGitHubRunIdFromUrl(c.link))
+        .find((id): id is string => Boolean(id));
+
+    if (!firstRunId) {
+        return { checks: checksResult.checks };
+    }
+
+    const logSnippet = await new Promise<string | undefined>((resolve) => {
+        cp.execFile(
+            'gh',
+            ['run', 'view', firstRunId, '--log-failed'],
+            { cwd: worktreePath, timeout: 8000, maxBuffer: 5 * 1024 * 1024 },
+            (error: any, stdout: string) => {
+                if (error || !stdout || !stdout.trim()) {
+                    resolve(undefined);
+                    return;
+                }
+                const cleaned = stripTerminalControlSequences(stdout);
+                if (!cleaned) {
+                    resolve(undefined);
+                    return;
+                }
+                resolve(cleaned.length > 6000 ? cleaned.slice(cleaned.length - 6000) : cleaned);
+            }
+        );
+    });
+
+    return { checks: checksResult.checks, logSnippet };
+}
+
+/**
  * Full interactive wizard for launching an AI agent inside an isolated Git Worktree
  */
 export async function launchWorktreeAgentWizard(
@@ -1162,18 +1821,82 @@ export async function launchWorktreeAgentWizard(
         return;
     }
 
-    const currentCwd = workspaceFolders[0].uri.fsPath;
-    const repoRoot = await getRepoRoot(currentCwd);
+    const activeDocPath = vscode.window.activeTextEditor?.document?.uri?.fsPath;
+    let repoRoot: string | null = activeDocPath ? await getRepoRoot(path.dirname(activeDocPath)) : null;
+    if (!repoRoot) {
+        for (const folder of workspaceFolders) {
+            repoRoot = await getRepoRoot(folder.uri.fsPath);
+            if (repoRoot) break;
+        }
+    }
     if (!repoRoot) {
         vscode.window.showErrorMessage(l10n.t('The current workspace is not a Git repository.'));
         return;
     }
 
-    // 1. Branch name input
+    // 1. Optional GitHub Issue source selection + Branch name input
+    let selectedIssue: GitHubIssueSummary | undefined;
+    let suggestedBranch = '';
+    const ghAvailable = await isCommandAvailable('gh');
+
+    if (ghAvailable) {
+        const sourcePick = await vscode.window.showQuickPick(
+            [
+                {
+                    label: `$(git-branch) ${l10n.t('Enter Branch Name Manually')}`,
+                    detail: l10n.t('Type a new or existing Git branch name'),
+                    source: 'manual' as const
+                },
+                {
+                    label: `$(issues) ${l10n.t('Create from GitHub Issue...')}`,
+                    detail: l10n.t('Fetch open issues via GitHub CLI (gh) and pre-fill task context'),
+                    source: 'issue' as const
+                }
+            ],
+            {
+                title: l10n.t('Herdr Swarm: Worktree Source'),
+                placeHolder: l10n.t('Choose how to name and initialize the new worktree')
+            }
+        );
+        if (!sourcePick) return;
+
+        if (sourcePick.source === 'issue') {
+            const issues = await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Window,
+                    title: l10n.t('Fetching open GitHub issues...')
+                },
+                async () => await fetchOpenGitHubIssues(repoRoot)
+            );
+            if (issues.length === 0) {
+                vscode.window.showInformationMessage(
+                    l10n.t('No open GitHub issues found (or gh is not authenticated). Entering branch name manually.')
+                );
+            } else {
+                const pickedIssue = await vscode.window.showQuickPick(
+                    issues.map(issue => ({
+                        label: `#${issue.number} ${issue.title}`,
+                        description: issue.labels && issue.labels.length > 0 ? issue.labels.join(', ') : undefined,
+                        detail: issue.body ? issue.body.replace(/[\r\n]+/g, ' ').trim().slice(0, 120) : issue.url,
+                        issue
+                    })),
+                    {
+                        title: l10n.t('Herdr Swarm: Select GitHub Issue'),
+                        placeHolder: l10n.t('Choose an open issue to pre-fill branch name and agent prompt')
+                    }
+                );
+                if (!pickedIssue) return;
+                selectedIssue = pickedIssue.issue;
+                suggestedBranch = suggestBranchNameFromIssue(selectedIssue);
+            }
+        }
+    }
+
     const branchName = await vscode.window.showInputBox({
         title: l10n.t('Herdr Swarm: Branch Name'),
         prompt: l10n.t('Enter a branch name for the new agent worktree'),
         placeHolder: l10n.t('e.g. feat/user-auth, fix/issue-42'),
+        value: suggestedBranch,
         validateInput: validateBranchName
     });
 
@@ -1233,11 +1956,22 @@ export async function launchWorktreeAgentWizard(
     }
 
     // 4. Initial Task / Prompt input
-    const prompt = await vscode.window.showInputBox({
-        title: l10n.t('Herdr Swarm: Initial Task Prompt (Optional)'),
-        prompt: l10n.t('Enter initial instructions or task description for the agent'),
-        placeHolder: l10n.t('e.g. Implement OAuth2 Google login flow and write unit tests')
-    });
+    let prompt: string | undefined;
+    if (selectedIssue) {
+        const extraInstruction = await vscode.window.showInputBox({
+            title: l10n.t('Herdr Swarm: Initial Task Prompt (Optional)'),
+            prompt: l10n.t('Additional instructions for Issue #{0} (Optional)', selectedIssue.number),
+            placeHolder: l10n.t('e.g. Focus on backward compatibility and add regression tests')
+        });
+        if (extraInstruction === undefined) return;
+        prompt = formatGitHubIssueTaskPrompt(selectedIssue, extraInstruction.trim() || undefined);
+    } else {
+        prompt = await vscode.window.showInputBox({
+            title: l10n.t('Herdr Swarm: Initial Task Prompt (Optional)'),
+            prompt: l10n.t('Enter initial instructions or task description for the agent'),
+            placeHolder: l10n.t('e.g. Implement OAuth2 Google login flow and write unit tests')
+        });
+    }
 
     // 5. Worktree Location resolution
     const locationPref = config.get<'sibling' | '.worktrees'>('worktreeLocation', 'sibling');
@@ -1263,6 +1997,17 @@ export async function launchWorktreeAgentWizard(
         } catch (err: any) {
             vscode.window.showErrorMessage(l10n.t('Failed to create Git Worktree: {0}', err.message || err));
             return;
+        }
+
+        const bootstrapOpts = getWorktreeBootstrapOptions();
+        if ((bootstrapOpts.copyFiles && bootstrapOpts.copyFiles.length > 0) || bootstrapOpts.postCreateCommand) {
+            progress.report({ message: l10n.t('Bootstrapping worktree environment...') });
+            const bootRes = await bootstrapWorktreeEnvironment(repoRoot, worktreePath, bootstrapOpts);
+            if (bootRes.warnings.length > 0) {
+                vscode.window.showWarningMessage(
+                    l10n.t('Worktree created with setup warnings: {0}', bootRes.warnings.join('; '))
+                );
+            }
         }
 
         progress.report({ message: l10n.t('Creating Herdr Workspace...') });

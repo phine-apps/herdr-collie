@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 import '../helpers/mockVscode';
-import { mockState, resetMockState } from '../helpers/mockVscode';
+import { mockState, mockVscode, resetMockState } from '../helpers/mockVscode';
 import { expect } from 'chai';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -22,7 +22,19 @@ import {
     formatCreatePullRequestPrompt,
     openWorkspaceFolderInWindow,
     sanitizeAgentName,
-    startAgentInPane
+    startAgentInPane,
+    DEFAULT_WORKTREE_COPY_FILES,
+    getWorktreeBootstrapOptions,
+    bootstrapWorktreeEnvironment,
+    parseGitDiffShortStat,
+    formatWorktreeScorecardBadge,
+    WorktreeScorecard,
+    parseGitHubIssuesJson,
+    suggestBranchNameFromIssue,
+    fetchOpenGitHubIssues,
+    parseFailingPrChecksJson,
+    extractGitHubRunIdFromUrl,
+    fetchFailingPrChecksWithLogs
 } from '../../worktreeManager';
 
 describe('worktreeManager Unit Tests', () => {
@@ -353,6 +365,341 @@ describe('worktreeManager Unit Tests', () => {
             expect(prompt).to.include('`main`');
             expect(prompt).to.include('gh pr create --base');
             expect(prompt).to.include('Mark as draft PR');
+        });
+    });
+
+    describe('Worktree Bootstrap (copyFiles & postCreateCommand)', () => {
+        let tempRoot: string;
+        let repoRoot: string;
+        let worktreePath: string;
+
+        beforeEach(() => {
+            tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'collie-boot-'));
+            repoRoot = path.join(tempRoot, 'repo');
+            worktreePath = path.join(tempRoot, 'repo-wt');
+            fs.mkdirSync(repoRoot, { recursive: true });
+            fs.mkdirSync(worktreePath, { recursive: true });
+        });
+
+        afterEach(() => {
+            fs.rmSync(tempRoot, { recursive: true, force: true });
+        });
+
+        it('getWorktreeBootstrapOptions returns defaults and honors custom configuration', () => {
+            const defaults = getWorktreeBootstrapOptions();
+            expect(defaults.copyFiles).to.deep.equal(DEFAULT_WORKTREE_COPY_FILES);
+            expect(defaults.postCreateCommand).to.equal('');
+
+            mockState.configurations.set('herdr-collie.worktree.copyFiles', ['.env', 'apps/web/.env.local']);
+            mockState.configurations.set('herdr-collie.worktree.postCreateCommand', '  pnpm install --prefer-offline  ');
+
+            const custom = getWorktreeBootstrapOptions();
+            expect(custom.copyFiles).to.deep.equal(['.env', 'apps/web/.env.local']);
+            expect(custom.postCreateCommand).to.equal('pnpm install --prefer-offline');
+        });
+
+        it('copies configured untracked files including nested paths without overwriting existing files', async () => {
+            fs.writeFileSync(path.join(repoRoot, '.env'), 'SECRET=from-main\n', 'utf8');
+            fs.mkdirSync(path.join(repoRoot, 'apps', 'web'), { recursive: true });
+            fs.writeFileSync(path.join(repoRoot, 'apps', 'web', '.env.local'), 'PORT=3000\n', 'utf8');
+            fs.writeFileSync(path.join(worktreePath, '.env.local'), 'EXISTING=keep\n', 'utf8');
+            fs.writeFileSync(path.join(repoRoot, '.env.local'), 'NEW=skip-me\n', 'utf8');
+
+            const res = await bootstrapWorktreeEnvironment(repoRoot, worktreePath, {
+                copyFiles: ['.env', '.env.local', 'apps/web/.env.local', '.env.missing']
+            });
+
+            expect(res.copiedFiles).to.deep.equal(['.env', 'apps/web/.env.local']);
+            expect(res.skippedFiles).to.include.members(['.env.local', '.env.missing']);
+            expect(res.warnings).to.be.empty;
+            expect(res.postCreateRan).to.be.false;
+            expect(res.postCreateSucceeded).to.be.true;
+            expect(fs.readFileSync(path.join(worktreePath, '.env'), 'utf8')).to.equal('SECRET=from-main\n');
+            expect(fs.readFileSync(path.join(worktreePath, 'apps', 'web', '.env.local'), 'utf8')).to.equal('PORT=3000\n');
+            expect(fs.readFileSync(path.join(worktreePath, '.env.local'), 'utf8')).to.equal('EXISTING=keep\n');
+        });
+
+        it('rejects path traversal, absolute paths, and symlinks escaping repoRoot', async () => {
+            const outsideSecret = path.join(tempRoot, 'outside-secret.env');
+            fs.writeFileSync(outsideSecret, 'TOP_SECRET=1\n', 'utf8');
+            const symlinkPath = path.join(repoRoot, '.env.link');
+            fs.symlinkSync(outsideSecret, symlinkPath);
+
+            const res = await bootstrapWorktreeEnvironment(repoRoot, worktreePath, {
+                copyFiles: ['../outside-secret.env', outsideSecret, '.env.link']
+            });
+
+            expect(res.copiedFiles).to.be.empty;
+            expect(res.warnings).to.have.lengthOf(3);
+            expect(fs.existsSync(path.join(worktreePath, '.env.link'))).to.be.false;
+            expect(fs.existsSync(path.join(worktreePath, 'outside-secret.env'))).to.be.false;
+        });
+
+        it('rejects destination directory symlinks and dangling symlinks inside worktreePath', async () => {
+            fs.writeFileSync(path.join(repoRoot, '.env'), 'SECRET=1\n', 'utf8');
+            fs.mkdirSync(path.join(repoRoot, 'apps', 'web'), { recursive: true });
+            fs.writeFileSync(path.join(repoRoot, 'apps', 'web', '.env.local'), 'PORT=3000\n', 'utf8');
+
+            const outsideDir = path.join(tempRoot, 'outside-dir');
+            fs.mkdirSync(outsideDir, { recursive: true });
+            fs.symlinkSync(outsideDir, path.join(worktreePath, 'apps'));
+
+            const outsideTarget = path.join(tempRoot, 'does-not-exist-yet.env');
+            fs.symlinkSync(outsideTarget, path.join(worktreePath, '.env'));
+
+            const res = await bootstrapWorktreeEnvironment(repoRoot, worktreePath, {
+                copyFiles: ['.env', 'apps/web/.env.local']
+            });
+
+            expect(res.copiedFiles).to.be.empty;
+            expect(res.warnings).to.have.lengthOf(2);
+            expect(fs.existsSync(outsideTarget)).to.be.false;
+            expect(fs.existsSync(path.join(outsideDir, 'web', '.env.local'))).to.be.false;
+        });
+
+        it('skips postCreateCommand with a warning when workspace is not trusted', async () => {
+            let execCalled = false;
+            (cp as any).execFile = (_file: string, _args: string[], _opts: any, cb: any) => {
+                execCalled = true;
+                cb(null, '', '');
+                return {} as any;
+            };
+            mockVscode.workspace.isTrusted = false;
+
+            const res = await bootstrapWorktreeEnvironment(repoRoot, worktreePath, {
+                copyFiles: [],
+                postCreateCommand: 'echo pwned'
+            });
+
+            expect(execCalled).to.be.false;
+            expect(res.postCreateRan).to.be.false;
+            expect(res.postCreateSucceeded).to.be.false;
+            expect(res.warnings).to.deep.equal(['Skipped postCreateCommand because the workspace is not trusted.']);
+        });
+
+        it('runs postCreateCommand in worktreePath with clean HERDR_* env and handles failures non-fatally', async () => {
+            const origWorkspace = process.env['HERDR_WORKSPACE'];
+            process.env['HERDR_WORKSPACE'] = 'nested-ws';
+
+            let capturedCwd: string | undefined;
+            let capturedEnv: any;
+            (cp as any).execFile = (_file: string, _args: string[], opts: any, cb: any) => {
+                capturedCwd = opts?.cwd;
+                capturedEnv = opts?.env;
+                cb(null, 'ok', '');
+                return {} as any;
+            };
+
+            try {
+                const okRes = await bootstrapWorktreeEnvironment(repoRoot, worktreePath, {
+                    copyFiles: [],
+                    postCreateCommand: 'pnpm install --prefer-offline'
+                });
+                expect(okRes.postCreateRan).to.be.true;
+                expect(okRes.postCreateSucceeded).to.be.true;
+                expect(okRes.warnings).to.be.empty;
+                expect(capturedCwd).to.equal(worktreePath);
+                expect(capturedEnv).to.not.have.property('HERDR_WORKSPACE');
+
+                (cp as any).execFile = (_file: string, _args: string[], _opts: any, cb: any) => {
+                    cb(new Error('exit code 1'), '', 'ERR_PNPM_LOCKFILE');
+                    return {} as any;
+                };
+
+                const failRes = await bootstrapWorktreeEnvironment(repoRoot, worktreePath, {
+                    copyFiles: [],
+                    postCreateCommand: 'pnpm install'
+                });
+                expect(failRes.postCreateRan).to.be.true;
+                expect(failRes.postCreateSucceeded).to.be.false;
+                expect(failRes.warnings).to.have.lengthOf(1);
+                expect(failRes.warnings[0]).to.include('ERR_PNPM_LOCKFILE');
+            } finally {
+                if (origWorkspace !== undefined) {
+                    process.env['HERDR_WORKSPACE'] = origWorkspace;
+                } else {
+                    delete process.env['HERDR_WORKSPACE'];
+                }
+            }
+        });
+    });
+
+    describe('Worktree Comparison Scorecard (parseGitDiffShortStat & formatWorktreeScorecardBadge)', () => {
+        it('parses git diff --shortstat variants accurately', () => {
+            expect(parseGitDiffShortStat('')).to.deep.equal({ filesChanged: 0, insertions: 0, deletions: 0 });
+            expect(parseGitDiffShortStat(' 1 file changed, 12 insertions(+)\n')).to.deep.equal({
+                filesChanged: 1,
+                insertions: 12,
+                deletions: 0
+            });
+            expect(parseGitDiffShortStat(' 2 files changed, 7 deletions(-)\n')).to.deep.equal({
+                filesChanged: 2,
+                insertions: 0,
+                deletions: 7
+            });
+            expect(parseGitDiffShortStat(' 5 files changed, 48 insertions(+), 13 deletions(-)\n')).to.deep.equal({
+                filesChanged: 5,
+                insertions: 48,
+                deletions: 13
+            });
+        });
+
+        it('formats concise scorecard badges across clean, uncommitted, conflicting, and LSP error states', () => {
+            const baseCard: WorktreeScorecard = {
+                branchName: 'swarm/best-1',
+                worktreePath: '/repos/demo-swarm-best-1',
+                baseBranch: 'main',
+                filesChanged: 3,
+                insertions: 48,
+                deletions: 12,
+                untrackedFiles: 0,
+                canMerge: true,
+                hasConflicts: false,
+                conflictingFilesCount: 0,
+                hasUncommittedChanges: false,
+                uncommittedFilesCount: 0,
+                lspErrorCount: 0
+            };
+
+            expect(formatWorktreeScorecardBadge(baseCard)).to.equal('3 files (+48/-12) • ✓ Clean merge • 0 LSP errors');
+
+            expect(
+                formatWorktreeScorecardBadge({
+                    ...baseCard,
+                    filesChanged: 0,
+                    insertions: 0,
+                    deletions: 0,
+                    canMerge: false,
+                    hasUncommittedChanges: true,
+                    uncommittedFilesCount: 2,
+                    lspErrorCount: 3
+                })
+            ).to.equal('No changes • ⚠️ 2 uncommitted • 🔴 3 LSP errors');
+
+            expect(
+                formatWorktreeScorecardBadge({
+                    ...baseCard,
+                    canMerge: false,
+                    hasConflicts: true,
+                    conflictingFilesCount: 2
+                })
+            ).to.equal('3 files (+48/-12) • ⚠️ 2 conflicts • 0 LSP errors');
+
+            expect(
+                formatWorktreeScorecardBadge({
+                    ...baseCard,
+                    canMerge: false,
+                    hasConflicts: true,
+                    conflictingFilesCount: 0
+                })
+            ).to.equal('3 files (+48/-12) • ⚠️ Merge conflict • 0 LSP errors');
+
+            expect(
+                formatWorktreeScorecardBadge({
+                    ...baseCard,
+                    filesChanged: 1,
+                    insertions: 5,
+                    deletions: 1,
+                    canMerge: false
+                })
+            ).to.equal('1 file (+5/-1) • ⚠️ Cannot merge • 0 LSP errors');
+        });
+    });
+
+    describe('GitHub CLI (gh) Issue & Failing PR Check Helpers', () => {
+        it('parseGitHubIssuesJson and suggestBranchNameFromIssue handle valid, non-ASCII, and malformed inputs', () => {
+            const raw = JSON.stringify([
+                {
+                    number: 101,
+                    title: 'Fix OAuth2 callback & token refresh!',
+                    body: 'Details',
+                    url: 'https://github.com/org/repo/issues/101',
+                    labels: [{ name: 'bug' }, { name: 'high-priority' }]
+                },
+                {
+                    number: 102,
+                    title: 'ログイン画面のレイアウト修正',
+                    labels: []
+                }
+            ]);
+
+            const parsed = parseGitHubIssuesJson(raw);
+            expect(parsed).to.have.lengthOf(2);
+            expect(parsed[0].labels).to.deep.equal(['bug', 'high-priority']);
+            expect(suggestBranchNameFromIssue(parsed[0])).to.equal('issue-101-fix-oauth2-callback-token-refresh');
+            expect(validateBranchName(suggestBranchNameFromIssue(parsed[0]))).to.be.null;
+            expect(suggestBranchNameFromIssue(parsed[1])).to.equal('issue-102');
+            expect(validateBranchName(suggestBranchNameFromIssue(parsed[1]))).to.be.null;
+
+            expect(parseGitHubIssuesJson('not-json')).to.deep.equal([]);
+        });
+
+        it('fetchOpenGitHubIssues invokes gh with discrete args and falls back to empty array on failure', async () => {
+            let capturedArgs: string[] = [];
+            (cp as any).execFile = (file: string, args: string[], _opts: any, cb: any) => {
+                expect(file).to.equal('gh');
+                capturedArgs = args;
+                cb(null, JSON.stringify([{ number: 7, title: 'Add dark mode', labels: [] }]), '');
+                return {} as any;
+            };
+
+            const issues = await fetchOpenGitHubIssues('/repos/demo', 15);
+            expect(capturedArgs).to.include.members(['issue', 'list', '--state', 'open', '--limit', '15']);
+            expect(issues).to.have.lengthOf(1);
+            expect(issues[0].number).to.equal(7);
+
+            (cp as any).execFile = (_file: string, _args: string[], _opts: any, cb: any) => {
+                cb(new Error('gh not authenticated'), '', 'not logged in');
+                return {} as any;
+            };
+            expect(await fetchOpenGitHubIssues('/repos/demo')).to.deep.equal([]);
+        });
+
+        it('parseFailingPrChecksJson, extractGitHubRunIdFromUrl, and fetchFailingPrChecksWithLogs extract failing CI checks and log tail', async () => {
+            const rawChecks = JSON.stringify([
+                { name: 'lint', state: 'SUCCESS', link: 'https://github.com/org/repo/actions/runs/111/job/1' },
+                { name: 'test', state: 'FAILURE', description: '2 tests failed', link: 'https://github.com/org/repo/actions/runs/222333/job/9' },
+                { name: 'build', state: 'PENDING', bucket: 'fail', link: 'https://github.com/org/repo/actions/runs/222333/job/10' }
+            ]);
+
+            const failing = parseFailingPrChecksJson(rawChecks);
+            expect(failing).to.have.lengthOf(2);
+            expect(failing.map(f => f.name)).to.deep.equal(['test', 'build']);
+            expect(extractGitHubRunIdFromUrl(failing[0].link)).to.equal('222333');
+            expect(extractGitHubRunIdFromUrl('https://example.com/no-run')).to.be.null;
+
+            (cp as any).execFile = (_file: string, args: string[], _opts: any, cb: any) => {
+                if (args[0] === 'pr' && args[1] === 'checks') {
+                    // Simulate older gh CLI rejecting `bucket` JSON field, then succeeding on fallback
+                    if (args.includes('name,state,bucket,link,description')) {
+                        cb(new Error('exit 1'), '', 'Unknown JSON field: "bucket"');
+                        return {} as any;
+                    }
+                    // gh pr checks often exits 1 when checks fail, while still returning valid JSON stdout
+                    cb(new Error('exit code 1'), rawChecks, '');
+                    return {} as any;
+                }
+                if (args[0] === 'run' && args[1] === 'view') {
+                    expect(args).to.deep.equal(['run', 'view', '222333', '--log-failed']);
+                    cb(null, '\x1b[31mAssertionError: expected 1 to equal 2\x1b[0m', '');
+                    return {} as any;
+                }
+                cb(new Error('unexpected args'), '', '');
+                return {} as any;
+            };
+
+            const res = await fetchFailingPrChecksWithLogs('/repos/demo-wt', 'fix/test');
+            expect(res.prError).to.be.undefined;
+            expect(res.checks).to.have.lengthOf(2);
+            expect(res.logSnippet).to.equal('AssertionError: expected 1 to equal 2');
+
+            (cp as any).execFile = (_file: string, _args: string[], _opts: any, cb: any) => {
+                cb(new Error('exit 1'), '', 'no pull requests found for branch "fix/no-pr"');
+                return {} as any;
+            };
+            const noPr = await fetchFailingPrChecksWithLogs('/repos/demo-wt', 'fix/no-pr');
+            expect(noPr.checks).to.be.empty;
+            expect(noPr.prError).to.include('no pull requests found');
         });
     });
 });

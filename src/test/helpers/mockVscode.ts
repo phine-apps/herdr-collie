@@ -75,6 +75,9 @@ export function resetMockState(): void {
     if (typeof mockVscode !== 'undefined' && mockVscode.languages) {
         mockVscode.languages.getDiagnostics = defaultGetDiagnostics;
     }
+    if (typeof mockVscode !== 'undefined' && mockVscode.workspace) {
+        mockVscode.workspace.isTrusted = true;
+    }
 }
 
 export class MockMarkdownString {
@@ -351,6 +354,7 @@ export const mockVscode = {
         registerFileDecorationProvider: (_provider: any) => ({ dispose: () => {} })
     },
     workspace: {
+        isTrusted: true,
         asRelativePath: (pathOrUri: any, _includeWorkspaceFolder?: boolean): string => {
             const p = typeof pathOrUri === 'string' ? pathOrUri : (pathOrUri?.fsPath || pathOrUri?.path || '');
             return path.basename(p);

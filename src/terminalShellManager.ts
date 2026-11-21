@@ -4,7 +4,9 @@
  */
 import * as vscode from 'vscode';
 import * as l10n from '@vscode/l10n';
-import { formatTerminalOutput } from './formatters';
+import { formatTerminalOutput, stripTerminalControlSequences } from './formatters';
+
+export { stripTerminalControlSequences };
 
 export type TerminalFailureActionMode = 'prompt' | 'statusbar' | 'off';
 
@@ -60,31 +62,6 @@ const DEFAULT_PROMPT_OUTPUT_CHARS = 30000;
 const MAX_EXECUTION_HISTORY = 20;
 const STREAM_DRAIN_TIMEOUT_MS = 500;
 const FAILURE_NOTIFY_COOLDOWN_MS = 8000;
-
-/**
- * Strips ANSI CSI, OSC (including VS Code 633 shell integration markers), and control characters
- * from raw terminal execution streams while preserving readable line breaks and indentation.
- */
-export function stripTerminalControlSequences(raw: string): string {
-    if (!raw) return '';
-
-    const normalized = raw
-        // OSC sequences: ESC ] ... BEL or ESC \
-        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
-        // DCS / SOS / PM / APC sequences
-        .replace(/\x1b[PX^_][\s\S]*?\x1b\\/g, '')
-        // CSI sequences: ESC [ ... final byte
-        .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
-        // Remaining 2-byte ESC sequences (e.g. charset switches)
-        .replace(/\x1b[@-Z\\-_]|\x1b[()][A-Za-z0-9]/g, '')
-        // Normalize CRLF -> LF
-        .replace(/\r\n/g, '\n')
-        // Collapse standalone CR progress updates onto newlines cleanly, then remove remaining C0 controls (except \t and \n)
-        .replace(/\r/g, '\n')
-        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
-
-    return normalized.trim();
-}
 
 /**
  * Keeps the trailing lines/characters of long terminal logs where failure stack traces usually live.

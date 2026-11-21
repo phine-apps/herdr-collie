@@ -608,3 +608,149 @@ export function sortAgents(
     });
 }
 
+export interface GitHubIssueSummary {
+    number: number;
+    title: string;
+    body?: string;
+    url?: string;
+    labels?: string[];
+}
+
+export interface FailingPrCheckSummary {
+    name: string;
+    state: string;
+    link?: string;
+    description?: string;
+}
+
+const MAX_ISSUE_BODY_CHARS = 4000;
+const MAX_CI_LOG_CHARS = 6000;
+
+/**
+ * Strips ANSI CSI, OSC (including VS Code 633 shell integration markers), and control characters
+ * from raw terminal or CI log streams while preserving readable line breaks and indentation.
+ */
+export function stripTerminalControlSequences(raw: string): string {
+    if (!raw) return '';
+
+    const normalized = raw
+        // OSC sequences: ESC ] ... BEL or ESC \
+        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+        // DCS / SOS / PM / APC sequences
+        .replace(/\x1b[PX^_][\s\S]*?\x1b\\/g, '')
+        // CSI sequences: ESC [ ... final byte
+        .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+        // Remaining 2-byte ESC sequences (e.g. charset switches)
+        .replace(/\x1b[@-Z\\-_]|\x1b[()][A-Za-z0-9]/g, '')
+        // Normalize CRLF -> LF
+        .replace(/\r\n/g, '\n')
+        // Collapse standalone CR progress updates onto newlines cleanly, then remove remaining C0 controls (except \t and \n)
+        .replace(/\r/g, '\n')
+        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+
+    return normalized.trim();
+}
+
+/**
+ * Sanitizes untrusted inline text (titles, labels, branch/check names, URLs) for single-line Markdown rendering.
+ */
+function sanitizeInlineMarkdown(value: string): string {
+    return (value || '')
+        .replace(/[\x00-\x1f\x7f]+/g, ' ')
+        .replace(/`+/g, "'")
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+/**
+ * Formats a GitHub Issue into a structured, code-fence-escaped task prompt for a worktree agent.
+ */
+export function formatGitHubIssueTaskPrompt(
+    issue: GitHubIssueSummary,
+    additionalInstruction?: string
+): string {
+    const cleanTitle = sanitizeInlineMarkdown(issue.title || '');
+    const lines: string[] = [
+        `## 🎯 GitHub Issue #${issue.number}: ${cleanTitle || 'Untitled Issue'}`
+    ];
+
+    const cleanUrl = issue.url ? sanitizeInlineMarkdown(issue.url) : '';
+    if (cleanUrl) {
+        lines.push(`- URL: ${cleanUrl}`);
+    }
+    if (issue.labels && issue.labels.length > 0) {
+        const cleanLabels = issue.labels.map(sanitizeInlineMarkdown).filter(Boolean);
+        if (cleanLabels.length > 0) {
+            lines.push(`- Labels: ${cleanLabels.join(', ')}`);
+        }
+    }
+
+    const rawBody = (issue.body || '').trim();
+    if (rawBody) {
+        const bodySnippet = rawBody.length > MAX_ISSUE_BODY_CHARS
+            ? `${rawBody.slice(0, MAX_ISSUE_BODY_CHARS)}\n... [truncated]`
+            : rawBody;
+        lines.push('');
+        lines.push('### Issue Description');
+        lines.push(formatCodeFence(bodySnippet, 'markdown'));
+    }
+
+    if (additionalInstruction && additionalInstruction.trim()) {
+        lines.push('');
+        lines.push('### Additional Instructions');
+        lines.push(additionalInstruction.trim());
+    }
+
+    lines.push('');
+    lines.push('### Workflow');
+    lines.push('1. Investigate the root cause or requirements described in the issue.');
+    lines.push('2. Implement the changes cleanly and add or update unit/integration tests.');
+    lines.push('3. Run the relevant build and test suite to verify everything passes.');
+
+    return lines.join('\n');
+}
+
+/**
+ * Formats failing Pull Request CI checks and optional failed run logs into a fix prompt for an agent.
+ */
+export function formatFailingPrChecksPrompt(
+    branchName: string,
+    checks: FailingPrCheckSummary[],
+    logSnippet?: string
+): string {
+    const cleanBranch = sanitizeInlineMarkdown(branchName) || 'branch';
+    const lines: string[] = [
+        `## 🔴 Failing PR Checks (\`${cleanBranch}\`)`,
+        '',
+        `The following CI check(s) failed on branch \`${cleanBranch}\`:`
+    ];
+
+    for (const check of checks) {
+        const name = sanitizeInlineMarkdown(check.name);
+        const state = sanitizeInlineMarkdown(check.state || 'FAIL');
+        const descText = check.description ? sanitizeInlineMarkdown(check.description) : '';
+        const desc = descText ? ` — ${descText}` : '';
+        const linkText = check.link ? sanitizeInlineMarkdown(check.link) : '';
+        const link = linkText ? ` (${linkText})` : '';
+        lines.push(`- **${name}** [${state}]${desc}${link}`);
+    }
+
+    const rawLog = stripTerminalControlSequences(logSnippet || '');
+    if (rawLog) {
+        const trimmedLog = rawLog.length > MAX_CI_LOG_CHARS
+            ? `... [earlier logs truncated]\n${rawLog.slice(rawLog.length - MAX_CI_LOG_CHARS)}`
+            : rawLog;
+        lines.push('');
+        lines.push('### Failed CI Log Tail');
+        lines.push(formatCodeFence(trimmedLog, 'text'));
+    }
+
+    lines.push('');
+    lines.push('### Required Action');
+    lines.push('1. Diagnose the CI failure(s) above and reproduce them locally.');
+    lines.push('2. Fix the issue cleanly and verify the build/tests pass locally.');
+    lines.push(`3. Commit and push the fix to \`${cleanBranch}\`.`);
+
+    return lines.join('\n');
+}
+
