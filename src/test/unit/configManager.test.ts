@@ -230,6 +230,27 @@ sidebar_collapsed_mode = "compact"
             }
         });
 
+        it('should scope terminal/context menu items to non-Herdr terminals in package.json', () => {
+            const pkgPath = path.resolve(__dirname, '../../../package.json');
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+            const terminalContext = pkg.contributes.menus['terminal/context'] || [];
+
+            expect(terminalContext).to.deep.equal([
+                {
+                    command: 'herdr-collie.sendTerminalOutput',
+                    when: '!herdr-collie.inHerdrTerminal',
+                    group: 'herdr@1'
+                },
+                {
+                    command: 'herdr-collie.fixLastFailedCommand',
+                    when: '!herdr-collie.inHerdrTerminal',
+                    group: 'herdr@2'
+                }
+            ]);
+            expect(pkg.contributes.submenus).to.be.undefined;
+            expect(pkg.contributes.configuration.properties['herdr-collie.disableHerdrMouseCapture']).to.be.undefined;
+        });
+
         it('reloadConfigForSessions falls back to vscode when omitted and skips duplicate --session default', () => {
             const executors = require('../../executors');
             const originalExecHerdr = executors.execHerdr;

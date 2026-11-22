@@ -484,9 +484,38 @@ export function activate(context: vscode.ExtensionContext) {
 
     const onDidCloseTerminalDisposable = vscode.window.onDidCloseTerminal((terminal) => {
         extensionManagedTerminals.delete(terminal);
+        updateHerdrTerminalContext(vscode.window.activeTerminal);
     });
 
-    context.subscriptions.push(onDidOpenTerminalDisposable, onDidCloseTerminalDisposable);
+    let activeTerminalContextSeq = 0;
+    const updateHerdrTerminalContext = (terminal: vscode.Terminal | undefined) => {
+        const seq = ++activeTerminalContextSeq;
+        const isKnownHerdr = Boolean(
+            terminal && (
+                extensionManagedTerminals.has(terminal) ||
+                terminal.name === 'Herdr' ||
+                terminal.name.startsWith('Herdr (') ||
+                terminal.name.startsWith('Herdr Workspace') ||
+                terminal.name.startsWith('Herdr Agent')
+            )
+        );
+        vscode.commands.executeCommand('setContext', 'herdr-collie.inHerdrTerminal', isKnownHerdr);
+        if (!terminal || isKnownHerdr || terminal.exitStatus !== undefined) {
+            return;
+        }
+        isHerdrRunningInTerminal(terminal).then((running) => {
+            if (seq === activeTerminalContextSeq && vscode.window.activeTerminal === terminal && running) {
+                vscode.commands.executeCommand('setContext', 'herdr-collie.inHerdrTerminal', true);
+            }
+        }).catch(() => {});
+    };
+
+    updateHerdrTerminalContext(vscode.window.activeTerminal);
+    const onDidChangeActiveTerminalDisposable = vscode.window.onDidChangeActiveTerminal((terminal) => {
+        updateHerdrTerminalContext(terminal);
+    });
+
+    context.subscriptions.push(onDidOpenTerminalDisposable, onDidCloseTerminalDisposable, onDidChangeActiveTerminalDisposable);
 
     async function openOrAttachTerminal(
         target: string, 
