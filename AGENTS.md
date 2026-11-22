@@ -44,11 +44,14 @@ pnpm run package           # Packages extension into .vsix bundle via @vscode/vs
 src/
 ├── extension.ts               # Main extension entrypoint, command registrations, lifecycle
 ├── socketClient.ts            # Unix domain socket client & JSON-RPC protocol bridge to Herdr daemon
-├── worktreeManager.ts         # Git worktree lifecycle: provisioning, branch sanitation, merging, cleanup
-├── agentHUD.ts                # Real-time Attention HUD: status bar live item & approval notifications
+├── worktreeManager.ts         # Git worktree lifecycle: provisioning, bootstrap, scorecards, GH/PR, cleanup
+├── swarmPlaybooks.ts          # Multi-agent orchestration playbooks (Best-of-N, Implementer + Reviewer)
+├── conflictRadar.ts           # Cross-worktree overlapping edit detector, FileDecorationProvider & alerts
+├── agentHUD.ts                # Real-time Attention HUD: status bar live item, approval & auto-verify loops
 ├── workspaceHUD.ts            # Status bar active workspace indicator & switcher
 ├── reviewManager.ts           # Visual review: inline comments, checkpoints, rollback, diff-to-prompt
 ├── microTaskManager.ts        # Micro-task delegation: CodeLens and QuickFix diagnostic providers
+├── terminalShellManager.ts    # VS Code Terminal Shell Integration failure capture & QuickFix dispatch
 ├── workspaceDragAndDrop.ts    # Drag-and-drop reordering for Herdr workspace tree view
 ├── configManager.ts           # Embedded TOML configuration sync (auto-hiding Herdr TUI sidebar)
 ├── parsers.ts                 # Resilient CLI JSON & snapshot parsers

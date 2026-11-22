@@ -33,6 +33,8 @@ Stop context-switching between terminals or manually copying file paths. Superch
 ### 1. Smart Swarm & Git Worktree Isolation
 Parallelize AI agent tasks effortlessly without touching your active working directory or dealing with dirty working trees:
 - **One-Click Worktree Provisioning** (`Ctrl+Alt+H L`): Creates an isolated Git worktree on a new or existing branch, configures a dedicated Herdr workspace, launches the specified AI agent (`claude`, `agy`, `cursor-agent`, `copilot`, or custom CLI), and starts execution automatically.
+- **Multi-Agent Swarm Playbooks** (`herdr-collie.launchSwarmPlaybook`): Launch **Best-of-N Parallel Candidates** (2–4 isolated worktree agents competing on the same task) or an **Implementer + Reviewer Duo** in side-by-side split panes.
+- **Parallel Worktree Conflict Radar** (`herdr-collie.showConflictRadar`): Scans active Git worktrees for overlapping file edits, surfacing Explorer badges (`!2`, `~2`), StatusBar warnings, cross-worktree diffs, and agent coordination alerts.
 - **Automatic Worktree Bootstrap (`.env` & Setup Command)**: Automatically copies configured untracked files (such as `.env` and `.env.local` via `herdr-collie.worktree.copyFiles`) from the main repository into newly created worktrees and optionally runs `herdr-collie.worktree.postCreateCommand` (e.g., `pnpm install --prefer-offline`).
 - **GitHub Issue & PR CI Integration (`gh` CLI)**: Optionally select an open GitHub Issue when launching a worktree (`Create from GitHub Issue...`) to pre-fill the branch name and issue context, create PRs directly (`herdr-collie.createPullRequestFromWorktree`), or dispatch failing PR CI checks and workflow log tails (`Send Failing PR Checks to Agent`) back to the worktree agent.
 - **Worktree Comparison Scorecards**: Worktree selection menus (Review Target, PR creation, and Merge) surface live single-line scorecards (`N files (+X/-Y) • ✓ Clean merge • 0 LSP errors`) so you can compare parallel candidate worktrees at a glance.
@@ -54,10 +56,11 @@ Maintain full situational awareness across all parallel agents without terminal 
   - `[Quick Reply...]`: Sends typed guidance directly to the agent.
   - `[Focus Terminal]`: Switches immediately to the agent's interactive terminal pane.
 - **Interactive HUD Command Palette** (`Ctrl+Alt+H H`): Opens a QuickPick menu to inspect agents across all sessions, trigger quick actions, or send custom prompts.
+- **Closed-Loop Diagnostic Verification** (`herdr-collie.agentHUD.autoVerifyDiagnostics`): Automatically checks remaining VS Code compiler/linter errors when an agent finishes a task and either prompts or auto-dispatches errors back up to `autoVerifyMaxRetries`.
 
 ### 3. Integrated Visual Review & Diff-to-Prompt (All-or-Nothing Safe Delivery)
 Inspect AI-generated code directly within VS Code before merging:
-- **Review Changes Sidebar Tree** (`herdr-collie.reviewChanges`): Displays modified, added, and deleted files with flat or hierarchical tree modes.
+- **Review Changes Sidebar Tree** (`herdr-collie.reviewChanges`): Displays modified, added, and deleted files with flat or hierarchical tree modes, supporting both the current workspace and cross-worktree review targets (`herdr-collie.selectReviewTarget` / `herdr-collie.reviewWorktree`).
 - **Single-Click Side-by-Side Diff**: Click any changed file to view native editor diffs (`HEAD ↔ Working Tree` or against checkpoints).
 - **Inline Review Comments** (`vscode.comments`): Add line-level comments on diffs or active editor documents (`Ctrl+Alt+H C`).
 - **All-or-Nothing Safe Delivery (`submitSafely`)**: Never lose your review comments on network or agent delivery errors. Comments remain intact until successfully acknowledged by the agent.
@@ -83,7 +86,7 @@ Send rich development context to your AI agents immediately via shortcuts, conte
 - **Send Symbol Info (Hover)**: Sends full type definitions, function signatures, and JSDoc / hover details of the symbol under the cursor.
 - **Send Errors/Warnings** (`Ctrl+Alt+H D`): Sends active file diagnostics.
 - **Send Workspace Problems**: Sends project-wide errors and warnings in a single batch (ideal after refactoring).
-- **Send Terminal Output / Error**: Sends recent output or selected text from the integrated terminal.
+- **Send Terminal Output / Error**: Sends recent output or selected text from the integrated terminal, plus automatic Terminal Shell Integration failure detection & QuickFix (`Ctrl+Alt+H F`).
 
 ### 6. Git & SCM Integration
 Deep integration with VS Code's Source Control (SCM) view:
@@ -142,9 +145,15 @@ Herdr Collie provides conflict-free 2-stroke chord shortcuts prefixed by `Ctrl +
 | **Attach to Workspace** | `herdr-collie.attachWorkspace` | `Ctrl+Alt+H T` | Unified target selector (Workspaces, Agents & Sessions) |
 | **Send Errors/Warnings** | `herdr-collie.sendDiagnostics` | `Ctrl+Alt+H D` | Sends active file diagnostics to agent |
 | **Show Agent HUD** | `herdr-collie.showAgentHUD` | `Ctrl+Alt+H H` | Opens Agent HUD for status check and quick approvals |
+| **Fix Last Failed Command** | `herdr-collie.fixLastFailedCommand` | `Ctrl+Alt+H F` | Sends failed terminal command & log tail to an agent |
 | **Launch Agent in Git Worktree** | `herdr-collie.launchWorktreeAgent` | `Ctrl+Alt+H L` | Launches AI agent in an isolated Git worktree |
+| **Launch Swarm Playbook** | `herdr-collie.launchSwarmPlaybook` | View title / Palette | Launches Best-of-N candidates or Implementer + Reviewer duo |
+| **Parallel Worktree Conflict Radar** | `herdr-collie.showConflictRadar` | View title / StatusBar | Scans & compares overlapping edits across worktrees |
 | **Add Review Comment** | `herdr-collie.addReviewComment` | `Ctrl+Alt+H C` | Adds inline review comment on current line |
 | **Submit Review to Agent** | `herdr-collie.submitReview` | `Ctrl+Alt+H R` | Packages diffs & comments and dispatches to agent |
+| **Select Review Target / Worktree** | `herdr-collie.selectReviewTarget` | View title / Palette | Switches Review Changes between current workspace and a worktree |
+| **Create PR / Integrate Worktree** | `herdr-collie.createPullRequestFromWorktree` | Inline / View title | Creates PR (`gh`), merges worktree, or sends failing CI checks |
+| **Manage Herdr Agent Integrations** | `herdr-collie.manageIntegrations` | View title / Palette | Installs, updates, or uninstalls Herdr agent hooks via GUI |
 | **Open Workspace in New Window** | `herdr-collie.openWorkspaceInNewWindow` | Inline `$(link-external)` | Opens Herdr workspace / worktree in new VS Code window |
 | **Quick-Fix: Fix with Agent** | `herdr-collie.fixDiagnosticWithAgent` | `Cmd+.` / `Ctrl+.` | Delegates diagnostic error to agent via Lightbulb |
 | **CodeLens: Fix Test** | `herdr-collie.fixTestWithAgent` | Click CodeLens | Delegates failing test case to agent |
@@ -191,6 +200,18 @@ Herdr Collie provides conflict-free 2-stroke chord shortcuts prefixed by `Ctrl +
     Default sort order in the Agents view (`"grouped"` or `"priority"`).
   - `herdr-collie.agentHUD.enableNotifications` (default: `true`):
     Enables native interactive notifications when an agent enters waiting/blocked state.
+  - `herdr-collie.agentHUD.autoVerifyDiagnostics` (default: `"prompt"`):
+    Closed-loop verification when an agent completes a task (`"prompt"`, `"auto"`, or `"off"`).
+  - `herdr-collie.agentHUD.autoVerifyMaxRetries` (default: `2`):
+    Maximum automatic diagnostic verification retries when `autoVerifyDiagnostics` is `"auto"`.
+  - `herdr-collie.reviewChanges.viewMode` (default: `"tree"`):
+    Display mode for the Review Changes sidebar view (`"tree"` or `"flat"`).
+  - `herdr-collie.worktree.conflictRadar` (default: `true`):
+    Automatically scans Git worktrees for overlapping file edits and shows Explorer/StatusBar indicators.
+  - `herdr-collie.terminal.failureAction` (default: `"prompt"`):
+    Action when a VS Code terminal command fails (`"prompt"`, `"statusbar"`, or `"off"`).
+  - `herdr-collie.autoRestoreTerminal` (default: `true`):
+    Automatically restores and re-attaches Herdr in preserved terminals across VS Code restarts.
   - `herdr-collie.codeLens.enable` (default: `true`):
     Enables inline CodeLens action links for test runners and TODO items.
   - `herdr-collie.quickFix.enable` (default: `true`):

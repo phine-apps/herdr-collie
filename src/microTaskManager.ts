@@ -526,12 +526,16 @@ export class HerdrQuickFixProvider implements vscode.CodeActionProvider {
 /**
  * Herdr CodeLens Provider for inline Test and TODO links
  */
-export class HerdrCodeLensProvider implements vscode.CodeLensProvider {
+export class HerdrCodeLensProvider implements vscode.CodeLensProvider, vscode.Disposable {
     private _onDidChangeCodeLenses = new vscode.EventEmitter<void>();
     public readonly onDidChangeCodeLenses = this._onDidChangeCodeLenses.event;
 
     public refresh(): void {
         this._onDidChangeCodeLenses.fire();
+    }
+
+    public dispose(): void {
+        this._onDidChangeCodeLenses.dispose();
     }
 
     public provideCodeLenses(

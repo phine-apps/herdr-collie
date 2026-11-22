@@ -165,6 +165,18 @@ export class WorkspaceHUD implements vscode.Disposable {
     }
 
     /**
+     * Sanitizes untrusted strings before embedding in status bar Markdown tooltips
+     */
+    private escapeMarkdownInline(value: string): string {
+        return (value || '')
+            .replace(/[\r\n\x00-\x1f\x7f]+/g, ' ')
+            .replace(/\\/g, '\\\\')
+            .replace(/`/g, "'")
+            .replace(/[\[\]]/g, '')
+            .trim();
+    }
+
+    /**
      * Formats status bar item text and markdown tooltip
      */
     private updateHUDText(displayInfo?: WorkspaceDisplayInfo): void {
@@ -178,19 +190,19 @@ export class WorkspaceHUD implements vscode.Disposable {
         const label = displayInfo.branchName || displayInfo.displayLabel || displayInfo.label;
         this.statusBarItem.text = `${icon} ${label}`;
 
-        // Build rich markdown tooltip
+        // Build rich markdown tooltip (do not enable isTrusted to prevent command URI injection)
         const md = new vscode.MarkdownString();
-        md.isTrusted = true;
-        const wsTitle = displayInfo.displayLabel || displayInfo.label;
+        md.supportThemeIcons = true;
+        const wsTitle = this.escapeMarkdownInline(displayInfo.displayLabel || displayInfo.label);
         md.appendMarkdown(`### ` + l10n.t('Herdr Workspace: {0} Active', `${wsTitle} $(check)`) + `\n\n`);
         if (displayInfo.branchName) {
-            md.appendMarkdown(`* ` + l10n.t('**Branch**: `{0}` (Git Worktree)', displayInfo.branchName) + `\n`);
+            md.appendMarkdown(`* ` + l10n.t('**Branch**: `{0}` (Git Worktree)', this.escapeMarkdownInline(displayInfo.branchName)) + `\n`);
         }
         if (displayInfo.isCurrentWindow) {
             md.appendMarkdown(`* ` + l10n.t('**VS Code Window**: Matches active project') + `\n`);
         }
         if (displayInfo.agentBadges) {
-            md.appendMarkdown(`* ` + l10n.t('**Active Agents**: {0}', displayInfo.agentBadges) + `\n`);
+            md.appendMarkdown(`* ` + l10n.t('**Active Agents**: {0}', this.escapeMarkdownInline(displayInfo.agentBadges)) + `\n`);
         }
         md.appendMarkdown(`\n*` + l10n.t('Click to switch or focus workspace (Ctrl+Alt+H W)') + `*`);
         this.statusBarItem.tooltip = md;

@@ -83,6 +83,7 @@ export function resetMockState(): void {
 export class MockMarkdownString {
     public value: string = '';
     public isTrusted: boolean = false;
+    public supportThemeIcons?: boolean;
     constructor(value: string = '') {
         this.value = value;
     }
