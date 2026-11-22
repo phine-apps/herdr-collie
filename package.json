@@ -20,9 +20,19 @@
   "categories": [
     "AI",
     "Machine Learning",
-    "Source Code",
+    "SCM Providers",
     "Other"
   ],
+  "capabilities": {
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "%capabilities.virtualWorkspaces.description%"
+    },
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "%capabilities.untrustedWorkspaces.description%"
+    }
+  },
   "keywords": [
     "herdr",
     "ai-agents",
@@ -711,6 +721,7 @@
         "herdr-collie.defaultAgentCommand": {
           "type": "string",
           "default": "claude",
+          "restricted": true,
           "description": "%config.defaultAgentCommand%"
         },
         "herdr-collie.agentSortOrder": {
@@ -846,7 +857,7 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run build",
+    "vscode:prepublish": "pnpm run build",
     "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",

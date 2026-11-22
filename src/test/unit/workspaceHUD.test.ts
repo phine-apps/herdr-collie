@@ -86,7 +86,54 @@ describe('WorkspaceHUD Unit Tests', () => {
 
         const item = mockState.statusBarItems[0];
         expect(item.text).to.equal('$(folder-active) collie-core');
+        expect(item.tooltip.isTrusted).to.be.false;
+        expect(item.tooltip.supportThemeIcons).to.be.true;
         expect(item.tooltip.value).to.include('**VS Code Window**: Matches active project');
+
+        hud.dispose();
+    });
+
+    it('sanitizes malicious workspace, branch, and agent names in tooltip without enabling isTrusted', async () => {
+        mockClient.isConnected = true;
+        mockClient.getSnapshot = async () => ({
+            workspaces: [
+                {
+                    workspace_id: 'ws-evil',
+                    label: 'Evil\n[Click](command:workbench.action.terminal.sendSequence)`hack`',
+                    cwd: '/path/to/evil',
+                    focused: true
+                }
+            ],
+            agents: [
+                {
+                    pane_id: 'p1',
+                    name: 'Agent[Cmd](command:evil)',
+                    agent_status: 'working',
+                    workspace_id: 'ws-evil'
+                }
+            ]
+        });
+
+        const mockGetWorktrees = async () => [
+            { worktree: '/path/to/evil', head: 'abc1234', branch: 'feat/[inject](command:run)`x`' }
+        ];
+
+        const hud = new WorkspaceHUD(
+            mockClient as unknown as HerdrSocketClient,
+            () => 'default',
+            mockGetWorktrees,
+            () => '/path/to/other'
+        );
+
+        await hud.refresh();
+
+        const item = mockState.statusBarItems[0];
+        expect(item.tooltip.isTrusted).to.be.false;
+        const tooltipText = item.tooltip.value || '';
+        expect(tooltipText).to.not.include('[Click]');
+        expect(tooltipText).to.not.include('[inject]');
+        expect(tooltipText).to.not.include('`hack`');
+        expect(tooltipText).to.not.include('`x`');
 
         hud.dispose();
     });

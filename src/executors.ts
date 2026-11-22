@@ -55,17 +55,24 @@ export async function ensureSessionServerRunning(sessionName: string = 'default'
             : ['server'];
 
         try {
+            let spawnFailed = false;
             const child = cp.spawn('herdr', args, {
                 detached: true,
                 stdio: 'ignore',
                 env
             });
+            child.on('error', () => {
+                spawnFailed = true;
+            });
             child.unref();
 
             // Wait for socket to become available (poll up to 2.5 seconds)
             const startTime = Date.now();
-            while (Date.now() - startTime < 2500) {
+            while (!spawnFailed && Date.now() - startTime < 2500) {
                 await new Promise(r => setTimeout(r, 100));
+                if (spawnFailed) {
+                    break;
+                }
                 const ready = await new Promise<boolean>((resolve) => {
                     const s = net.createConnection(socketPath);
                     s.on('connect', () => {

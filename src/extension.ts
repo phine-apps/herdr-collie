@@ -375,8 +375,10 @@ export function activate(context: vscode.ExtensionContext) {
     // Setup Herdr embedded config before starting session server so HERDR_CONFIG_PATH is ready
     setupConfigManager(context, vscode, getActiveSidebarSession);
 
-    // Ensure session server is running in background
-    ensureSessionServerRunning(initialSession).catch(() => {});
+    // Ensure session server is running in background (when herdr CLI is available and workspace is trusted)
+    const sessionServerReadyPromise = vscode.workspace.isTrusted === false
+        ? Promise.resolve(false)
+        : ensureSessionServerRunning(initialSession).catch(() => false);
 
     let socketClient = new HerdrSocketClient(activeSidebarSession);
     socketClient.connect();
@@ -389,6 +391,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Helper to auto-restore Herdr in terminals preserved across VS Code restarts
     async function restoreTerminalIfNeeded(sessionName: string, specificTerminal?: vscode.Terminal) {
+        if (vscode.workspace.isTrusted === false) {
+            return;
+        }
         const config = vscode.workspace.getConfiguration('herdr-collie');
         if (!config.get<boolean>('autoRestoreTerminal', true)) {
             return;
@@ -1410,7 +1415,9 @@ export function activate(context: vscode.ExtensionContext) {
         }
     };
     if (reviewController.onDidUpdateComments) {
-        reviewController.onDidUpdateComments(comments => updateReviewStatusBar(comments.length));
+        context.subscriptions.push(
+            reviewController.onDidUpdateComments(comments => updateReviewStatusBar(comments.length))
+        );
     }
 
     context.subscriptions.push(
@@ -1469,61 +1476,62 @@ export function activate(context: vscode.ExtensionContext) {
     // Bidirectional selection synchronization between Workspaces and Agents
     let isSyncingSelection = false;
 
-    agentTreeView.onDidChangeSelection(async e => {
-        if (isSyncingSelection || !e.selection || e.selection.length === 0) return;
-        const selected = e.selection[0] as HerdrWorkspaceTreeItem;
-        if (!selected) return;
+    context.subscriptions.push(
+        agentTreeView.onDidChangeSelection(async e => {
+            if (isSyncingSelection || !e.selection || e.selection.length === 0) return;
+            const selected = e.selection[0] as HerdrWorkspaceTreeItem;
+            if (!selected) return;
 
-        const allWs = workspaceProvider.getCurrentItems();
-        const selectedWsId = selected.workspaceId;
-        const matchingWs = allWs.find(ws => 
-            (selectedWsId && (ws.rawId || ws.id) === selectedWsId) ||
-            (selected.cwd && ws.cwd && ws.cwd === selected.cwd)
-        );
+            const allWs = workspaceProvider.getCurrentItems();
+            const selectedWsId = selected.workspaceId;
+            const matchingWs = allWs.find(ws => 
+                (selectedWsId && (ws.rawId || ws.id) === selectedWsId) ||
+                (selected.cwd && ws.cwd && ws.cwd === selected.cwd)
+            );
 
-        if (matchingWs) {
-            const currentSelected = workspaceTreeView.selection[0] as HerdrWorkspaceTreeItem | undefined;
-            if (currentSelected && (currentSelected.rawId || currentSelected.id) === (matchingWs.rawId || matchingWs.id)) {
-                return;
+            if (matchingWs) {
+                const currentSelected = workspaceTreeView.selection[0] as HerdrWorkspaceTreeItem | undefined;
+                if (currentSelected && (currentSelected.rawId || currentSelected.id) === (matchingWs.rawId || matchingWs.id)) {
+                    return;
+                }
+                isSyncingSelection = true;
+                try {
+                    await workspaceTreeView.reveal(matchingWs, { select: true, focus: false });
+                } catch {
+                    // Ignore if view is not visible or reveal not supported
+                } finally {
+                    isSyncingSelection = false;
+                }
             }
-            isSyncingSelection = true;
-            try {
-                await workspaceTreeView.reveal(matchingWs, { select: true, focus: false });
-            } catch {
-                // Ignore if view is not visible or reveal not supported
-            } finally {
-                isSyncingSelection = false;
-            }
-        }
-    });
+        }),
+        workspaceTreeView.onDidChangeSelection(async e => {
+            if (isSyncingSelection || !e.selection || e.selection.length === 0) return;
+            const selected = e.selection[0] as HerdrWorkspaceTreeItem;
+            if (!selected) return;
 
-    workspaceTreeView.onDidChangeSelection(async e => {
-        if (isSyncingSelection || !e.selection || e.selection.length === 0) return;
-        const selected = e.selection[0] as HerdrWorkspaceTreeItem;
-        if (!selected) return;
+            const allAgents = agentProvider.getCurrentItems();
+            const selectedId = selected.rawId || selected.id;
+            const matchingAgent = allAgents.find(a => 
+                (a.workspaceId && a.workspaceId === selectedId) ||
+                (a.cwd && selected.cwd && a.cwd === selected.cwd)
+            );
 
-        const allAgents = agentProvider.getCurrentItems();
-        const selectedId = selected.rawId || selected.id;
-        const matchingAgent = allAgents.find(a => 
-            (a.workspaceId && a.workspaceId === selectedId) ||
-            (a.cwd && selected.cwd && a.cwd === selected.cwd)
-        );
-
-        if (matchingAgent) {
-            const currentSelected = agentTreeView.selection[0] as HerdrWorkspaceTreeItem | undefined;
-            if (currentSelected && (currentSelected.rawId || currentSelected.id) === (matchingAgent.rawId || matchingAgent.id)) {
-                return;
+            if (matchingAgent) {
+                const currentSelected = agentTreeView.selection[0] as HerdrWorkspaceTreeItem | undefined;
+                if (currentSelected && (currentSelected.rawId || currentSelected.id) === (matchingAgent.rawId || matchingAgent.id)) {
+                    return;
+                }
+                isSyncingSelection = true;
+                try {
+                    await agentTreeView.reveal(matchingAgent, { select: true, focus: false });
+                } catch {
+                    // Ignore if view is not visible or reveal not supported
+                } finally {
+                    isSyncingSelection = false;
+                }
             }
-            isSyncingSelection = true;
-            try {
-                await agentTreeView.reveal(matchingAgent, { select: true, focus: false });
-            } catch {
-                // Ignore if view is not visible or reveal not supported
-            } finally {
-                isSyncingSelection = false;
-            }
-        }
-    });
+        })
+    );
 
     // Automatically highlight the active workspace and its agent without overriding intentional user selection
     const autoSelectionState: AutoSelectionState = {};
@@ -1584,8 +1592,10 @@ export function activate(context: vscode.ExtensionContext) {
         }, 60);
     };
 
-    workspaceProvider.onDidUpdateItems(scheduleSyncActiveSelection);
-    agentProvider.onDidUpdateItems(scheduleSyncActiveSelection);
+    context.subscriptions.push(
+        workspaceProvider.onDidUpdateItems(scheduleSyncActiveSelection),
+        agentProvider.onDidUpdateItems(scheduleSyncActiveSelection)
+    );
 
     const updateTreeViewDescriptions = () => {
         workspaceTreeView.description = undefined;
@@ -1882,24 +1892,30 @@ export function activate(context: vscode.ExtensionContext) {
     // Auto-bind VS Code workspace to Herdr workspace safely without duplicates
     const currentCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const wsName = vscode.workspace.name || (currentCwd ? path.basename(currentCwd) : 'VSCode Workspace');
-    if (currentCwd) {
-        execHerdr(['--session', activeSidebarSession, 'pane', 'list'], (pErr: any, pStdout: any) => {
-            const parsedPanes = (!pErr && pStdout) ? parsePanes(pStdout) : [];
+    if (currentCwd && vscode.workspace.isTrusted !== false) {
+        void (async () => {
+            await sessionServerReadyPromise;
+            if (!(await isCommandAvailable('herdr'))) {
+                return;
+            }
+            execHerdr(['--session', activeSidebarSession, 'pane', 'list'], (pErr: any, pStdout: any) => {
+                const parsedPanes = (!pErr && pStdout) ? parsePanes(pStdout) : [];
 
-            execHerdr(['--session', activeSidebarSession, 'workspace', 'list'], (wErr: any, wStdout: any) => {
-                if (!wErr && wStdout) {
-                    const parsedWs = parseWorkspaces(wStdout, parsedPanes, os.homedir());
-                    const matchedWs = findMatchingWorkspaceForCwd(parsedWs, currentCwd, wsName);
-                    if (matchedWs) {
-                        execHerdr(['--session', activeSidebarSession, 'workspace', 'focus', matchedWs.id], () => refreshAllProviders());
-                        return;
+                execHerdr(['--session', activeSidebarSession, 'workspace', 'list'], (wErr: any, wStdout: any) => {
+                    if (!wErr && wStdout) {
+                        const parsedWs = parseWorkspaces(wStdout, parsedPanes, os.homedir());
+                        const matchedWs = findMatchingWorkspaceForCwd(parsedWs, currentCwd, wsName);
+                        if (matchedWs) {
+                            execHerdr(['--session', activeSidebarSession, 'workspace', 'focus', matchedWs.id], () => refreshAllProviders());
+                            return;
+                        }
+
+                        // If no matching workspace by cwd/label/id, create one
+                        execHerdr(['--session', activeSidebarSession, 'workspace', 'create', '--cwd', currentCwd, '--label', wsName], () => refreshAllProviders());
                     }
-
-                    // If no matching workspace by cwd/label/id, create one
-                    execHerdr(['--session', activeSidebarSession, 'workspace', 'create', '--cwd', currentCwd, '--label', wsName], () => refreshAllProviders());
-                }
+                });
             });
-        });
+        })();
     }
 
     let refreshDisposable = vscode.commands.registerCommand('herdr-collie.refreshWorkspaces', () => {
@@ -3055,6 +3071,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(conflictRadar);
     context.subscriptions.push(
         quickFixDisposable,
+        codeLensProvider,
         codeLensDisposable,
         configChangeDisposable,
         fixDiagnosticDisposable,
@@ -3098,7 +3115,9 @@ class HerdrSessionProvider implements vscode.TreeDataProvider<HerdrSessionTreeIt
         this._onDidChangeTreeData.fire();
     }
 
-    dispose() {}
+    dispose() {
+        this._onDidChangeTreeData.dispose();
+    }
 
     getTreeItem(element: HerdrSessionTreeItem): vscode.TreeItem {
         return element;
