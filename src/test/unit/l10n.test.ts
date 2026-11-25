@@ -146,11 +146,25 @@ describe('Localization (l10n) Unit Tests', () => {
 
         it('should ensure all l10n.t(...) string keys used in src/ exist in bundle.l10n.json', () => {
             const srcDir = path.join(projectRoot, 'src');
-            const sourceFiles = fs.readdirSync(srcDir).filter(f => f.endsWith('.ts'));
+            const collectTsFiles = (dir: string): string[] => {
+                const results: string[] = [];
+                for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                    const fullPath = path.join(dir, entry.name);
+                    if (entry.isDirectory()) {
+                        if (entry.name === 'test') continue;
+                        results.push(...collectTsFiles(fullPath));
+                    } else if (entry.isFile() && entry.name.endsWith('.ts')) {
+                        results.push(fullPath);
+                    }
+                }
+                return results;
+            };
+            const sourceFiles = collectTsFiles(srcDir);
             const missingKeys: { file: string; key: string }[] = [];
 
-            for (const file of sourceFiles) {
-                const content = fs.readFileSync(path.join(srcDir, file), 'utf8');
+            for (const filePath of sourceFiles) {
+                const content = fs.readFileSync(filePath, 'utf8');
+                const relFile = path.relative(srcDir, filePath);
                 const re = /l10n\.t\(\s*(['"])((?:\\.|(?!\1).)*)\1/gs;
                 let match: RegExpExecArray | null;
                 while ((match = re.exec(content)) !== null) {
@@ -159,7 +173,7 @@ describe('Localization (l10n) Unit Tests', () => {
                         .replace(/\\"/g, '"')
                         .replace(/\\'/g, "'");
                     if (!(key in bundleEn)) {
-                        missingKeys.push({ file, key });
+                        missingKeys.push({ file: relFile, key });
                     }
                 }
             }

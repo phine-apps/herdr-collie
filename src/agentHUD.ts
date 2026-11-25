@@ -40,9 +40,9 @@ export function collectWorkspaceErrorsForAgent(agentCwd?: string): AutoVerifyDia
         return { totalErrors: 0, fileCount: 0, problemsByFile };
     }
 
-    let allDiagnostics: any[];
+    let allDiagnostics: Array<[vscode.Uri | string, readonly vscode.Diagnostic[]]>;
     try {
-        allDiagnostics = vscode.languages.getDiagnostics() as any[];
+        allDiagnostics = vscode.languages.getDiagnostics();
     } catch {
         return { totalErrors: 0, fileCount: 0, problemsByFile };
     }
@@ -74,7 +74,7 @@ export function collectWorkspaceErrorsForAgent(agentCwd?: string): AutoVerifyDia
         }
 
         const errorSeverity = vscode.DiagnosticSeverity ? vscode.DiagnosticSeverity.Error : 0;
-        const errors = fileDiagnostics.filter((d: any) => d && (d.severity === errorSeverity || d.severity === 0));
+        const errors = fileDiagnostics.filter((d) => d && (d.severity === errorSeverity || d.severity === 0));
         if (errors.length === 0) continue;
 
         let relPath = '';
@@ -90,7 +90,7 @@ export function collectWorkspaceErrorsForAgent(agentCwd?: string): AutoVerifyDia
                 : (fsPath ? path.basename(fsPath) : 'unknown');
         }
 
-        problemsByFile[relPath] = errors.map((d: any) => ({
+        problemsByFile[relPath] = errors.map((d) => ({
             line: (d.range?.start?.line ?? 0) + 1,
             severity: 'Error' as const,
             message: String(d.message || '')
@@ -149,7 +149,7 @@ export class AgentHUD implements vscode.Disposable {
     public readonly onDidChangeBlockedCount = this._onDidChangeBlockedCount.event;
     private currentBlockedCount = 0;
     private connectListener?: () => void;
-    private eventListener?: (event: any) => void;
+    private eventListener?: (event: unknown) => void;
     private disconnectListener?: () => void;
     private eventRefreshTimer: NodeJS.Timeout | null = null;
 
@@ -190,7 +190,7 @@ export class AgentHUD implements vscode.Disposable {
 
     private setupSocketEvents(client: HerdrSocketClient): void {
         this.connectListener = () => this.refresh();
-        this.eventListener = (event: any) => {
+        this.eventListener = (event: unknown) => {
             this.handleSocketEvent(event);
             this.scheduleEventRefresh(30);
         };
@@ -213,7 +213,7 @@ export class AgentHUD implements vscode.Disposable {
             clearTimeout(this.eventRefreshTimer);
             this.eventRefreshTimer = null;
         }
-        if (this.socketClient && typeof (this.socketClient as any).off === 'function') {
+        if (this.socketClient && typeof this.socketClient.off === 'function') {
             if (this.connectListener) {
                 this.socketClient.off('connect', this.connectListener);
                 this.connectListener = undefined;
@@ -229,14 +229,18 @@ export class AgentHUD implements vscode.Disposable {
         }
     }
 
-    private handleSocketEvent(event: any): void {
-        if (!event) return;
+    private handleSocketEvent(rawEvent: unknown): void {
+        if (!rawEvent || typeof rawEvent !== 'object' || Array.isArray(rawEvent)) return;
+        const event = rawEvent as Record<string, unknown>;
+        const agentStatus = typeof event.agent_status === 'string' ? event.agent_status : undefined;
         // Check for direct agent notification event structures if present
-        if (event.event === 'agent.blocked' || (event.agent_status && (event.agent_status === 'blocked' || event.agent_status === 'waiting'))) {
-            const agentId = event.pane_id || event.id || event.agent;
-            const agentName = event.name || agentId;
+        if (event.event === 'agent.blocked' || (agentStatus && (agentStatus === 'blocked' || agentStatus === 'waiting'))) {
+            const rawId = event.pane_id ?? event.id ?? event.agent;
+            const agentId = typeof rawId === 'string' ? rawId : undefined;
+            const agentName = typeof event.name === 'string' ? event.name : (agentId || '');
             const prev = agentId ? this.previousAgentStates.get(agentId) : undefined;
-            const workspaceId = event.workspace_id || event.workspaceId || event.workspace || prev?.workspaceId;
+            const rawWs = event.workspace_id ?? event.workspaceId ?? event.workspace;
+            const workspaceId = typeof rawWs === 'string' ? rawWs : prev?.workspaceId;
             const rawOut = event.last_output ?? event.latest_output ?? event.summary ?? event.last_line ?? event.message;
             const latestOutput = typeof rawOut === 'string' ? extractCleanOutputSummary(rawOut) : prev?.latestOutput;
             if (agentId && !this.notifiedBlockedAgents.has(agentId)) {
@@ -246,12 +250,12 @@ export class AgentHUD implements vscode.Disposable {
                     this.triggerBlockedNotification({
                         id: agentId,
                         name: agentName,
-                        status: event.agent_status || 'blocked',
+                        status: agentStatus || 'blocked',
                         statusType: 'blocked',
                         statusIcon: '🔴',
                         isWorking: false,
                         isBlocked: true,
-                        workspaceId: workspaceId,
+                        workspaceId,
                         statusChangedAt: prev?.statusType === 'blocked' ? prev.statusChangedAt : Date.now(),
                         ...(latestOutput !== undefined ? { latestOutput } : {})
                     });
@@ -304,7 +308,7 @@ export class AgentHUD implements vscode.Disposable {
             }
             agents = await new Promise<ParsedAgent[]>((resolve) => {
                 const session = this.getSessionName();
-                execHerdr(['--session', session, 'agent', 'list'], (err: any, stdout: any) => {
+                execHerdr(['--session', session, 'agent', 'list'], (err, stdout) => {
                     if (!err && stdout) {
                         resolve(parseAgents(stdout));
                     } else {
@@ -546,9 +550,9 @@ export class AgentHUD implements vscode.Disposable {
         const session = this.getSessionName();
         const sessionArgs = session ? ['--session', session] : [];
         return new Promise<boolean>((resolve) => {
-            execHerdr([...sessionArgs, 'agent', 'prompt', agentId, prompt], { cwd }, (err: any) => {
+            execHerdr([...sessionArgs, 'agent', 'prompt', agentId, prompt], { cwd }, (err) => {
                 if (err) {
-                    execHerdr([...sessionArgs, 'pane', 'send-text', agentId, prompt], { cwd }, (fbErr: any) => {
+                    execHerdr([...sessionArgs, 'pane', 'send-text', agentId, prompt], { cwd }, (fbErr) => {
                         resolve(!fbErr);
                     });
                 } else {

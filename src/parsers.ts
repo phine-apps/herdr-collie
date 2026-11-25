@@ -106,22 +106,53 @@ export interface ParsedTab {
     agentStatus?: string;
 }
 
+type JsonRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is JsonRecord {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function unwrapResultRecord(raw: unknown): JsonRecord | null {
+    if (!isRecord(raw)) {
+        return null;
+    }
+    return isRecord(raw.result) ? raw.result : raw;
+}
+
+function asString(value: unknown, fallback = ''): string {
+    return typeof value === 'string'
+        ? value
+        : (typeof value === 'number' || typeof value === 'boolean' ? String(value) : fallback);
+}
+
+export interface RawSnapshotInput {
+    tabs?: readonly unknown[];
+    workspaces?: readonly unknown[];
+    panes?: readonly unknown[];
+    agents?: readonly unknown[];
+    focused_tab_id?: string;
+    focused_workspace_id?: string;
+}
+
 /**
  * Parse stdout of `herdr session list --json`
  */
 export function parseSessions(stdout: string): HerdrSessionInfo[] {
     try {
-        const data = JSON.parse(stdout);
-        const result = data.result || data;
-        const rawSessions = Array.isArray(result.sessions) ? result.sessions : [];
+        const data: unknown = JSON.parse(stdout);
+        const result = unwrapResultRecord(data);
+        const rawSessions = result && Array.isArray(result.sessions) ? result.sessions : [];
 
-        return rawSessions.map((s: any) => ({
-            name: String(s.name || ''),
-            isDefault: Boolean(s.default),
-            running: Boolean(s.running),
-            sessionDir: s.session_dir ? String(s.session_dir) : undefined,
-            socketPath: s.socket_path ? String(s.socket_path) : undefined
-        })).filter((s: HerdrSessionInfo) => s.name.length > 0);
+        return rawSessions
+            .filter(isRecord)
+            .map((s): HerdrSessionInfo => ({
+                name: asString(s.name),
+                isDefault: Boolean(s.default),
+                running: Boolean(s.running),
+                sessionDir: s.session_dir ? asString(s.session_dir) : undefined,
+                socketPath: s.socket_path ? asString(s.socket_path) : undefined
+            }))
+            .filter((s) => s.name.length > 0);
     } catch {
         return [];
     }
@@ -131,21 +162,34 @@ export function parseSessions(stdout: string): HerdrSessionInfo[] {
  * Parse stdout of `herdr workspace list`
  */
 export function parseWorkspaces(
-    stdout: string, 
-    panes: ParsedPane[] = [], 
+    stdout: string,
+    panes: ParsedPane[] = [],
     homedir = ''
 ): ParsedWorkspace[] {
     try {
-        const data = JSON.parse(stdout);
-        const result = data.result || data;
-        const rawWorkspaces = Array.isArray(result.workspaces) ? result.workspaces : [];
+        const data: unknown = JSON.parse(stdout);
+        const result = unwrapResultRecord(data);
+        const rawWorkspaces = result && Array.isArray(result.workspaces) ? result.workspaces : [];
 
-        return rawWorkspaces.map((ws: any) => {
-            const id = String(ws.workspace_id || ws.name || ws.id || ws);
+        return rawWorkspaces.map((wsRaw): ParsedWorkspace | null => {
+            if (!isRecord(wsRaw)) {
+                const fallbackId = asString(wsRaw);
+                if (!fallbackId) return null;
+                const wsPanes = panes.filter(p => p.workspaceId === fallbackId);
+                const cwd = wsPanes.length > 0 ? (wsPanes[0].cwd || '') : '';
+                return {
+                    id: fallbackId,
+                    label: cwd ? (cwd.split(/[\\/]/).filter(Boolean).pop() || cwd) : `Workspace ${fallbackId}`,
+                    cwd,
+                    focused: false
+                };
+            }
+
+            const id = asString(wsRaw.workspace_id ?? wsRaw.name ?? wsRaw.id);
             const wsPanes = panes.filter(p => p.workspaceId === id);
-            let cwd = wsPanes.length > 0 ? (wsPanes[0].cwd || '') : (ws.cwd || '');
-            
-            const explicitLabel = ws.label ? String(ws.label) : '';
+            const cwd = wsPanes.length > 0 ? (wsPanes[0].cwd || '') : asString(wsRaw.cwd);
+
+            const explicitLabel = wsRaw.label ? asString(wsRaw.label) : '';
             let label = explicitLabel;
             if (!label) {
                 if (homedir && cwd === homedir) {
@@ -153,7 +197,7 @@ export function parseWorkspaces(
                 } else if (cwd) {
                     label = cwd.split(/[\\/]/).filter(Boolean).pop() || cwd;
                 } else {
-                    label = `Workspace ${ws.number || id}`;
+                    label = `Workspace ${asString(wsRaw.number, id)}`;
                 }
             }
 
@@ -161,9 +205,9 @@ export function parseWorkspaces(
                 id,
                 label,
                 cwd,
-                focused: Boolean(ws.focused)
+                focused: Boolean(wsRaw.focused)
             };
-        });
+        }).filter((ws): ws is ParsedWorkspace => ws !== null);
     } catch {
         return [];
     }
@@ -224,21 +268,21 @@ export function classifyAgentStatus(statusRaw: string): {
  * Parse stdout of `herdr agent list`
  */
 export function parseAgents(
-    stdout: string, 
+    stdout: string,
     workspaces: ParsedWorkspace[] = []
 ): ParsedAgent[] {
     try {
-        const data = JSON.parse(stdout);
-        const result = data.result || data;
-        const rawAgents = Array.isArray(result.agents) ? result.agents : [];
+        const data: unknown = JSON.parse(stdout);
+        const result = unwrapResultRecord(data);
+        const rawAgents = result && Array.isArray(result.agents) ? result.agents : [];
 
-        return rawAgents.map((a: any) => {
-            const id = String(a.pane_id || a.id || a.name || 'Unknown');
-            const name = String(a.name || a.agent || id);
-            const rawStatus = String(a.agent_status || a.status || 'idle');
+        return rawAgents.filter(isRecord).map((a) => {
+            const id = asString(a.pane_id ?? a.id ?? a.name, 'Unknown');
+            const name = asString(a.name ?? a.agent, id);
+            const rawStatus = asString(a.agent_status ?? a.status, 'idle');
             const info = classifyAgentStatus(rawStatus);
 
-            let workspaceId = a.workspace_id ? String(a.workspace_id) : undefined;
+            let workspaceId = a.workspace_id ? asString(a.workspace_id) : undefined;
             if (!workspaceId && id.includes(':')) {
                 workspaceId = id.split(':')[0];
             }
@@ -276,20 +320,20 @@ export function parseAgents(
  */
 export function parsePanes(stdout: string): ParsedPane[] {
     try {
-        const data = JSON.parse(stdout);
-        const result = data.result || data;
-        const rawPanes = Array.isArray(result.panes) ? result.panes : [];
+        const data: unknown = JSON.parse(stdout);
+        const result = unwrapResultRecord(data);
+        const rawPanes = result && Array.isArray(result.panes) ? result.panes : [];
 
-        return rawPanes.map((p: any) => {
+        return rawPanes.filter(isRecord).map((p) => {
             const pane: ParsedPane = {
-                id: String(p.pane_id || p.id || ''),
-                name: String(p.name || p.pane_id || ''),
-                command: String(p.command || ''),
-                workspaceId: String(p.workspace_id || ''),
-                cwd: String(p.foreground_cwd || p.cwd || '')
+                id: asString(p.pane_id ?? p.id),
+                name: asString(p.name ?? p.pane_id),
+                command: asString(p.command),
+                workspaceId: asString(p.workspace_id),
+                cwd: asString(p.foreground_cwd ?? p.cwd)
             };
             if (p.tab_id) {
-                pane.tabId = String(p.tab_id);
+                pane.tabId = asString(p.tab_id);
             }
             return pane;
         });
@@ -303,18 +347,18 @@ export function parsePanes(stdout: string): ParsedPane[] {
  */
 export function parseTabs(stdout: string): ParsedTab[] {
     try {
-        const data = JSON.parse(stdout);
-        const result = data.result || data;
-        const rawTabs = Array.isArray(result.tabs) ? result.tabs : [];
+        const data: unknown = JSON.parse(stdout);
+        const result = unwrapResultRecord(data);
+        const rawTabs = result && Array.isArray(result.tabs) ? result.tabs : [];
 
-        return rawTabs.map((t: any) => ({
-            id: String(t.tab_id || t.id || ''),
-            workspaceId: String(t.workspace_id || ''),
-            label: String(t.label || t.number || 'Tab'),
+        return rawTabs.filter(isRecord).map((t) => ({
+            id: asString(t.tab_id ?? t.id),
+            workspaceId: asString(t.workspace_id),
+            label: asString(t.label ?? t.number, 'Tab'),
             number: typeof t.number === 'number' ? t.number : undefined,
             focused: Boolean(t.focused),
             paneCount: typeof t.pane_count === 'number' ? t.pane_count : 1,
-            agentStatus: t.agent_status ? String(t.agent_status) : undefined
+            agentStatus: t.agent_status ? asString(t.agent_status) : undefined
         }));
     } catch {
         return [];
@@ -325,22 +369,22 @@ export function parseTabs(stdout: string): ParsedTab[] {
  * Parse structured snapshot object into ParsedTab array
  */
 export function parseSnapshotTabs(
-    snapshot: { tabs?: any[]; focused_tab_id?: string } | null
+    snapshot: Pick<RawSnapshotInput, 'tabs' | 'focused_tab_id'> | null | undefined
 ): ParsedTab[] {
     if (!snapshot || !Array.isArray(snapshot.tabs)) return [];
     const focusedTabId = snapshot.focused_tab_id || '';
 
-    return snapshot.tabs.map(t => {
-        const id = String(t.tab_id || t.id || '');
+    return snapshot.tabs.filter(isRecord).map(t => {
+        const id = asString(t.tab_id ?? t.id);
         const isFocused = Boolean(t.focused) || (focusedTabId !== '' && focusedTabId === id);
         return {
             id,
-            workspaceId: String(t.workspace_id || ''),
-            label: String(t.label || t.number || 'Tab'),
+            workspaceId: asString(t.workspace_id),
+            label: asString(t.label ?? t.number, 'Tab'),
             number: typeof t.number === 'number' ? t.number : undefined,
             focused: isFocused,
             paneCount: typeof t.pane_count === 'number' ? t.pane_count : 1,
-            agentStatus: t.agent_status ? String(t.agent_status) : undefined
+            agentStatus: t.agent_status ? asString(t.agent_status) : undefined
         };
     });
 }
@@ -349,20 +393,22 @@ export function parseSnapshotTabs(
  * Parse structured snapshot object into ParsedWorkspace array
  */
 export function parseSnapshotWorkspaces(
-    snapshot: { workspaces?: any[]; panes?: any[]; focused_workspace_id?: string } | null, 
+    snapshot: Pick<RawSnapshotInput, 'workspaces' | 'panes' | 'focused_workspace_id'> | null | undefined,
     homedir = ''
 ): ParsedWorkspace[] {
     if (!snapshot || !Array.isArray(snapshot.workspaces)) return [];
 
-    const panes = Array.isArray(snapshot.panes) ? snapshot.panes : [];
+    const panes = Array.isArray(snapshot.panes) ? snapshot.panes.filter(isRecord) : [];
     const focusedId = snapshot.focused_workspace_id || '';
 
-    return snapshot.workspaces.map(ws => {
-        const id = String(ws.workspace_id || ws.name || ws.id || '');
+    return snapshot.workspaces.filter(isRecord).map(ws => {
+        const id = asString(ws.workspace_id ?? ws.name ?? ws.id);
         const wsPanes = panes.filter(p => p.workspace_id === id);
-        let cwd = wsPanes.length > 0 ? (wsPanes[0].foreground_cwd || wsPanes[0].cwd || '') : (ws.cwd || '');
-        
-        const explicitLabel = ws.label ? String(ws.label) : '';
+        const cwd = wsPanes.length > 0
+            ? asString(wsPanes[0].foreground_cwd ?? wsPanes[0].cwd)
+            : asString(ws.cwd);
+
+        const explicitLabel = ws.label ? asString(ws.label) : '';
         let label = explicitLabel;
         if (!label) {
             if (homedir && cwd === homedir) {
@@ -370,7 +416,7 @@ export function parseSnapshotWorkspaces(
             } else if (cwd) {
                 label = cwd.split(/[\\/]/).filter(Boolean).pop() || cwd;
             } else {
-                label = `Workspace ${ws.number || id}`;
+                label = `Workspace ${asString(ws.number, id)}`;
             }
         }
 
@@ -389,19 +435,19 @@ export function parseSnapshotWorkspaces(
  * Parse structured snapshot object into ParsedAgent array
  */
 export function parseSnapshotAgents(
-    snapshot: { agents?: any[]; panes?: any[]; workspaces?: any[]; focused_workspace_id?: string } | null,
+    snapshot: Pick<RawSnapshotInput, 'agents' | 'panes' | 'workspaces' | 'focused_workspace_id'> | null | undefined,
     workspaces: ParsedWorkspace[] = []
 ): ParsedAgent[] {
     if (!snapshot) return [];
 
     const wsList = workspaces.length > 0 ? workspaces : parseSnapshotWorkspaces(snapshot);
+    const panes = Array.isArray(snapshot.panes) ? snapshot.panes.filter(isRecord) : [];
 
-    let rawAgents: any[] = [];
+    let rawAgents: JsonRecord[] = [];
     if (Array.isArray(snapshot.agents) && snapshot.agents.length > 0) {
-        rawAgents = snapshot.agents;
-    } else if (Array.isArray(snapshot.panes)) {
-        // Extract agent info from panes if present
-        rawAgents = snapshot.panes
+        rawAgents = snapshot.agents.filter(isRecord);
+    } else if (panes.length > 0) {
+        rawAgents = panes
             .filter(p => p.agent_status && p.agent_status !== 'unknown')
             .map(p => ({
                 id: p.pane_id,
@@ -411,22 +457,20 @@ export function parseSnapshotAgents(
             }));
     }
 
-    const panes = Array.isArray(snapshot.panes) ? snapshot.panes : [];
-
     return rawAgents.map(a => {
-        const id = String(a.pane_id || a.id || a.name || 'Unknown');
-        const name = String(a.name || a.agent || id);
-        const rawStatus = String(a.agent_status || a.status || 'idle');
+        const id = asString(a.pane_id ?? a.id ?? a.name, 'Unknown');
+        const name = asString(a.name ?? a.agent, id);
+        const rawStatus = asString(a.agent_status ?? a.status, 'idle');
         const info = classifyAgentStatus(rawStatus);
 
-        let workspaceId = a.workspace_id ? String(a.workspace_id) : undefined;
+        let workspaceId = a.workspace_id ? asString(a.workspace_id) : undefined;
         if (!workspaceId && id.includes(':')) {
             workspaceId = id.split(':')[0];
         }
 
         const matchedWs = wsList.find(w => w.id === workspaceId);
         const matchedPane = panes.find(p => p.pane_id === id);
-        const paneCwd = matchedPane ? (matchedPane.foreground_cwd || matchedPane.cwd || '') : '';
+        const paneCwd = matchedPane ? asString(matchedPane.foreground_cwd ?? matchedPane.cwd) : '';
 
         const workspaceLabel = matchedWs ? matchedWs.label : (workspaceId ? `Workspace ${workspaceId}` : undefined);
         const workspaceCwd = matchedWs?.cwd || (paneCwd || undefined);
@@ -619,18 +663,18 @@ export function parseIntegrationStatus(stdout: string): ParsedIntegrationInfo[] 
 /**
  * Parses socket API `integration.list` response payload into structured integration entries.
  */
-export function parseIntegrationListResult(result: any): ParsedIntegrationInfo[] {
-    const rawList = Array.isArray(result?.integrations)
+export function parseIntegrationListResult(result: unknown): ParsedIntegrationInfo[] {
+    const rawList: unknown[] = isRecord(result) && Array.isArray(result.integrations)
         ? result.integrations
         : (Array.isArray(result) ? result : []);
 
     const results: ParsedIntegrationInfo[] = [];
     for (const item of rawList) {
-        if (!item || typeof item !== 'object') continue;
-        const rawTarget = String(item.target || '').trim();
+        if (!isRecord(item)) continue;
+        const rawTarget = asString(item.target).trim();
         if (!rawTarget) continue;
 
-        const rawState = String(item.state || 'not_installed').toLowerCase();
+        const rawState = asString(item.state, 'not_installed').toLowerCase();
         let state: IntegrationState = 'not_installed';
         if (rawState === 'current' || rawState === 'installed') {
             state = 'current';
@@ -645,8 +689,8 @@ export function parseIntegrationListResult(result: any): ParsedIntegrationInfo[]
             target: cliTarget,
             cliTarget,
             socketTarget,
-            label: String(item.label || rawTarget),
-            command: String(item.command || cliTarget),
+            label: asString(item.label, rawTarget),
+            command: asString(item.command, cliTarget),
             available: Boolean(item.available),
             state
         });

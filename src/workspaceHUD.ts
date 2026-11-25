@@ -86,7 +86,7 @@ export class WorkspaceHUD implements vscode.Disposable {
             clearTimeout(this.eventRefreshTimer);
             this.eventRefreshTimer = null;
         }
-        if (this.socketClient && typeof (this.socketClient as any).off === 'function') {
+        if (this.socketClient && typeof this.socketClient.off === 'function') {
             if (this.connectListener) {
                 this.socketClient.off('connect', this.connectListener);
                 this.connectListener = undefined;
@@ -142,12 +142,12 @@ export class WorkspaceHUD implements vscode.Disposable {
                     }
                 };
 
-                execHerdr([...sessionArgs, 'workspace', 'list'], (err: any, stdout: any) => {
+                execHerdr([...sessionArgs, 'workspace', 'list'], (err, stdout) => {
                     if (!err && stdout) rawWorkspaces = stdout;
                     checkDone();
                 });
 
-                execHerdr([...sessionArgs, 'pane', 'list'], (err: any, stdout: any) => {
+                execHerdr([...sessionArgs, 'pane', 'list'], (err, stdout) => {
                     if (!err && stdout) rawPanes = stdout;
                     checkDone();
                 });

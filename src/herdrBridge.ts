@@ -1,0 +1,523 @@
+/*
+ * Copyright (c) 2026 Herdr Collie Authors
+ * Licensed under the MIT License.
+ */
+import * as vscode from 'vscode';
+import * as l10n from '@vscode/l10n';
+import { execHerdr, ensureSessionServerRunning } from './executors';
+import { isSameOrSubPath } from './formatters';
+import {
+    parseWorkspaces,
+    parseAgents,
+    parsePanes,
+    parseSessions
+} from './parsers';
+import { HerdrSocketClient } from './socketClient';
+import { isWorkspaceTrusted, ensureWorkspaceTrustedForAction } from './workspaceTrust';
+import { isHerdrRunningInTerminal } from './gitContext';
+
+export interface TargetQuickPickItem extends vscode.QuickPickItem {
+    targetId: string;
+    sessionName?: string;
+    isAgent?: boolean;
+    displayLabel?: string;
+    workspaceId?: string;
+    priority?: number;
+}
+
+export interface SessionQuickPickItem extends vscode.QuickPickItem {
+    sessionName?: string;
+    isCustom?: boolean;
+}
+
+export function getSessionName(): string {
+    const config = vscode.workspace.getConfiguration('herdr-collie');
+    return config.get<string>('sessionName', 'vscode') || 'vscode';
+}
+
+export function fetchActiveSessions(extraSession?: string): Promise<string[]> {
+    const configuredSession = getSessionName();
+    if (!isWorkspaceTrusted(vscode)) {
+        const fallback = ['default'];
+        if (configuredSession && !fallback.includes(configuredSession)) {
+            fallback.push(configuredSession);
+        }
+        if (extraSession && !fallback.includes(extraSession)) {
+            fallback.push(extraSession);
+        }
+        return Promise.resolve(fallback);
+    }
+    return new Promise((resolve) => {
+        execHerdr(['session', 'list', '--json'], (err, stdout) => {
+            if (!err && stdout) {
+                const sessions = parseSessions(stdout);
+                if (sessions.length > 0) {
+                    const sessionNames = sessions.map(s => s.name);
+                    if (!sessionNames.includes(configuredSession)) {
+                        sessionNames.push(configuredSession);
+                    }
+                    if (extraSession && !sessionNames.includes(extraSession)) {
+                        sessionNames.push(extraSession);
+                    }
+                    resolve(sessionNames);
+                    return;
+                }
+            }
+            const fallback = ['default'];
+            if (configuredSession && !fallback.includes(configuredSession)) {
+                fallback.push(configuredSession);
+            }
+            if (extraSession && !fallback.includes(extraSession)) {
+                fallback.push(extraSession);
+            }
+            resolve(fallback);
+        });
+    });
+}
+
+export interface TerminalBridge {
+    restoreTerminalIfNeeded(sessionName: string, specificTerminal?: vscode.Terminal): Promise<void>;
+    openOrAttachTerminal(
+        target: string,
+        isAgent: boolean,
+        displayLabel: string,
+        targetSession: string,
+        targetWorkspaceId?: string,
+        targetTabId?: string
+    ): Promise<void>;
+    registerListeners(context: vscode.ExtensionContext, getActiveSession: () => string): void;
+}
+
+export function createTerminalBridge(
+    onAttached: () => void
+): TerminalBridge {
+    const extensionManagedTerminals = new Set<vscode.Terminal>();
+    let creatingTerminal = false;
+
+    async function restoreTerminalIfNeeded(sessionName: string, specificTerminal?: vscode.Terminal): Promise<void> {
+        if (vscode.workspace.isTrusted === false) {
+            return;
+        }
+        const config = vscode.workspace.getConfiguration('herdr-collie');
+        if (!config.get<boolean>('autoRestoreTerminal', true)) {
+            return;
+        }
+
+        const sessionLabel = sessionName ? ` (${sessionName})` : '';
+        const baseTerminalName = `Herdr${sessionLabel}`;
+
+        const isMatchingName = (tName: string) => {
+            if (tName === baseTerminalName || tName === 'Herdr' || tName === 'Herdr (default)' || tName === 'Herdr (vscode)') {
+                return true;
+            }
+            if (tName.startsWith(`Herdr Workspace${sessionLabel}:`) || tName.startsWith(`Herdr Agent${sessionLabel}:`)) {
+                return true;
+            }
+            if (tName.startsWith('Herdr Workspace:') || tName.startsWith('Herdr Agent:')) {
+                return true;
+            }
+            return tName.startsWith('Herdr (');
+        };
+
+        const terminal = specificTerminal || vscode.window.terminals.find(t => isMatchingName(t.name));
+
+        if (!terminal || terminal.exitStatus !== undefined) {
+            return;
+        }
+
+        if (!isMatchingName(terminal.name)) {
+            return;
+        }
+
+        if (extensionManagedTerminals.has(terminal)) {
+            return;
+        }
+
+        extensionManagedTerminals.add(terminal);
+
+        // Determine effective target session from terminal name or fallback to sessionName
+        let effectiveSession = sessionName;
+        const sessionMatch = terminal.name.match(/^Herdr\s*\(([^)]+)\)/);
+        if (sessionMatch && sessionMatch[1]) {
+            effectiveSession = sessionMatch[1].trim();
+        }
+
+        // Wait for processId to resolve to ensure shell is spawned
+        try {
+            await Promise.race([
+                terminal.processId,
+                new Promise(r => setTimeout(r, 1000))
+            ]);
+        } catch {}
+
+        const isRunning = await isHerdrRunningInTerminal(terminal);
+        if (!isRunning) {
+            await ensureSessionServerRunning(effectiveSession);
+            const safeSession = effectiveSession ? effectiveSession.replace(/[^a-zA-Z0-9_-]/g, '') : '';
+            const sessionFlag = safeSession && safeSession !== 'default' ? `--session ${safeSession}` : '';
+            const command = `herdr ${sessionFlag}`.trim();
+            // Generous shell startup delay (600ms) to ensure zsh/bash completed loading
+            setTimeout(async () => {
+                if (terminal.exitStatus === undefined) {
+                    terminal.sendText(command);
+                    // Verify if Herdr started; if dropped due to slow shell init, retry once
+                    setTimeout(async () => {
+                        if (terminal.exitStatus === undefined) {
+                            const runningNow = await isHerdrRunningInTerminal(terminal);
+                            if (!runningNow) {
+                                terminal.sendText(command);
+                            }
+                        }
+                    }, 1200);
+                }
+            }, 600);
+        }
+    }
+
+    async function openOrAttachTerminal(
+        target: string,
+        isAgent: boolean,
+        displayLabel: string,
+        targetSession: string,
+        targetWorkspaceId?: string,
+        targetTabId?: string
+    ): Promise<void> {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+            return;
+        }
+        // Manage a single unified Herdr TUI terminal per session
+        const sessionLabel = targetSession && targetSession !== 'default' ? ` (${targetSession})` : '';
+        const baseTerminalName = `Herdr${sessionLabel}`;
+        const terminalName = baseTerminalName;
+
+        // Focus the target in Herdr background beforehand
+        if (target) {
+            if (isAgent) {
+                const wsId = targetWorkspaceId || (target.includes(':') ? target.split(':')[0] : undefined);
+                if (wsId) {
+                    await new Promise<void>((resolve) => {
+                        execHerdr(['--session', targetSession, 'workspace', 'focus', wsId], () => resolve());
+                    });
+                }
+                await new Promise<void>((resolve) => {
+                    execHerdr(['--session', targetSession, 'agent', 'focus', target], () => resolve());
+                });
+            } else if (targetTabId) {
+                await new Promise<void>((resolve) => {
+                    execHerdr(['--session', targetSession, 'workspace', 'focus', target], () => resolve());
+                });
+                await new Promise<void>((resolve) => {
+                    execHerdr(['--session', targetSession, 'tab', 'focus', targetTabId], () => resolve());
+                });
+            } else {
+                await new Promise<void>((resolve) => {
+                    execHerdr(['--session', targetSession, 'workspace', 'focus', target], () => resolve());
+                });
+            }
+        }
+
+        const safeSession = targetSession ? targetSession.replace(/[^a-zA-Z0-9_-]/g, '') : '';
+        const sessionFlag = safeSession && safeSession !== 'default' ? `--session ${safeSession}` : '';
+        const command = `herdr ${sessionFlag}`.trim();
+
+        const existingTerminal = vscode.window.terminals.find(t =>
+            t.name === baseTerminalName ||
+            (targetSession === 'default' && t.name === 'Herdr') ||
+            (targetSession === 'vscode' && (t.name === 'Herdr (vscode)' || t.name === 'Herdr')) ||
+            t.name.startsWith(`Herdr Workspace${sessionLabel}:`) ||
+            t.name.startsWith(`Herdr Agent${sessionLabel}:`)
+        );
+
+        if (existingTerminal) {
+            if (existingTerminal.exitStatus !== undefined) {
+                existingTerminal.dispose();
+                extensionManagedTerminals.delete(existingTerminal);
+            } else {
+                const isRunning = await isHerdrRunningInTerminal(existingTerminal);
+                if (isRunning) {
+                    existingTerminal.show();
+                    onAttached();
+                    return;
+                }
+                // Terminal shell is alive but Herdr is not running (e.g. restored terminal on VS Code restart)
+                await ensureSessionServerRunning(targetSession);
+                existingTerminal.show();
+                existingTerminal.sendText(command);
+                extensionManagedTerminals.add(existingTerminal);
+                const targetType = isAgent ? l10n.t('Agent') : l10n.t('Workspace');
+                const label = displayLabel || target || targetSession || 'Herdr';
+                vscode.window.showInformationMessage(l10n.t('Attached to Herdr{0} ({1}: {2})', sessionLabel, targetType, label));
+                onAttached();
+                return;
+            }
+        }
+
+        await ensureSessionServerRunning(targetSession);
+
+        const envOverrides: { [key: string]: string | null | undefined } = {
+            HERDR_WORKSPACE: null,
+            HERDR_PANE_ID: null,
+            HERDR_PANE: null,
+            HERDR_AGENT: null,
+            HERDR_SESSION: null,
+            ...(process.env['HERDR_CONFIG_PATH'] ? { HERDR_CONFIG_PATH: process.env['HERDR_CONFIG_PATH'] } : {})
+        };
+
+        creatingTerminal = true;
+        let terminal: vscode.Terminal;
+        try {
+            terminal = vscode.window.createTerminal({
+                name: terminalName,
+                env: envOverrides
+            });
+            extensionManagedTerminals.add(terminal);
+        } finally {
+            creatingTerminal = false;
+        }
+        terminal.show();
+        terminal.sendText(command);
+
+        const targetType = isAgent ? l10n.t('Agent') : l10n.t('Workspace');
+        const label = displayLabel || target || targetSession || 'Herdr';
+        vscode.window.showInformationMessage(l10n.t('Attached to Herdr{0} ({1}: {2})', sessionLabel, targetType, label));
+        onAttached();
+    }
+
+    function registerListeners(context: vscode.ExtensionContext, getActiveSession: () => string): void {
+        const onDidOpenTerminalDisposable = vscode.window.onDidOpenTerminal((terminal) => {
+            if (creatingTerminal) {
+                extensionManagedTerminals.add(terminal);
+                return;
+            }
+            const currentSession = getActiveSession();
+            restoreTerminalIfNeeded(currentSession, terminal).catch(() => {});
+        });
+
+        const onDidCloseTerminalDisposable = vscode.window.onDidCloseTerminal((terminal) => {
+            extensionManagedTerminals.delete(terminal);
+        });
+
+        context.subscriptions.push(onDidOpenTerminalDisposable, onDidCloseTerminalDisposable);
+    }
+
+    return {
+        restoreTerminalIfNeeded,
+        openOrAttachTerminal,
+        registerListeners
+    };
+}
+
+export async function sendPromptToHerdr(params: {
+    activeSidebarSession: string;
+    socketClient: HerdrSocketClient;
+    richText: string;
+    successMsg: string;
+    quickPickTitle: string;
+    options?: { stageOnly?: boolean; preferredCwd?: string; preferredAgentId?: string };
+}): Promise<boolean> {
+    if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+        return false;
+    }
+
+    const { activeSidebarSession, socketClient, richText, successMsg, quickPickTitle, options } = params;
+    const defaultSession = activeSidebarSession;
+    const sessions = await fetchActiveSessions(defaultSession);
+    const preferredCwd = options?.preferredCwd;
+    const preferredAgentId = options?.preferredAgentId;
+    const currentCwd = preferredCwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    const allItems: TargetQuickPickItem[] = [];
+    const primaryItems: TargetQuickPickItem[] = [];
+    const otherItems: TargetQuickPickItem[] = [];
+
+    await Promise.all(sessions.map(async (sessionName) => {
+        const sessionArgs = ['--session', sessionName];
+        const [workspaces, panes, agents] = await Promise.all([
+            new Promise<ReturnType<typeof parseWorkspaces>>((resolve) => {
+                execHerdr([...sessionArgs, 'workspace', 'list'], (error, stdout) => {
+                    resolve(!error && stdout ? parseWorkspaces(stdout) : []);
+                });
+            }),
+            new Promise<ReturnType<typeof parsePanes>>((resolve) => {
+                execHerdr([...sessionArgs, 'pane', 'list'], (error, stdout) => {
+                    resolve(!error && stdout ? parsePanes(stdout) : []);
+                });
+            }),
+            new Promise<ReturnType<typeof parseAgents>>((resolve) => {
+                execHerdr([...sessionArgs, 'agent', 'list'], (error, stdout) => {
+                    resolve(!error && stdout ? parseAgents(stdout) : []);
+                });
+            })
+        ]);
+
+        const workspaceCwdById = new Map<string, string>();
+        for (const ws of workspaces) {
+            if (ws.id && ws.cwd) {
+                workspaceCwdById.set(ws.id, ws.cwd);
+            }
+        }
+
+        const isCurrentSession = sessionName === defaultSession;
+
+        panes.forEach(p => {
+            const isMatchedCwd = Boolean(currentCwd && p.cwd && isSameOrSubPath(p.cwd, currentCwd));
+            const isPreferredMatch = Boolean(preferredCwd && p.cwd && isSameOrSubPath(p.cwd, preferredCwd));
+            const tag = isPreferredMatch
+                ? ` (${l10n.t('Target Worktree')})`
+                : (isMatchedCwd ? ' (Current Project)' : '');
+            const priority =
+                (isPreferredMatch ? 4 : 0) +
+                (isMatchedCwd ? 2 : 0) +
+                (isCurrentSession ? 1 : 0);
+            const item: TargetQuickPickItem = {
+                label: `[${sessionName}] $(terminal) Pane: ${p.name || p.id}`,
+                description: `Session: ${sessionName}${p.command ? ` | ${p.command}` : ''}${tag}`,
+                targetId: p.id,
+                sessionName,
+                isAgent: false,
+                priority
+            };
+            allItems.push(item);
+
+            if ((isCurrentSession && isMatchedCwd) || isPreferredMatch) {
+                primaryItems.push(item);
+            } else {
+                otherItems.push(item);
+            }
+        });
+
+        agents.forEach(a => {
+            const agentCwd = a.workspaceCwd || (a.workspaceId ? workspaceCwdById.get(a.workspaceId) : undefined);
+            const isMatchedCwd = Boolean(currentCwd && agentCwd && isSameOrSubPath(agentCwd, currentCwd));
+            const isPreferredAgent = Boolean(preferredAgentId && a.id === preferredAgentId);
+            const isPreferredCwd = Boolean(preferredCwd && agentCwd && isSameOrSubPath(agentCwd, preferredCwd));
+            const isPreferredMatch = isPreferredAgent || isPreferredCwd;
+            const tag = isPreferredMatch ? ` (${l10n.t('Target Worktree')})` : '';
+            const priority =
+                (isPreferredAgent ? 8 : 0) +
+                (isPreferredCwd ? 6 : 0) +
+                4 +
+                (isMatchedCwd ? 2 : 0) +
+                (isCurrentSession ? 1 : 0);
+            const item: TargetQuickPickItem = {
+                label: `[${sessionName}] $(hubot) Agent: ${a.name || a.id}`,
+                description: `Session: ${sessionName} | Status: ${a.status}${tag}`,
+                targetId: a.id,
+                sessionName,
+                isAgent: true,
+                priority
+            };
+            allItems.push(item);
+
+            if (isCurrentSession || isPreferredMatch) {
+                primaryItems.push(item);
+            } else {
+                otherItems.push(item);
+            }
+        });
+    }));
+
+    primaryItems.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || (b.isAgent ? 1 : 0) - (a.isAgent ? 1 : 0));
+    allItems.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || (b.isAgent ? 1 : 0) - (a.isAgent ? 1 : 0));
+
+    let displayItems: TargetQuickPickItem[] = [];
+    const hasOtherOptions = otherItems.length > 0;
+
+    if (primaryItems.length > 0 && hasOtherOptions) {
+        displayItems = [
+            ...primaryItems,
+            {
+                label: `$(ellipsis) ` + l10n.t('Select Other Destination... (Other sessions / panes)'),
+                description: `Browse ${otherItems.length} more target(s) across sessions`,
+                targetId: '__SHOW_ALL__',
+                isAgent: false
+            }
+        ];
+    } else if (primaryItems.length > 0) {
+        displayItems = primaryItems;
+    } else if (allItems.length > 0) {
+        displayItems = allItems;
+    } else {
+        displayItems = [{
+            label: l10n.t('(No targets found)'),
+            description: l10n.t('Run herdr in a terminal first'),
+            targetId: ''
+        }];
+    }
+
+    let selected = await vscode.window.showQuickPick(displayItems, {
+        placeHolder: l10n.t('Select target Herdr agent or terminal'),
+        title: quickPickTitle
+    });
+
+    if (!selected || !selected.targetId) return false;
+
+    if (selected.targetId === '__SHOW_ALL__') {
+        selected = await vscode.window.showQuickPick(allItems, {
+            placeHolder: l10n.t('Select target across all sessions and panes'),
+            title: `${quickPickTitle} (All Targets)`
+        });
+        if (!selected || !selected.targetId) return false;
+    }
+
+    const target = selected.targetId;
+    const sessionName = selected.sessionName;
+    const sessionArgs = sessionName ? ['--session', sessionName] : [];
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    if (!selected.isAgent || options?.stageOnly) {
+        if (options?.stageOnly && socketClient.isConnected && (!sessionName || sessionName === activeSidebarSession)) {
+            try {
+                await socketClient.sendPaneInput(target, richText);
+                const prefix = sessionName ? `[${sessionName}] ` : '';
+                vscode.window.showInformationMessage(
+                    selected.isAgent ? l10n.t('{0} (Agent)', successMsg) : l10n.t('{0} ({1}Pane)', successMsg, prefix)
+                );
+                return true;
+            } catch {
+                // Fallback to CLI
+            }
+        }
+        return await new Promise<boolean>((resolve) => {
+            execHerdr([...sessionArgs, 'pane', 'send-text', target, richText], { cwd }, (error) => {
+                if (error) {
+                    vscode.window.showErrorMessage(l10n.t('Failed to send: {0}', error.message));
+                    resolve(false);
+                    return;
+                }
+                const prefix = sessionName ? `[${sessionName}] ` : '';
+                if (selected?.isAgent) {
+                    vscode.window.showInformationMessage(l10n.t('{0} (Agent)', successMsg));
+                } else {
+                    vscode.window.showInformationMessage(l10n.t('{0} ({1}Pane)', successMsg, prefix));
+                }
+                resolve(true);
+            });
+        });
+    }
+
+    return await new Promise<boolean>((resolve) => {
+        execHerdr([...sessionArgs, 'agent', 'prompt', target, richText], { cwd }, (error) => {
+            if (error) {
+                if (error.message && error.message.includes('agent_not_found')) {
+                    execHerdr([...sessionArgs, 'pane', 'send-text', target, richText], { cwd }, (fbError) => {
+                        if (fbError) {
+                            vscode.window.showErrorMessage(l10n.t('Failed to send: {0}', fbError.message));
+                            resolve(false);
+                            return;
+                        }
+                        const prefix = sessionName ? `[${sessionName}] ` : '';
+                        vscode.window.showInformationMessage(l10n.t('{0} ({1}Pane)', successMsg, prefix));
+                        resolve(true);
+                    });
+                    return;
+                }
+                vscode.window.showErrorMessage(l10n.t('Failed to send context: {0}', error.message));
+                resolve(false);
+                return;
+            }
+            vscode.window.showInformationMessage(l10n.t('{0} (Agent)', successMsg));
+            resolve(true);
+        });
+    });
+}

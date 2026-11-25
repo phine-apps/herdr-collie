@@ -106,15 +106,34 @@ export async function ensureSessionServerRunning(sessionName: string = 'default'
     }
 }
 
+export type ExecHerdrOptions = cp.ExecFileOptionsWithStringEncoding & { _isRetry?: boolean };
+export type ExecHerdrCallback = (
+    error: cp.ExecFileException | null,
+    stdout: string,
+    stderr: string
+) => void;
+
+/**
+ * Formats an unknown thrown value into a human-readable error message.
+ */
+export function getErrorMessage(err: unknown): string {
+    if (err instanceof Error) {
+        return err.message;
+    }
+    return String(err);
+}
+
 // -----------------------------------------------------------------------------
 // Utility: Run herdr CLI without inheriting nested environment variables
 // -----------------------------------------------------------------------------
+export function execHerdr(args: string[], callback?: ExecHerdrCallback): void;
+export function execHerdr(args: string[], options: ExecHerdrOptions | undefined, callback?: ExecHerdrCallback): void;
 export function execHerdr(
-    args: string[], 
-    optionsOrCallback?: any, 
-    callback?: any
-) {
-    const env = Object.assign({}, process.env);
+    args: string[],
+    optionsOrCallback?: ExecHerdrOptions | ExecHerdrCallback,
+    callback?: ExecHerdrCallback
+): void {
+    const env: NodeJS.ProcessEnv = Object.assign({}, process.env);
     // Remove existing Herdr environment variables to avoid nesting limits
     delete env['HERDR_WORKSPACE'];
     delete env['HERDR_PANE_ID'];
@@ -124,9 +143,9 @@ export function execHerdr(
     if (process.env['HERDR_CONFIG_PATH']) {
         env['HERDR_CONFIG_PATH'] = process.env['HERDR_CONFIG_PATH'];
     }
-    
-    let options: any = { env };
-    let cb = callback;
+
+    let options: ExecHerdrOptions = { env };
+    let cb: ExecHerdrCallback | undefined = callback;
 
     if (typeof optionsOrCallback === 'function') {
         cb = optionsOrCallback;
@@ -135,7 +154,7 @@ export function execHerdr(
     }
 
     if (cb) {
-        cp.execFile('herdr', args, options, async (error: any, stdout: string, stderr: string) => {
+        cp.execFile('herdr', args, options, async (error: cp.ExecFileException | null, stdout: string, stderr: string) => {
             if (error && !options._isRetry && (
                 (error.message && error.message.includes('server_not_running')) ||
                 (stderr && stderr.includes('server_not_running')) ||
@@ -165,7 +184,7 @@ export function execHerdr(
 // -----------------------------------------------------------------------------
 export async function runGitCmd(args: string[], cwd: string): Promise<string> {
     return new Promise((resolve, reject) => {
-        cp.execFile('git', args, { cwd }, (error: any, stdout: any, stderr: any) => {
+        cp.execFile('git', args, { cwd }, (error: cp.ExecFileException | null, stdout: string, stderr: string) => {
             if (error) {
                 // Check if git is missing
                 if (error.code === 127 || error.code === 'ENOENT' || (error.message && error.message.includes('not found'))) {

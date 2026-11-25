@@ -160,7 +160,7 @@ describe('Workspace Trust (Restricted Mode) Guards', () => {
             expect(spawnCalls).to.be.empty;
         });
 
-        it('skips reloadConfigForSessions CLI execution in configManager when untrusted', () => {
+        it('skips reloadConfigForSessions CLI execution in configManager when untrusted', async () => {
             mockVscode.workspace.isTrusted = false;
             const tempStorageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collie-trust-cfg-'));
             try {
@@ -168,7 +168,7 @@ describe('Workspace Trust (Restricted Mode) Guards', () => {
                 reloadConfigForSessions('vscode', mockVscode);
                 expect(execFileCalls).to.be.empty;
 
-                syncHerdrConfig(
+                await syncHerdrConfig(
                     { globalStorageUri: { fsPath: tempStorageDir }, subscriptions: [] },
                     true,
                     'vscode',

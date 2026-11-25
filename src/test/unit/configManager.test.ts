@@ -108,12 +108,12 @@ sidebar_collapsed_mode = "compact"
             } catch (e) {}
         });
 
-        it('should generate embedded config and set environment variable when original file exists', () => {
+        it('should generate embedded config and set environment variable when original file exists', async () => {
             const originalConfigFile = path.join(tempConfigDir, 'config.toml');
             fs.writeFileSync(originalConfigFile, '[ui]\naccent = "magenta"\n', 'utf8');
             setOriginalConfigPathForTesting(originalConfigFile);
 
-            const embeddedPath = syncHerdrConfig(mockContext, true);
+            const embeddedPath = await syncHerdrConfig(mockContext, true);
             expect(embeddedPath).to.be.a('string');
             expect(fs.existsSync(embeddedPath!)).to.be.true;
 
@@ -127,11 +127,11 @@ sidebar_collapsed_mode = "compact"
             expect(process.env['HERDR_CONFIG_PATH']).to.equal(embeddedPath);
         });
 
-        it('should generate embedded config even when original config file does not exist', () => {
+        it('should generate embedded config even when original config file does not exist', async () => {
             const originalConfigFile = path.join(tempConfigDir, 'non_existent_config.toml');
             setOriginalConfigPathForTesting(originalConfigFile);
 
-            const embeddedPath = syncHerdrConfig(mockContext, true);
+            const embeddedPath = await syncHerdrConfig(mockContext, true);
             expect(embeddedPath).to.be.a('string');
             expect(fs.existsSync(embeddedPath!)).to.be.true;
 
@@ -141,48 +141,50 @@ sidebar_collapsed_mode = "compact"
             expect(parsed.ui.sidebar_collapsed_mode).to.equal('hidden');
         });
 
-        it('should delete environment variable when hideSidebar is false', () => {
+        it('should delete environment variable when hideSidebar is false', async () => {
             const originalConfigFile = path.join(tempConfigDir, 'config.toml');
             fs.writeFileSync(originalConfigFile, '[ui]\naccent = "cyan"\n', 'utf8');
             setOriginalConfigPathForTesting(originalConfigFile);
 
             // First enable it
-            syncHerdrConfig(mockContext, true);
+            await syncHerdrConfig(mockContext, true);
             expect(envVars.get('HERDR_CONFIG_PATH')).to.be.a('string');
 
             // Then disable it
-            const result = syncHerdrConfig(mockContext, false);
+            const result = await syncHerdrConfig(mockContext, false);
             expect(result).to.be.undefined;
             expect(envVars.has('HERDR_CONFIG_PATH')).to.be.false;
             expect(process.env['HERDR_CONFIG_PATH']).to.be.undefined;
         });
 
-        it('should watch and synchronize file changes on original config file', (done) => {
+        it('should watch and synchronize file changes on original config file', async () => {
             const originalConfigFile = path.join(tempConfigDir, 'config.toml');
             fs.writeFileSync(originalConfigFile, '[ui]\naccent = "cyan"\n', 'utf8');
             setOriginalConfigPathForTesting(originalConfigFile);
 
             const disposable = setupConfigManager(mockContext);
+            await disposable.ready;
 
-            // Update original config
-            setTimeout(() => {
+            try {
+                // Update original config
+                await new Promise(resolve => setTimeout(resolve, 50));
                 fs.writeFileSync(originalConfigFile, '[ui]\naccent = "yellow"\n', 'utf8');
 
-                setTimeout(() => {
-                    const embeddedPath = path.join(tempStorageDir, 'herdr_config_embedded.toml');
-                    const content = fs.readFileSync(embeddedPath, 'utf8');
-                    const parsed: any = toml.parse(content);
-                    expect(parsed.ui.accent).to.equal('yellow');
-                    expect(parsed.ui.sidebar_start_collapsed).to.equal(true);
-                    expect(parsed.ui.sidebar_collapsed_mode).to.equal('hidden');
+                await new Promise(resolve => setTimeout(resolve, 350));
+                await disposable.whenIdle();
 
-                    disposable.dispose();
-                    done();
-                }, 350);
-            }, 50);
+                const embeddedPath = path.join(tempStorageDir, 'herdr_config_embedded.toml');
+                const content = fs.readFileSync(embeddedPath, 'utf8');
+                const parsed: any = toml.parse(content);
+                expect(parsed.ui.accent).to.equal('yellow');
+                expect(parsed.ui.sidebar_start_collapsed).to.equal(true);
+                expect(parsed.ui.sidebar_collapsed_mode).to.equal('hidden');
+            } finally {
+                disposable.dispose();
+            }
         });
 
-        it('should notify configured and active custom sessions instead of hardcoding vscode on config reload', () => {
+        it('should notify configured and active custom sessions instead of hardcoding vscode on config reload', async () => {
             const executors = require('../../executors');
             const originalExecHerdr = executors.execHerdr;
             const recordedCalls: string[][] = [];
@@ -214,6 +216,7 @@ sidebar_collapsed_mode = "compact"
                 };
 
                 const disposable = setupConfigManager(mockContext, mockVscode, () => 'sidebar-extra');
+                await disposable.ready;
                 expect(recordedCalls).to.deep.include(['server', 'reload-config']);
                 expect(recordedCalls).to.deep.include(['--session', 'custom-team', 'server', 'reload-config']);
                 expect(recordedCalls).to.deep.include(['--session', 'sidebar-extra', 'server', 'reload-config']);
@@ -222,12 +225,28 @@ sidebar_collapsed_mode = "compact"
                 recordedCalls.length = 0;
                 configuredSession = 'renamed-session';
                 configChangeListener?.({ affectsConfiguration: (section: string) => section === 'herdr-collie.sessionName' });
+                await disposable.whenIdle();
                 expect(recordedCalls).to.deep.include(['--session', 'renamed-session', 'server', 'reload-config']);
 
                 disposable.dispose();
             } finally {
                 executors.execHerdr = originalExecHerdr;
             }
+        });
+
+        it('should serialize concurrent syncHerdrConfig calls without losing the latest state', async () => {
+            const originalConfigFile = path.join(tempConfigDir, 'config.toml');
+            fs.writeFileSync(originalConfigFile, '[ui]\naccent = "first"\n', 'utf8');
+            setOriginalConfigPathForTesting(originalConfigFile);
+
+            const firstSync = syncHerdrConfig(mockContext, true);
+            fs.writeFileSync(originalConfigFile, '[ui]\naccent = "second"\n', 'utf8');
+            const secondSync = syncHerdrConfig(mockContext, true);
+
+            const [, embeddedPath] = await Promise.all([firstSync, secondSync]);
+            const content = fs.readFileSync(embeddedPath!, 'utf8');
+            const parsed: any = toml.parse(content);
+            expect(parsed.ui.accent).to.equal('second');
         });
 
         it('reloadConfigForSessions falls back to vscode when omitted and skips duplicate --session default', () => {

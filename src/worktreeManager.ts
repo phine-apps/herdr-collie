@@ -7,7 +7,7 @@ import * as l10n from '@vscode/l10n';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as cp from 'child_process';
-import { execHerdr, isCommandAvailable, runGitCmd } from './executors';
+import { execHerdr, getErrorMessage, isCommandAvailable, runGitCmd } from './executors';
 import { ensureWorkspaceTrustedForAction } from './workspaceTrust';
 import {
     parseGitWorktrees,
@@ -132,7 +132,7 @@ export async function fetchIntegrationStatuses(socketClient?: HerdrSocketClient)
     }
 
     return await new Promise<ParsedIntegrationInfo[]>((resolve) => {
-        execHerdr(['integration', 'status'], (err: any, stdout: string) => {
+        execHerdr(['integration', 'status'], (err, stdout) => {
             if (!err && stdout) {
                 resolve(parseIntegrationStatus(stdout));
             } else {
@@ -160,7 +160,7 @@ export async function installHerdrIntegration(target: string, socketClient?: Her
     }
 
     return await new Promise<boolean>((resolve) => {
-        execHerdr(['integration', 'install', cliTarget], (err: any) => {
+        execHerdr(['integration', 'install', cliTarget], (err) => {
             resolve(!err);
         });
     });
@@ -184,7 +184,7 @@ export async function uninstallHerdrIntegration(target: string, socketClient?: H
     }
 
     return await new Promise<boolean>((resolve) => {
-        execHerdr(['integration', 'uninstall', cliTarget], (err: any) => {
+        execHerdr(['integration', 'uninstall', cliTarget], (err) => {
             resolve(!err);
         });
     });
@@ -480,9 +480,9 @@ export async function bootstrapWorktreeEnvironment(
                 skippedFiles.push(normalizedRel);
                 continue;
             }
-        } catch (err: any) {
+        } catch (err: unknown) {
             skippedFiles.push(normalizedRel);
-            warnings.push(l10n.t('Failed to copy {0}: {1}', normalizedRel, err?.message || String(err)));
+            warnings.push(l10n.t('Failed to copy {0}: {1}', normalizedRel, getErrorMessage(err)));
             continue;
         }
 
@@ -531,9 +531,9 @@ export async function bootstrapWorktreeEnvironment(
             }
             fs.copyFileSync(realSrc, destCandidate);
             copiedFiles.push(normalizedRel);
-        } catch (err: any) {
+        } catch (err: unknown) {
             skippedFiles.push(normalizedRel);
-            warnings.push(l10n.t('Failed to copy {0}: {1}', normalizedRel, err?.message || String(err)));
+            warnings.push(l10n.t('Failed to copy {0}: {1}', normalizedRel, getErrorMessage(err)));
         }
     }
 
@@ -576,7 +576,7 @@ export async function bootstrapWorktreeEnvironment(
             shellBin,
             shellArgs,
             { cwd: worktreePath, env, timeout: timeoutMs, maxBuffer: 5 * 1024 * 1024 },
-            (error: any, stdout: string, stderr: string) => {
+            (error, stdout, stderr) => {
                 if (error) {
                     const rawDetail = (stderr && stderr.trim()) || (stdout && stdout.trim()) || error.message || String(error);
                     const compact = rawDetail.replace(/[\r\n]+/g, ' ').trim().slice(0, 240);
@@ -694,8 +694,8 @@ export async function verifyWorktreeMerge(
 
     try {
         await runGitCmd(['merge-tree', '--write-tree', 'HEAD', branchName], repoRoot);
-    } catch (err: any) {
-        const msg = String(err?.message || err || '');
+    } catch (err: unknown) {
+        const msg = getErrorMessage(err);
         if (/CONFLICT|Merge conflict/i.test(msg)) {
             hasConflicts = true;
             conflictingFiles = parseMergeConflictFiles(msg);
@@ -1143,7 +1143,7 @@ export async function startAgentInPane(options: StartAgentInPaneOptions): Promis
                 execHerdr(
                     ['--session', sessionName, 'agent', 'start', agentName, '--kind', agentKind, '--pane', paneId, '--timeout', '30000'],
                     { cwd },
-                    (err: any) => resolve(!err)
+                    (err) => resolve(!err)
                 );
             });
         }
@@ -1164,7 +1164,7 @@ export async function startAgentInPane(options: StartAgentInPaneOptions): Promis
                         execHerdr(
                             ['--session', sessionName, 'agent', 'prompt', agentName, trimmedPrompt],
                             { cwd },
-                            (err: any) => resolve(!err)
+                            (err) => resolve(!err)
                         );
                     });
                 }
@@ -1189,7 +1189,7 @@ export async function startAgentInPane(options: StartAgentInPaneOptions): Promis
     }
 
     const fallbackOk = await new Promise<boolean>((resolve) => {
-        execHerdr(['--session', sessionName, 'pane', 'send-text', paneId, `${launchCmd}\n`], { cwd }, (err: any) => {
+        execHerdr(['--session', sessionName, 'pane', 'send-text', paneId, `${launchCmd}\n`], { cwd }, (err) => {
             resolve(!err);
         });
     });
@@ -1243,11 +1243,15 @@ export async function createHerdrWorkspace(options: CreateHerdrWorkspaceOptions)
     let tabId = '';
     let rootPaneId = '';
 
-    const extractIds = (raw: any) => {
-        const res = raw?.result || raw;
-        if (res?.workspace?.workspace_id) workspaceId = String(res.workspace.workspace_id);
-        if (res?.tab?.tab_id) tabId = String(res.tab.tab_id);
-        if (res?.root_pane?.pane_id) rootPaneId = String(res.root_pane.pane_id);
+    const isRecord = (v: unknown): v is Record<string, unknown> =>
+        typeof v === 'object' && v !== null && !Array.isArray(v);
+
+    const extractIds = (raw: unknown) => {
+        if (!isRecord(raw)) return;
+        const res = isRecord(raw.result) ? raw.result : raw;
+        if (isRecord(res.workspace) && res.workspace.workspace_id) workspaceId = String(res.workspace.workspace_id);
+        if (isRecord(res.tab) && res.tab.tab_id) tabId = String(res.tab.tab_id);
+        if (isRecord(res.root_pane) && res.root_pane.pane_id) rootPaneId = String(res.root_pane.pane_id);
     };
 
     if (socketClient && socketClient.isConnected) {
@@ -1267,7 +1271,7 @@ export async function createHerdrWorkspace(options: CreateHerdrWorkspaceOptions)
         createArgs.push(focus ? '--focus' : '--no-focus');
 
         await new Promise<void>((resolve, reject) => {
-            execHerdr(createArgs, (err: any, stdout: string) => {
+            execHerdr(createArgs, (err, stdout) => {
                 if (err) {
                     reject(err);
                     return;
@@ -1284,10 +1288,10 @@ export async function createHerdrWorkspace(options: CreateHerdrWorkspaceOptions)
         try {
             const [rawWorkspaces, rawPanes] = await Promise.all([
                 new Promise<string>((resolve) => {
-                    execHerdr(['--session', sessionName, 'workspace', 'list'], (_err: any, stdout: string) => resolve(stdout || ''));
+                    execHerdr(['--session', sessionName, 'workspace', 'list'], (_err, stdout) => resolve(stdout || ''));
                 }),
                 new Promise<string>((resolve) => {
-                    execHerdr(['--session', sessionName, 'pane', 'list'], (_err: any, stdout: string) => resolve(stdout || ''));
+                    execHerdr(['--session', sessionName, 'pane', 'list'], (_err, stdout) => resolve(stdout || ''));
                 })
             ]);
 
@@ -1337,10 +1341,14 @@ export interface SplitHerdrPaneOptions {
 export async function splitHerdrPane(options: SplitHerdrPaneOptions): Promise<string> {
     const { sessionName, direction, targetPaneId, workspaceId, cwd, ratio, focus = false, socketClient } = options;
 
-    const extractPaneId = (raw: any): string => {
-        const res = raw?.result || raw;
-        if (res?.pane?.pane_id) return String(res.pane.pane_id);
-        if (res?.pane_id) return String(res.pane_id);
+    const isRecord = (v: unknown): v is Record<string, unknown> =>
+        typeof v === 'object' && v !== null && !Array.isArray(v);
+
+    const extractPaneId = (raw: unknown): string => {
+        if (!isRecord(raw)) return '';
+        const res = isRecord(raw.result) ? raw.result : raw;
+        if (isRecord(res.pane) && res.pane.pane_id) return String(res.pane.pane_id);
+        if (res.pane_id) return String(res.pane_id);
         return '';
     };
 
@@ -1376,7 +1384,7 @@ export async function splitHerdrPane(options: SplitHerdrPaneOptions): Promise<st
     args.push(focus ? '--focus' : '--no-focus');
 
     return await new Promise<string>((resolve, reject) => {
-        execHerdr(args, { cwd }, (err: any, stdout: string) => {
+        execHerdr(args, { cwd }, (err, stdout) => {
             if (err) {
                 reject(err);
                 return;
@@ -1603,7 +1611,7 @@ export async function pushAndCreatePullRequestWithGh(
     }
 
     return await new Promise<string>((resolve, reject) => {
-        cp.execFile('gh', ghArgs, { cwd: worktreePath }, (error: any, stdout: string, stderr: string) => {
+        cp.execFile('gh', ghArgs, { cwd: worktreePath }, (error, stdout, stderr) => {
             if (error) {
                 const msg = (stderr && stderr.trim()) || (stdout && stdout.trim()) || error.message || 'gh pr create failed';
                 reject(new Error(msg));
@@ -1633,7 +1641,13 @@ export function parseGitHubIssuesJson(rawJson: string): GitHubIssueSummary[] {
             }
             const labels = Array.isArray(item.labels)
                 ? item.labels
-                    .map((l: any) => (typeof l === 'string' ? l : (l && typeof l.name === 'string' ? l.name : '')))
+                    .map((l: unknown) => {
+                        if (typeof l === 'string') return l;
+                        if (typeof l === 'object' && l !== null && 'name' in l && typeof (l as { name?: unknown }).name === 'string') {
+                            return (l as { name: string }).name;
+                        }
+                        return '';
+                    })
                     .filter(Boolean)
                 : [];
             issues.push({
@@ -1676,7 +1690,7 @@ export async function fetchOpenGitHubIssues(repoRoot: string, limit: number = 25
             'gh',
             ['issue', 'list', '--state', 'open', '--limit', String(safeLimit), '--json', 'number,title,body,labels,url'],
             { cwd: repoRoot, timeout: 8000, maxBuffer: 5 * 1024 * 1024 },
-            (error: any, stdout: string) => {
+            (error, stdout) => {
                 if (error || !stdout) {
                     resolve([]);
                     return;
@@ -1751,7 +1765,7 @@ export async function fetchFailingPrChecksWithLogs(
                 'gh',
                 ['pr', 'checks', branchName, '--json', jsonFields],
                 { cwd: worktreePath, timeout: 8000, maxBuffer: 5 * 1024 * 1024 },
-                (error: any, stdout: string, stderr: string) => {
+                (error, stdout, stderr) => {
                     // `gh pr checks` may exit non-zero when checks are failing even if JSON stdout is valid
                     if (stdout && stdout.trim().startsWith('[')) {
                         resolve({ checks: parseFailingPrChecksJson(stdout) });
@@ -1793,7 +1807,7 @@ export async function fetchFailingPrChecksWithLogs(
             'gh',
             ['run', 'view', firstRunId, '--log-failed'],
             { cwd: worktreePath, timeout: 8000, maxBuffer: 5 * 1024 * 1024 },
-            (error: any, stdout: string) => {
+            (error, stdout) => {
                 if (error || !stdout || !stdout.trim()) {
                     resolve(undefined);
                     return;
@@ -2001,8 +2015,8 @@ export async function launchWorktreeAgentWizard(
         progress.report({ message: l10n.t('Creating Git Worktree...') });
         try {
             await createWorktree(repoRoot, branchName, worktreePath, selectedBase.branchName);
-        } catch (err: any) {
-            vscode.window.showErrorMessage(l10n.t('Failed to create Git Worktree: {0}', err.message || err));
+        } catch (err: unknown) {
+            vscode.window.showErrorMessage(l10n.t('Failed to create Git Worktree: {0}', getErrorMessage(err)));
             return;
         }
 
@@ -2032,8 +2046,8 @@ export async function launchWorktreeAgentWizard(
             });
             targetWorkspaceId = wsResult.workspaceId;
             targetPaneId = wsResult.rootPaneId;
-        } catch (err: any) {
-            vscode.window.showErrorMessage(l10n.t('Failed to create Herdr Workspace: {0}', err.message || err));
+        } catch (err: unknown) {
+            vscode.window.showErrorMessage(l10n.t('Failed to create Herdr Workspace: {0}', getErrorMessage(err)));
             return;
         }
 

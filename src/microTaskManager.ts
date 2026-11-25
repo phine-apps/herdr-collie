@@ -120,7 +120,7 @@ export function detectTodoAtLine(lineText: string): TodoDetectionResult | null {
 export function formatDiagnosticPrompt(
     fileRelPath: string,
     line: number,
-    diagnostic: { message: string; code?: string | number | { value: string | number; target?: any }; source?: string; severity?: string | vscode.DiagnosticSeverity | number },
+    diagnostic: { message: string; code?: string | number | { value: string | number; target?: vscode.Uri }; source?: string; severity?: string | vscode.DiagnosticSeverity | number },
     codeSnippet: string
 ): string {
     const lang = detectLanguage(fileRelPath);
@@ -157,7 +157,7 @@ export function formatDiagnosticPrompt(
 
 export interface DiagnosticPromptInput {
     message: string;
-    code?: string | number | { value: string | number; target?: any };
+    code?: string | number | { value: string | number; target?: vscode.Uri };
     source?: string;
     severity?: string | vscode.DiagnosticSeverity | number;
     range?: { start?: { line?: number } };
@@ -323,7 +323,7 @@ export async function getAvailableAgents(
     }
 
     return new Promise<MicroTaskAgentOption[]>((resolve) => {
-        execHerdr(['--session', sessionName, 'agent', 'list'], (err: any, stdout: any) => {
+        execHerdr(['--session', sessionName, 'agent', 'list'], (err, stdout) => {
             if (!err && stdout) {
                 const parsed = parseAgents(stdout);
                 const list: MicroTaskAgentOption[] = parsed.map(a => {
@@ -376,10 +376,10 @@ export async function sendPromptToAgent(
 
     return new Promise<boolean>((resolve) => {
         const sessionArgs = sessionName ? ['--session', sessionName] : [];
-        execHerdr([...sessionArgs, 'agent', 'prompt', agentId, prompt], { cwd }, (err: any) => {
+        execHerdr([...sessionArgs, 'agent', 'prompt', agentId, prompt], { cwd }, (err) => {
             if (err) {
                 // If agent prompt fails with agent_not_found, try pane send-text
-                execHerdr([...sessionArgs, 'pane', 'send-text', agentId, prompt], { cwd }, (fbErr: any) => {
+                execHerdr([...sessionArgs, 'pane', 'send-text', agentId, prompt], { cwd }, (fbErr) => {
                     resolve(!fbErr);
                 });
             } else {
