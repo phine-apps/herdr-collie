@@ -18,7 +18,7 @@ import {
     GitWorktreeInfo
 } from './parsers';
 import { HerdrSocketClient } from './socketClient';
-import { setupConfigManager, reloadConfigForSessions, syncHerdrConfig } from './configManager';
+import { setupConfigManager, reloadConfigForSessions, ConfigManagerHandle } from './configManager';
 import { AgentHUD } from './agentHUD';
 import { WorkspaceHUD } from './workspaceHUD';
 import {
@@ -89,13 +89,19 @@ export function activate(context: vscode.ExtensionContext) {
     let activeSidebarSession = initialSession;
     const getActiveSidebarSession = () => activeSidebarSession;
 
-    // Setup Herdr embedded config asynchronously; wait for initial sync before spawning session server
-    const configManager = setupConfigManager(context, vscode, getActiveSidebarSession);
+    // Setup Herdr embedded config lazily when workspace is trusted; wait for initial sync before spawning session server
+    let configManager: ConfigManagerHandle | null = null;
+    const ensureConfigManagerInitialized = (): ConfigManagerHandle => {
+        if (!configManager) {
+            configManager = setupConfigManager(context, vscode, getActiveSidebarSession);
+        }
+        return configManager;
+    };
 
     // Ensure session server is running in background (when herdr CLI is available and workspace is trusted)
     let sessionServerReadyPromise = !isWorkspaceTrusted(vscode)
         ? Promise.resolve(false)
-        : configManager.ready
+        : ensureConfigManagerInitialized().ready
             .catch(() => undefined)
             .then(() => ensureSessionServerRunning(initialSession))
             .catch(() => false);
@@ -581,8 +587,8 @@ export function activate(context: vscode.ExtensionContext) {
                 const previousSession = activeSidebarSession;
                 const currentSession = getSessionName();
                 activeSidebarSession = currentSession;
-                const hideSidebar = vscode.workspace.getConfiguration('herdr-collie').get<boolean>('hideHerdrSidebar', true);
-                sessionServerReadyPromise = syncHerdrConfig(context, hideSidebar, currentSession, vscode)
+                const cm = ensureConfigManagerInitialized();
+                sessionServerReadyPromise = cm.ready
                     .catch(() => undefined)
                     .then(() => ensureSessionServerRunning(currentSession))
                     .catch(() => false);

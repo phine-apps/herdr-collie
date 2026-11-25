@@ -471,5 +471,12 @@
   "Line {0}": "Line {0}",
   "Lines {0}-{1}": "Lines {0}-{1}",
   "Dispatch Task: {0}": "Dispatch Task: {0}",
-  "Overlap: {0}": "Overlap: {0}"
+  "Overlap: {0}": "Overlap: {0}",
+  "(Restricted Mode — trust workspace to inspect repository changes)": "(Restricted Mode — trust workspace to inspect repository changes)",
+  "Current Project": "Current Project",
+  "Browse {0} more target(s) across sessions": "Browse {0} more target(s) across sessions",
+  "{0} (All Targets)": "{0} (All Targets)",
+  "Launch Herdr ({0})": "Launch Herdr ({0})",
+  "Attach to {0} session": "Attach to {0} session",
+  "Path: {0}": "Path: {0}"
 }

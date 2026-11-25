@@ -9,8 +9,6 @@ import * as toml from 'smol-toml';
 import { isWorkspaceTrusted } from './workspaceTrust';
 
 let originalConfigPathCache: string | null = null;
-let watcherInstance: fs.FSWatcher | null = null;
-let debounceTimer: NodeJS.Timeout | null = null;
 
 /**
  * Returns the path to the user's original herdr config.toml.
@@ -129,6 +127,10 @@ export function syncHerdrConfig(
     vscodeModule?: any
 ): Promise<string | undefined> {
     return enqueueSyncTask(async () => {
+        if (!isWorkspaceTrusted(vscodeModule)) {
+            return undefined;
+        }
+
         if (!hideSidebar) {
             if (context.environmentVariableCollection) {
                 context.environmentVariableCollection.delete('HERDR_CONFIG_PATH');
@@ -196,6 +198,14 @@ export function setupConfigManager(
         }
     }
 
+    if (!isWorkspaceTrusted(vscode)) {
+        return {
+            ready: Promise.resolve(undefined),
+            whenIdle: () => Promise.resolve(),
+            dispose: () => {}
+        };
+    }
+
     const getHideSidebarSetting = () => {
         if (vscode && vscode.workspace) {
             const config = vscode.workspace.getConfiguration('herdr-collie');
@@ -229,9 +239,11 @@ export function setupConfigManager(
     };
 
     let disposed = false;
+    let watcherInstance: fs.FSWatcher | null = null;
+    let debounceTimer: NodeJS.Timeout | null = null;
     let lastSyncPromise: Promise<string | undefined> = Promise.resolve(undefined);
     const triggerSync = (): Promise<string | undefined> => {
-        if (disposed) {
+        if (disposed || !isWorkspaceTrusted(vscode)) {
             return Promise.resolve(undefined);
         }
         lastSyncPromise = syncHerdrConfig(context, getHideSidebarSetting(), getTargetSessions(), vscode);
@@ -259,11 +271,21 @@ export function setupConfigManager(
     void fs.promises.access(configDir)
         .then(() => {
             if (disposed) return;
-            watcherInstance = fs.watch(configDir, (eventType, filename) => {
+            const watcher = fs.watch(configDir, (eventType, filename) => {
                 if (!filename || filename === path.basename(origPath)) {
                     handleFileChange();
                 }
             });
+            watcher.on('error', (err) => {
+                console.warn('[herdr-collie] Config directory watcher error:', err);
+                if (watcherInstance === watcher) {
+                    watcherInstance = null;
+                }
+                try {
+                    watcher.close();
+                } catch (e) {}
+            });
+            watcherInstance = watcher;
         })
         .catch((e: any) => {
             if (e?.code !== 'ENOENT') {

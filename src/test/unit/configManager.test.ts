@@ -274,5 +274,50 @@ sidebar_collapsed_mode = "compact"
                 executors.execHerdr = originalExecHerdr;
             }
         });
+
+        it('keeps watcher state isolated per setupConfigManager handle and handles watcher errors safely', async () => {
+            const { EventEmitter } = require('events');
+            const fsModule = require('fs');
+            const originalWatch = fsModule.watch;
+            const watchers: Array<{ emitter: any; closed: boolean }> = [];
+
+            fsModule.watch = () => {
+                const emitter: any = new EventEmitter();
+                const entry = { emitter, closed: false };
+                emitter.close = () => {
+                    entry.closed = true;
+                };
+                watchers.push(entry);
+                return emitter;
+            };
+
+            try {
+                const originalConfigFile = path.join(tempConfigDir, 'config.toml');
+                fs.writeFileSync(originalConfigFile, '[ui]\naccent = "cyan"\n', 'utf8');
+                setOriginalConfigPathForTesting(originalConfigFile);
+
+                const handle1 = setupConfigManager(mockContext);
+                const handle2 = setupConfigManager(mockContext);
+                await handle1.ready;
+                await handle2.ready;
+                // Wait a microtask tick for fs.promises.access().then(...) to attach watchers
+                await new Promise(resolve => setTimeout(resolve, 20));
+
+                expect(watchers).to.have.lengthOf(2);
+
+                // Disposing handle1 should only close watcher 1, leaving watcher 2 intact
+                handle1.dispose();
+                expect(watchers[0].closed).to.be.true;
+                expect(watchers[1].closed).to.be.false;
+
+                // Watcher error event must not throw unhandled error and should close watcher 2 cleanly
+                watchers[1].emitter.emit('error', new Error('ENOENT: dir removed'));
+                expect(watchers[1].closed).to.be.true;
+
+                handle2.dispose();
+            } finally {
+                fsModule.watch = originalWatch;
+            }
+        });
     });
 });

@@ -471,5 +471,12 @@
   "Line {0}": "第 {0} 行",
   "Lines {0}-{1}": "第 {0}-{1} 行",
   "Dispatch Task: {0}": "派发任务: {0}",
-  "Overlap: {0}": "重叠: {0}"
+  "Overlap: {0}": "重叠: {0}",
+  "(Restricted Mode — trust workspace to inspect repository changes)": "(受限模式 — 信任工作区以检查仓库更改)",
+  "Current Project": "当前项目",
+  "Browse {0} more target(s) across sessions": "跨会话浏览其他 {0} 个目标",
+  "{0} (All Targets)": "{0} (所有目标)",
+  "Launch Herdr ({0})": "启动 Herdr ({0})",
+  "Attach to {0} session": "附加到 {0} 会话",
+  "Path: {0}": "路径: {0}"
 }

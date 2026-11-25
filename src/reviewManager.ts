@@ -10,6 +10,7 @@ import * as vscode from 'vscode';
 import * as l10n from '@vscode/l10n';
 import { runGitCmd } from './executors';
 import { formatCodeFence } from './formatters';
+import { isWorkspaceTrusted } from './workspaceTrust';
 
 function runGitWithEnv(args: string[], cwd: string, extraEnv: Record<string, string>): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -981,6 +982,9 @@ export class HerdrReviewChangesProvider implements vscode.TreeDataProvider<Revie
     }
 
     public async getEffectiveRepoRoot(): Promise<string | null> {
+        if (!isWorkspaceTrusted(vscode)) {
+            return null;
+        }
         if (this.reviewTarget && this.reviewTarget.worktreePath) {
             return this.reviewTarget.worktreePath;
         }
@@ -1030,6 +1034,15 @@ export class HerdrReviewChangesProvider implements vscode.TreeDataProvider<Revie
                 return element.children;
             }
             return [];
+        }
+
+        if (!isWorkspaceTrusted(vscode)) {
+            const restrictedItem = new vscode.TreeItem(
+                l10n.t('(Restricted Mode — trust workspace to inspect repository changes)'),
+                vscode.TreeItemCollapsibleState.None
+            );
+            restrictedItem.iconPath = new vscode.ThemeIcon('shield');
+            return [restrictedItem as ReviewChangeTreeItem];
         }
 
         if (this.reviewTarget && this.reviewTarget.kind === 'worktree') {

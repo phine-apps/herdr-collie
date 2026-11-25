@@ -125,6 +125,22 @@ function asString(value: unknown, fallback = ''): string {
         : (typeof value === 'number' || typeof value === 'boolean' ? String(value) : fallback);
 }
 
+/**
+ * Returns the first candidate convertible to a non-empty string (preserving numeric 0 and booleans).
+ */
+function firstNonEmptyString(...values: unknown[]): string {
+    for (const value of values) {
+        if (typeof value === 'string') {
+            if (value !== '') {
+                return value;
+            }
+        } else if (typeof value === 'number' || typeof value === 'boolean') {
+            return String(value);
+        }
+    }
+    return '';
+}
+
 export interface RawSnapshotInput {
     tabs?: readonly unknown[];
     workspaces?: readonly unknown[];
@@ -185,7 +201,7 @@ export function parseWorkspaces(
                 };
             }
 
-            const id = asString(wsRaw.workspace_id ?? wsRaw.name ?? wsRaw.id);
+            const id = firstNonEmptyString(wsRaw.workspace_id, wsRaw.name, wsRaw.id);
             const wsPanes = panes.filter(p => p.workspaceId === id);
             const cwd = wsPanes.length > 0 ? (wsPanes[0].cwd || '') : asString(wsRaw.cwd);
 
@@ -197,7 +213,7 @@ export function parseWorkspaces(
                 } else if (cwd) {
                     label = cwd.split(/[\\/]/).filter(Boolean).pop() || cwd;
                 } else {
-                    label = `Workspace ${asString(wsRaw.number, id)}`;
+                    label = `Workspace ${firstNonEmptyString(wsRaw.number, id)}`;
                 }
             }
 
@@ -277,9 +293,9 @@ export function parseAgents(
         const rawAgents = result && Array.isArray(result.agents) ? result.agents : [];
 
         return rawAgents.filter(isRecord).map((a) => {
-            const id = asString(a.pane_id ?? a.id ?? a.name, 'Unknown');
-            const name = asString(a.name ?? a.agent, id);
-            const rawStatus = asString(a.agent_status ?? a.status, 'idle');
+            const id = firstNonEmptyString(a.pane_id, a.id, a.name, 'Unknown');
+            const name = firstNonEmptyString(a.name, a.agent, id);
+            const rawStatus = firstNonEmptyString(a.agent_status, a.status, 'idle');
             const info = classifyAgentStatus(rawStatus);
 
             let workspaceId = a.workspace_id ? asString(a.workspace_id) : undefined;
@@ -315,6 +331,20 @@ export function parseAgents(
     }
 }
 
+function parsePaneRecord(p: JsonRecord): ParsedPane {
+    const pane: ParsedPane = {
+        id: firstNonEmptyString(p.pane_id, p.id),
+        name: firstNonEmptyString(p.name, p.pane_id),
+        command: asString(p.command),
+        workspaceId: asString(p.workspace_id),
+        cwd: firstNonEmptyString(p.foreground_cwd, p.cwd)
+    };
+    if (p.tab_id) {
+        pane.tabId = asString(p.tab_id);
+    }
+    return pane;
+}
+
 /**
  * Parse stdout of `herdr pane list`
  */
@@ -324,22 +354,20 @@ export function parsePanes(stdout: string): ParsedPane[] {
         const result = unwrapResultRecord(data);
         const rawPanes = result && Array.isArray(result.panes) ? result.panes : [];
 
-        return rawPanes.filter(isRecord).map((p) => {
-            const pane: ParsedPane = {
-                id: asString(p.pane_id ?? p.id),
-                name: asString(p.name ?? p.pane_id),
-                command: asString(p.command),
-                workspaceId: asString(p.workspace_id),
-                cwd: asString(p.foreground_cwd ?? p.cwd)
-            };
-            if (p.tab_id) {
-                pane.tabId = asString(p.tab_id);
-            }
-            return pane;
-        });
+        return rawPanes.filter(isRecord).map(parsePaneRecord);
     } catch {
         return [];
     }
+}
+
+/**
+ * Parse structured snapshot object into ParsedPane array
+ */
+export function parseSnapshotPanes(
+    snapshot: Pick<RawSnapshotInput, 'panes'> | null | undefined
+): ParsedPane[] {
+    if (!snapshot || !Array.isArray(snapshot.panes)) return [];
+    return snapshot.panes.filter(isRecord).map(parsePaneRecord);
 }
 
 /**
@@ -352,9 +380,9 @@ export function parseTabs(stdout: string): ParsedTab[] {
         const rawTabs = result && Array.isArray(result.tabs) ? result.tabs : [];
 
         return rawTabs.filter(isRecord).map((t) => ({
-            id: asString(t.tab_id ?? t.id),
+            id: firstNonEmptyString(t.tab_id, t.id),
             workspaceId: asString(t.workspace_id),
-            label: asString(t.label ?? t.number, 'Tab'),
+            label: firstNonEmptyString(t.label, t.number, 'Tab'),
             number: typeof t.number === 'number' ? t.number : undefined,
             focused: Boolean(t.focused),
             paneCount: typeof t.pane_count === 'number' ? t.pane_count : 1,
@@ -375,12 +403,12 @@ export function parseSnapshotTabs(
     const focusedTabId = snapshot.focused_tab_id || '';
 
     return snapshot.tabs.filter(isRecord).map(t => {
-        const id = asString(t.tab_id ?? t.id);
+        const id = firstNonEmptyString(t.tab_id, t.id);
         const isFocused = Boolean(t.focused) || (focusedTabId !== '' && focusedTabId === id);
         return {
             id,
             workspaceId: asString(t.workspace_id),
-            label: asString(t.label ?? t.number, 'Tab'),
+            label: firstNonEmptyString(t.label, t.number, 'Tab'),
             number: typeof t.number === 'number' ? t.number : undefined,
             focused: isFocused,
             paneCount: typeof t.pane_count === 'number' ? t.pane_count : 1,
@@ -402,10 +430,10 @@ export function parseSnapshotWorkspaces(
     const focusedId = snapshot.focused_workspace_id || '';
 
     return snapshot.workspaces.filter(isRecord).map(ws => {
-        const id = asString(ws.workspace_id ?? ws.name ?? ws.id);
+        const id = firstNonEmptyString(ws.workspace_id, ws.name, ws.id);
         const wsPanes = panes.filter(p => p.workspace_id === id);
         const cwd = wsPanes.length > 0
-            ? asString(wsPanes[0].foreground_cwd ?? wsPanes[0].cwd)
+            ? firstNonEmptyString(wsPanes[0].foreground_cwd, wsPanes[0].cwd)
             : asString(ws.cwd);
 
         const explicitLabel = ws.label ? asString(ws.label) : '';
@@ -416,7 +444,7 @@ export function parseSnapshotWorkspaces(
             } else if (cwd) {
                 label = cwd.split(/[\\/]/).filter(Boolean).pop() || cwd;
             } else {
-                label = `Workspace ${asString(ws.number, id)}`;
+                label = `Workspace ${firstNonEmptyString(ws.number, id)}`;
             }
         }
 
@@ -458,9 +486,9 @@ export function parseSnapshotAgents(
     }
 
     return rawAgents.map(a => {
-        const id = asString(a.pane_id ?? a.id ?? a.name, 'Unknown');
-        const name = asString(a.name ?? a.agent, id);
-        const rawStatus = asString(a.agent_status ?? a.status, 'idle');
+        const id = firstNonEmptyString(a.pane_id, a.id, a.name, 'Unknown');
+        const name = firstNonEmptyString(a.name, a.agent, id);
+        const rawStatus = firstNonEmptyString(a.agent_status, a.status, 'idle');
         const info = classifyAgentStatus(rawStatus);
 
         let workspaceId = a.workspace_id ? asString(a.workspace_id) : undefined;
@@ -470,7 +498,7 @@ export function parseSnapshotAgents(
 
         const matchedWs = wsList.find(w => w.id === workspaceId);
         const matchedPane = panes.find(p => p.pane_id === id);
-        const paneCwd = matchedPane ? asString(matchedPane.foreground_cwd ?? matchedPane.cwd) : '';
+        const paneCwd = matchedPane ? firstNonEmptyString(matchedPane.foreground_cwd, matchedPane.cwd) : '';
 
         const workspaceLabel = matchedWs ? matchedWs.label : (workspaceId ? `Workspace ${workspaceId}` : undefined);
         const workspaceCwd = matchedWs?.cwd || (paneCwd || undefined);
@@ -689,8 +717,8 @@ export function parseIntegrationListResult(result: unknown): ParsedIntegrationIn
             target: cliTarget,
             cliTarget,
             socketTarget,
-            label: asString(item.label, rawTarget),
-            command: asString(item.command, cliTarget),
+            label: firstNonEmptyString(item.label, rawTarget),
+            command: firstNonEmptyString(item.command, cliTarget),
             available: Boolean(item.available),
             state
         });

@@ -1,0 +1,174 @@
+/*
+ * Copyright (c) 2026 Herdr Collie Authors
+ * Licensed under the MIT License.
+ */
+import '../helpers/mockVscode'; // Must be first to install global mock
+import { expect } from 'chai';
+import cp = require('child_process');
+import { mockState, mockVscode, resetMockState } from '../helpers/mockVscode';
+import { createTerminalBridge, sendPromptToHerdr } from '../../herdrBridge';
+import { HerdrSocketClient } from '../../socketClient';
+
+describe('herdrBridge Unit Tests', () => {
+    let originalExecFile: any;
+    let originalTerminalsDescriptor: PropertyDescriptor | undefined;
+    let originalCreateTerminal: any;
+    let originalOnDidOpenTerminal: any;
+    let originalOnDidCloseTerminal: any;
+    let execFileCalls: string[][];
+
+    beforeEach(() => {
+        resetMockState();
+        execFileCalls = [];
+        originalExecFile = cp.execFile;
+        originalTerminalsDescriptor = Object.getOwnPropertyDescriptor(mockVscode.window, 'terminals');
+        originalCreateTerminal = (mockVscode.window as any).createTerminal;
+        originalOnDidOpenTerminal = (mockVscode.window as any).onDidOpenTerminal;
+        originalOnDidCloseTerminal = (mockVscode.window as any).onDidCloseTerminal;
+
+        (cp as any).execFile = (file: string, args: string[], optionsOrCallback?: any, callback?: any) => {
+            execFileCalls.push(args);
+            const cb = typeof optionsOrCallback === 'function' ? optionsOrCallback : callback;
+            if (cb) {
+                if (args[0] === 'session' && args[1] === 'list') {
+                    cb(null, JSON.stringify({ sessions: [{ name: 'vscode', default: false, running: true }] }), '');
+                } else {
+                    cb(null, '{}', '');
+                }
+            }
+            return {} as any;
+        };
+    });
+
+    afterEach(() => {
+        (cp as any).execFile = originalExecFile;
+        if (originalTerminalsDescriptor) {
+            Object.defineProperty(mockVscode.window, 'terminals', originalTerminalsDescriptor);
+        } else {
+            delete (mockVscode.window as any).terminals;
+        }
+        if (originalCreateTerminal !== undefined) {
+            (mockVscode.window as any).createTerminal = originalCreateTerminal;
+        } else {
+            delete (mockVscode.window as any).createTerminal;
+        }
+        if (originalOnDidOpenTerminal !== undefined) {
+            (mockVscode.window as any).onDidOpenTerminal = originalOnDidOpenTerminal;
+        } else {
+            delete (mockVscode.window as any).onDidOpenTerminal;
+        }
+        if (originalOnDidCloseTerminal !== undefined) {
+            (mockVscode.window as any).onDidCloseTerminal = originalOnDidCloseTerminal;
+        } else {
+            delete (mockVscode.window as any).onDidCloseTerminal;
+        }
+    });
+
+    it('cancels pending restore timers when TerminalBridge is disposed', async () => {
+        const sentTexts: string[] = [];
+        const mockTerminal: any = {
+            name: 'Herdr (vscode)',
+            exitStatus: undefined,
+            processId: Promise.resolve(undefined), // undefined skips pgrep / ps check (returns false)
+            sendText: (text: string) => sentTexts.push(text),
+            show: () => {},
+            dispose: () => {}
+        };
+        (mockVscode.window as any).terminals = [mockTerminal];
+
+        // Stub which/where to report herdr exists without spawning
+        (cp as any).execFile = (file: string, args: string[], optionsOrCallback?: any, callback?: any) => {
+            execFileCalls.push([file, ...args]);
+            const cb = typeof optionsOrCallback === 'function' ? optionsOrCallback : callback;
+            if (cb) {
+                if (args[0] === '--session') {
+                    cb(null, 'ok', '');
+                } else {
+                    cb(null, '/usr/local/bin/herdr', '');
+                }
+            }
+            return {} as any;
+        };
+
+        const bridge = createTerminalBridge(() => {});
+        await bridge.restoreTerminalIfNeeded('vscode', mockTerminal);
+        bridge.dispose();
+
+        // Wait longer than the initial 600ms timer to confirm it was cancelled
+        await new Promise(resolve => setTimeout(resolve, 700));
+        expect(sentTexts).to.be.empty;
+    });
+
+    it('does not collide default "Herdr" terminal with "vscode" session in openOrAttachTerminal', async () => {
+        const defaultTerminalCalls: string[] = [];
+        const createdTerminals: Array<{ name: string; sent: string[] }> = [];
+
+        const defaultTerminal: any = {
+            name: 'Herdr',
+            exitStatus: undefined,
+            processId: Promise.resolve(undefined),
+            sendText: (text: string) => defaultTerminalCalls.push(text),
+            show: () => {},
+            dispose: () => {}
+        };
+        (mockVscode.window as any).terminals = [defaultTerminal];
+        (mockVscode.window as any).createTerminal = (opts: { name: string }) => {
+            const rec = { name: opts.name, sent: [] as string[] };
+            createdTerminals.push(rec);
+            return {
+                name: opts.name,
+                exitStatus: undefined,
+                processId: Promise.resolve(undefined),
+                sendText: (text: string) => rec.sent.push(text),
+                show: () => {},
+                dispose: () => {}
+            };
+        };
+
+        const bridge = createTerminalBridge(() => {});
+        try {
+            await bridge.openOrAttachTerminal('', false, 'vscode', 'vscode');
+            expect(defaultTerminalCalls).to.be.empty;
+            expect(createdTerminals).to.have.lengthOf(1);
+            expect(createdTerminals[0].name).to.equal('Herdr (vscode)');
+            expect(createdTerminals[0].sent).to.deep.equal(['herdr --session vscode']);
+        } finally {
+            bridge.dispose();
+        }
+    });
+
+    it('uses socketClient.getSnapshot() for active session in sendPromptToHerdr without spawning workspace/pane/agent CLI calls', async () => {
+        mockState.configurations.set('herdr-collie.sessionName', 'vscode');
+
+        let snapshotCalls = 0;
+        const fakeSocket = {
+            isConnected: true,
+            getSnapshot: async () => {
+                snapshotCalls++;
+                return {
+                    workspaces: [{ workspace_id: 'w1', label: 'herdr-collie', cwd: '/repo/herdr-collie' }],
+                    panes: [{ pane_id: 'w1:p1', name: 'claude', workspace_id: 'w1', foreground_cwd: '/repo/herdr-collie', command: 'claude' }],
+                    agents: [{ pane_id: 'w1:p1', name: 'claude', agent_status: 'idle', workspace_id: 'w1' }]
+                };
+            }
+        } as unknown as HerdrSocketClient;
+
+        const ok = await sendPromptToHerdr({
+            activeSidebarSession: 'vscode',
+            socketClient: fakeSocket,
+            richText: 'Check tests',
+            successMsg: 'Sent!',
+            quickPickTitle: 'Send Prompt'
+        });
+
+        expect(ok).to.be.true;
+        expect(snapshotCalls).to.equal(1);
+
+        // Discovery CLI calls (workspace/pane/agent list) must NOT be spawned for active socket-connected session
+        const discoveryCalls = execFileCalls.filter(
+            args => args[0] === '--session' && ['workspace', 'pane', 'agent'].includes(args[2]) && args[3] === 'list'
+        );
+        expect(discoveryCalls).to.be.empty;
+        expect(execFileCalls).to.deep.include(['--session', 'vscode', 'agent', 'prompt', 'w1:p1', 'Check tests']);
+    });
+});

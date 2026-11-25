@@ -142,8 +142,8 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
                 }
 
                 targetItems.push({
-                    label: `$(terminal) Launch Herdr (${defaultSession})`,
-                    description: `Attach to ${defaultSession} session`,
+                    label: `$(terminal) ${l10n.t('Launch Herdr ({0})', defaultSession)}`,
+                    description: l10n.t('Attach to {0} session', defaultSession),
                     targetId: 'DEFAULT_HERDR',
                     sessionName: defaultSession,
                     isAgent: false,
@@ -185,7 +185,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
                     return {
                         label: displayInfo.label,
                         description: displayInfo.description,
-                        detail: a.workspaceCwd ? `Path: ${a.workspaceCwd}` : undefined,
+                        detail: a.workspaceCwd ? l10n.t('Path: {0}', a.workspaceCwd) : undefined,
                         targetId: a.id,
                         sessionName,
                         isAgent: true,
@@ -217,7 +217,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
                                 agentItems.push({
                                     label: `[${s}] ${displayInfo.label}`,
                                     description: displayInfo.description,
-                                    detail: a.workspaceCwd ? `Path: ${a.workspaceCwd}` : undefined,
+                                    detail: a.workspaceCwd ? l10n.t('Path: {0}', a.workspaceCwd) : undefined,
                                     targetId: a.id,
                                     sessionName: s,
                                     isAgent: true,
@@ -359,6 +359,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
         vscode.window.setStatusBarMessage(l10n.t('Agent Sort: {0}', orderLabel), 3000);
     });
 
+    // Internal command invoked only from TreeItem.command; intentionally omitted from package.json contributes.commands.
     const switchSessionDirectDisposable = vscode.commands.registerCommand('herdr-collie.switchSessionDirect', async (targetSession: string) => {
         if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         if (targetSession) {
@@ -546,6 +547,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
         const socketClient = ctx.getSocketClient();
 
         if (!targetPath) {
+            if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
             const currentFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             let candidates: { label: string; description: string; detail: string; cwd: string }[] = [];
 
@@ -699,6 +701,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
     });
 
     const showAgentHUDDisposable = vscode.commands.registerCommand('herdr-collie.showAgentHUD', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         await ctx.agentHUD.showHUDQuickPick();
     });
 

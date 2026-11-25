@@ -471,5 +471,12 @@
   "Line {0}": "{0} 行目",
   "Lines {0}-{1}": "{0}〜{1} 行目",
   "Dispatch Task: {0}": "タスク送信: {0}",
-  "Overlap: {0}": "重複: {0}"
+  "Overlap: {0}": "重複: {0}",
+  "(Restricted Mode — trust workspace to inspect repository changes)": "(制限モード — リポジトリの変更を確認するにはワークスペースを信頼してください)",
+  "Current Project": "現在のプロジェクト",
+  "Browse {0} more target(s) across sessions": "全セッションから他 {0} 件のターゲットを参照",
+  "{0} (All Targets)": "{0} (すべてのターゲット)",
+  "Launch Herdr ({0})": "Herdr を起動 ({0})",
+  "Attach to {0} session": "{0} セッションにアタッチ",
+  "Path: {0}": "パス: {0}"
 }

@@ -19,7 +19,8 @@ import {
 } from '../helpers/mockVscode';
 import { isWorkspaceTrusted, ensureWorkspaceTrustedForAction } from '../../workspaceTrust';
 import { ensureSessionServerRunning, execHerdr } from '../../executors';
-import { reloadConfigForSessions, syncHerdrConfig, setOriginalConfigPathForTesting } from '../../configManager';
+import { reloadConfigForSessions, syncHerdrConfig, setupConfigManager, setOriginalConfigPathForTesting } from '../../configManager';
+import { HerdrReviewChangesProvider } from '../../reviewManager';
 import { launchWorktreeAgentWizard, manageIntegrationsWizard } from '../../worktreeManager';
 import { launchSwarmPlaybookWizard } from '../../swarmPlaybooks';
 import { promptAndDispatchTask } from '../../microTaskManager';
@@ -264,6 +265,87 @@ describe('Workspace Trust (Restricted Mode) Guards', () => {
                 expect(repoRootCalled).to.be.false;
             } finally {
                 radar.dispose();
+            }
+        });
+
+        it('skips config file I/O, env var mutation, and watcher setup in setupConfigManager when untrusted', async () => {
+            mockVscode.workspace.isTrusted = false;
+            const tempStorageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collie-trust-setup-'));
+            const origEnv = process.env['HERDR_CONFIG_PATH'];
+            delete process.env['HERDR_CONFIG_PATH'];
+
+            let envReplaceCalls = 0;
+            const envCollection = {
+                replace: () => { envReplaceCalls++; },
+                delete: () => {}
+            };
+            const subscriptions: Array<{ dispose(): void }> = [];
+
+            try {
+                const origConfigPath = path.join(tempStorageDir, 'config.toml');
+                fs.writeFileSync(origConfigPath, 'theme = "dark"\n', 'utf8');
+                setOriginalConfigPathForTesting(origConfigPath);
+
+                const handle = setupConfigManager(
+                    {
+                        globalStorageUri: { fsPath: tempStorageDir },
+                        environmentVariableCollection: envCollection,
+                        subscriptions
+                    },
+                    mockVscode,
+                    () => 'vscode'
+                );
+
+                const syncedPath = await handle.ready;
+                await handle.whenIdle();
+                handle.dispose();
+
+                expect(syncedPath).to.be.undefined;
+                expect(envReplaceCalls).to.equal(0);
+                expect(process.env['HERDR_CONFIG_PATH']).to.be.undefined;
+                expect(fs.existsSync(path.join(tempStorageDir, 'herdr_config_embedded.toml'))).to.be.false;
+                expect(subscriptions).to.be.empty;
+                expect(execFileCalls).to.be.empty;
+            } finally {
+                if (origEnv !== undefined) {
+                    process.env['HERDR_CONFIG_PATH'] = origEnv;
+                } else {
+                    delete process.env['HERDR_CONFIG_PATH'];
+                }
+                fs.rmSync(tempStorageDir, { recursive: true, force: true });
+            }
+        });
+
+        it('returns Restricted Mode placeholder and null repo root in HerdrReviewChangesProvider without running git when untrusted', async () => {
+            mockVscode.workspace.isTrusted = false;
+            let repoRootCalls = 0;
+            const provider = new HerdrReviewChangesProvider(async () => {
+                repoRootCalls++;
+                return '/repo';
+            }, 'tree');
+
+            try {
+                const root = await provider.getEffectiveRepoRoot();
+                expect(root).to.be.null;
+
+                provider.setReviewTarget({
+                    kind: 'worktree',
+                    repoRoot: '/repo',
+                    worktreePath: '/repo-wt',
+                    branchName: 'feat/test',
+                    baseBranch: 'main',
+                    label: 'feat/test'
+                });
+                const wtRoot = await provider.getEffectiveRepoRoot();
+                expect(wtRoot).to.be.null;
+
+                const items = await provider.getChildren();
+                expect(items).to.have.lengthOf(1);
+                expect(String(items[0].label)).to.include('Restricted Mode');
+                expect(repoRootCalls).to.equal(0);
+                expect(execFileCalls).to.be.empty;
+            } finally {
+                provider.dispose();
             }
         });
     });
