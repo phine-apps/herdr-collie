@@ -16,6 +16,7 @@ import {
 } from './parsers';
 import { execHerdr } from './executors';
 import { formatWorkspaceDisplay, WorkspaceDisplayInfo } from './formatters';
+import { isWorkspaceTrusted } from './workspaceTrust';
 
 export class WorkspaceHUD implements vscode.Disposable {
     private statusBarItem: vscode.StatusBarItem;
@@ -122,6 +123,10 @@ export class WorkspaceHUD implements vscode.Disposable {
 
         // Fallback to CLI if empty or socket not connected
         if (workspaces.length === 0 && !this.socketClient.isConnected) {
+            if (!isWorkspaceTrusted(vscode)) {
+                this.updateHUDText(undefined);
+                return;
+            }
             workspaces = await new Promise<ParsedWorkspace[]>((resolve) => {
                 const session = this.getSessionName();
                 const sessionArgs = ['--session', session];

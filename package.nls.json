@@ -70,5 +70,5 @@
   "config.worktree.copyFiles": "Relative file paths (such as '.env' or '.env.local') to automatically copy from the main repository into newly created Git worktrees if present",
   "config.worktree.postCreateCommand": "Optional shell command to run inside a newly created Git worktree right after provisioning (e.g. 'pnpm install --prefer-offline')",
   "capabilities.virtualWorkspaces.description": "Herdr Collie requires local filesystem access for Git worktrees, CLI execution, and Unix domain sockets.",
-  "capabilities.untrustedWorkspaces.description": "Automatic Herdr workspace binding, terminal auto-restore, and postCreateCommand execution are disabled in untrusted workspaces."
+  "capabilities.untrustedWorkspaces.description": "Automatic Herdr daemon startup, workspace binding, terminal auto-restore, postCreateCommand execution, and agent/Git-modifying commands require Workspace Trust."
 }

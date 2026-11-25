@@ -8,6 +8,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as cp from 'child_process';
 import { execHerdr, isCommandAvailable, runGitCmd } from './executors';
+import { ensureWorkspaceTrustedForAction } from './workspaceTrust';
 import {
     parseGitWorktrees,
     GitWorktreeInfo,
@@ -1395,6 +1396,9 @@ export async function splitHerdrPane(options: SplitHerdrPaneOptions): Promise<st
  */
 export async function manageIntegrationsWizard(socketClient?: HerdrSocketClient): Promise<void> {
     if (!vscode) return;
+    if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+        return;
+    }
 
     const integrations = await vscode.window.withProgress(
         {
@@ -1815,6 +1819,9 @@ export async function launchWorktreeAgentWizard(
     onSuccess?: () => void,
     socketClient?: HerdrSocketClient
 ): Promise<void> {
+    if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+        return;
+    }
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
         vscode.window.showErrorMessage(l10n.t('Please open a folder inside a Git repository first.'));

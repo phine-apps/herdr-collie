@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as toml from 'smol-toml';
+import { isWorkspaceTrusted } from './workspaceTrust';
 
 let originalConfigPathCache: string | null = null;
 let watcherInstance: fs.FSWatcher | null = null;
@@ -80,7 +81,10 @@ export interface ExtensionContextLike {
 /**
  * Notifies running Herdr servers (default plus any configured/active sessions) to reload config.
  */
-export function reloadConfigForSessions(sessionNames?: string | string[]): void {
+export function reloadConfigForSessions(sessionNames?: string | string[], vscodeModule?: any): void {
+    if (!isWorkspaceTrusted(vscodeModule)) {
+        return;
+    }
     const targets = new Set<string>();
     if (Array.isArray(sessionNames)) {
         for (const s of sessionNames) {
@@ -113,7 +117,8 @@ export function reloadConfigForSessions(sessionNames?: string | string[]): void 
 export function syncHerdrConfig(
     context: ExtensionContextLike,
     hideSidebar: boolean = true,
-    sessionNames?: string | string[]
+    sessionNames?: string | string[],
+    vscodeModule?: any
 ): string | undefined {
     if (!hideSidebar) {
         if (context.environmentVariableCollection) {
@@ -151,7 +156,7 @@ export function syncHerdrConfig(
         process.env['HERDR_CONFIG_PATH'] = embeddedPath;
 
         // Notify running servers to reload config
-        reloadConfigForSessions(sessionNames);
+        reloadConfigForSessions(sessionNames, vscodeModule);
 
         return embeddedPath;
     } catch (e) {
@@ -211,7 +216,7 @@ export function setupConfigManager(
     };
 
     // Initial sync
-    syncHerdrConfig(context, getHideSidebarSetting(), getTargetSessions());
+    syncHerdrConfig(context, getHideSidebarSetting(), getTargetSessions(), vscode);
 
     // Watch original config.toml
     const origPath = getOriginalConfigPath();
@@ -222,7 +227,7 @@ export function setupConfigManager(
             clearTimeout(debounceTimer);
         }
         debounceTimer = setTimeout(() => {
-            syncHerdrConfig(context, getHideSidebarSetting(), getTargetSessions());
+            syncHerdrConfig(context, getHideSidebarSetting(), getTargetSessions(), vscode);
         }, 200);
     }
 
@@ -242,7 +247,7 @@ export function setupConfigManager(
     if (vscode && vscode.workspace && vscode.workspace.onDidChangeConfiguration) {
         configChangeSub = vscode.workspace.onDidChangeConfiguration((e: any) => {
             if (e.affectsConfiguration('herdr-collie.hideHerdrSidebar') || e.affectsConfiguration('herdr-collie.sessionName')) {
-                syncHerdrConfig(context, getHideSidebarSetting(), getTargetSessions());
+                syncHerdrConfig(context, getHideSidebarSetting(), getTargetSessions(), vscode);
             }
         });
     }

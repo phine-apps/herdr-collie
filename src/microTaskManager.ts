@@ -10,6 +10,7 @@ import { formatCodeFence } from './formatters';
 import { HerdrSocketClient } from './socketClient';
 import { parseSnapshotAgents, parseSnapshotWorkspaces, parseAgents } from './parsers';
 import { execHerdr } from './executors';
+import { ensureWorkspaceTrustedForAction, isWorkspaceTrusted } from './workspaceTrust';
 
 export interface MicroTaskDiagnostic {
     message: string;
@@ -317,6 +318,10 @@ export async function getAvailableAgents(
         }
     }
 
+    if (!isWorkspaceTrusted(vscode)) {
+        return [];
+    }
+
     return new Promise<MicroTaskAgentOption[]>((resolve) => {
         execHerdr(['--session', sessionName, 'agent', 'list'], (err: any, stdout: any) => {
             if (!err && stdout) {
@@ -395,6 +400,9 @@ export async function promptAndDispatchTask(
     taskTitle: string,
     options?: { socketClient?: HerdrSocketClient; sessionName?: string; cwd?: string }
 ): Promise<boolean> {
+    if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+        return false;
+    }
     const sessionName = options?.sessionName || 'vscode';
     const rawAgents = await getAvailableAgents(options?.socketClient, sessionName);
 
@@ -612,7 +620,7 @@ export async function handleContextTaskDispatch(
         const primaryDiag = diags[0];
         const snippet = extractSnippet(doc.getText(), Math.max(1, lineNum - 5), Math.min(doc.lineCount, lineNum + 5));
         const prompt = formatDiagnosticPrompt(fileRelPath, lineNum, primaryDiag, snippet);
-        await promptAndDispatchTask(prompt, `Fix Diagnostic in ${path.basename(fileRelPath)}`, options);
+        await promptAndDispatchTask(prompt, l10n.t('Fix Diagnostic in {0}', path.basename(fileRelPath)), options);
         return;
     }
 
@@ -621,7 +629,7 @@ export async function handleContextTaskDispatch(
     if (todoMatch) {
         const snippet = extractSnippet(doc.getText(), Math.max(1, lineNum - 6), Math.min(doc.lineCount, lineNum + 8));
         const prompt = formatTodoPrompt(fileRelPath, todoMatch.type, todoMatch.text, lineNum, snippet);
-        await promptAndDispatchTask(prompt, `Complete ${todoMatch.type} in ${path.basename(fileRelPath)}`, options);
+        await promptAndDispatchTask(prompt, l10n.t('Complete {0} in {1}', todoMatch.type, path.basename(fileRelPath)), options);
         return;
     }
 
@@ -630,7 +638,7 @@ export async function handleContextTaskDispatch(
     if (testMatch) {
         const snippet = extractSnippet(doc.getText(), Math.max(1, lineNum - 2), Math.min(doc.lineCount, lineNum + 20));
         const prompt = formatTestPrompt(fileRelPath, testMatch.testName, lineNum, snippet, 'fix');
-        await promptAndDispatchTask(prompt, `Fix Test "${testMatch.testName}"`, options);
+        await promptAndDispatchTask(prompt, l10n.t('Fix Test "{0}"', testMatch.testName), options);
         return;
     }
 
@@ -641,10 +649,10 @@ export async function handleContextTaskDispatch(
         snippet = doc.getText(editor.selection);
         const s = editor.selection.start.line + 1;
         const e = editor.selection.end.line + 1;
-        targetLinesDesc = s === e ? `Line ${s}` : `Lines ${s}-${e}`;
+        targetLinesDesc = s === e ? l10n.t('Line {0}', s) : l10n.t('Lines {0}-{1}', s, e);
     } else {
         snippet = extractSnippet(doc.getText(), Math.max(1, lineNum - 8), Math.min(doc.lineCount, lineNum + 8));
-        targetLinesDesc = `Line ${lineNum}`;
+        targetLinesDesc = l10n.t('Line {0}', lineNum);
     }
 
     const actionChoices = [
@@ -679,5 +687,5 @@ export async function handleContextTaskDispatch(
     }
 
     const prompt = formatContextTaskPrompt(fileRelPath, lineNum, instruction, snippet);
-    await promptAndDispatchTask(prompt, `Dispatch Task: ${path.basename(fileRelPath)}`, options);
+    await promptAndDispatchTask(prompt, l10n.t('Dispatch Task: {0}', path.basename(fileRelPath)), options);
 }

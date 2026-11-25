@@ -70,5 +70,5 @@
   "config.worktree.copyFiles": "创建新的 Git Worktree 时，如果主仓库中存在则自动复制的相对文件路径 (例如 '.env', '.env.local')",
   "config.worktree.postCreateCommand": "创建新的 Git Worktree 后在其目录中运行的可选 Shell 命令 (例如 'pnpm install --prefer-offline')",
   "capabilities.virtualWorkspaces.description": "Herdr Collie 需要访问本地文件系统以支持 Git Worktree、CLI 执行与 Unix 域套接字通信。",
-  "capabilities.untrustedWorkspaces.description": "在不受信任的工作区中，将禁用 Herdr 工作区自动绑定、终端自动恢复以及 postCreateCommand 执行。"
+  "capabilities.untrustedWorkspaces.description": "在不受信任的工作区中，将禁用 Herdr 守护进程自动启动、工作区自动绑定、终端自动恢复及 postCreateCommand 执行，且启动智能体或修改 Git 的命令需要工作区信任。"
 }

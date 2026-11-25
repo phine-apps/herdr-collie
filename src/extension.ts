@@ -34,7 +34,8 @@ import {
     ParsedAgent
 } from './parsers';
 import { HerdrSocketClient, validateSessionName } from './socketClient';
-import { setupConfigManager, reloadConfigForSessions } from './configManager';
+import { setupConfigManager, reloadConfigForSessions, syncHerdrConfig } from './configManager';
+import { isWorkspaceTrusted, ensureWorkspaceTrustedForAction } from './workspaceTrust';
 import { AgentHUD } from './agentHUD';
 import { WorkspaceHUD } from './workspaceHUD';
 import { 
@@ -106,6 +107,16 @@ function getSessionName(): string {
 
 function fetchActiveSessions(extraSession?: string): Promise<string[]> {
     const configuredSession = getSessionName();
+    if (!isWorkspaceTrusted(vscode)) {
+        const fallback = ['default'];
+        if (configuredSession && !fallback.includes(configuredSession)) {
+            fallback.push(configuredSession);
+        }
+        if (extraSession && !fallback.includes(extraSession)) {
+            fallback.push(extraSession);
+        }
+        return Promise.resolve(fallback);
+    }
     return new Promise((resolve) => {
         execHerdr(['session', 'list', '--json'], (err: any, stdout: any) => {
             if (!err && stdout) {
@@ -376,12 +387,14 @@ export function activate(context: vscode.ExtensionContext) {
     setupConfigManager(context, vscode, getActiveSidebarSession);
 
     // Ensure session server is running in background (when herdr CLI is available and workspace is trusted)
-    const sessionServerReadyPromise = vscode.workspace.isTrusted === false
+    let sessionServerReadyPromise = !isWorkspaceTrusted(vscode)
         ? Promise.resolve(false)
         : ensureSessionServerRunning(initialSession).catch(() => false);
 
     let socketClient = new HerdrSocketClient(activeSidebarSession);
-    socketClient.connect();
+    if (isWorkspaceTrusted(vscode)) {
+        socketClient.connect();
+    }
 
     let refreshAllProviders: (options?: { includeHUDs?: boolean; snapshotMaxAgeMs?: number }) => void = () => {};
 
@@ -496,6 +509,9 @@ export function activate(context: vscode.ExtensionContext) {
         targetWorkspaceId?: string,
         targetTabId?: string
     ) {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+            return;
+        }
         // Manage a single unified Herdr TUI terminal per session
         const sessionLabel = targetSession && targetSession !== 'default' ? ` (${targetSession})` : '';
         const baseTerminalName = `Herdr${sessionLabel}`;
@@ -604,6 +620,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Feature 2: Native Terminal Integration & Target Selectors
     let attachWorkspaceDisposable = vscode.commands.registerCommand('herdr-collie.attachWorkspace', async (targetArg?: string, isAgentArg?: boolean, labelArg?: string, sessionArg?: string, workspaceIdArg?: string) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+            return;
+        }
         let target = targetArg;
         let isAgent = isAgentArg || false;
         let displayLabel = labelArg || target || '';
@@ -743,6 +762,9 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let selectAgentDisposable = vscode.commands.registerCommand('herdr-collie.selectAgent', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+            return;
+        }
         const sessionName = getActiveSidebarSession();
         let agentItems: TargetQuickPickItem[] = [];
 
@@ -837,6 +859,9 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let selectWorkspaceDisposable = vscode.commands.registerCommand('herdr-collie.selectWorkspace', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+            return;
+        }
         const sessionName = getActiveSidebarSession();
         const currentFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         let wsItems: TargetQuickPickItem[] = [];
@@ -933,6 +958,9 @@ export function activate(context: vscode.ExtensionContext) {
         quickPickTitle: string,
         options?: { stageOnly?: boolean; preferredCwd?: string; preferredAgentId?: string }
     ): Promise<boolean> {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+            return false;
+        }
         const defaultSession = activeSidebarSession;
         const sessions = await fetchActiveSessions(defaultSession);
         const preferredCwd = options?.preferredCwd;
@@ -1139,6 +1167,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     let sendContextDisposable = vscode.commands.registerCommand('herdr-collie.sendContext', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const editor = vscode.window.activeTextEditor;
         if (!editor) return;
         const selection = editor.selection;
@@ -1152,6 +1181,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let sendDiagnosticsDisposable = vscode.commands.registerCommand('herdr-collie.sendDiagnostics', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const editor = vscode.window.activeTextEditor;
         if (!editor) return;
         const diagnostics = vscode.languages.getDiagnostics(editor.document.uri);
@@ -1168,6 +1198,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let sendStagedChangesDisposable = vscode.commands.registerCommand('herdr-collie.sendStagedChanges', async (...args) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const resourceUri = args.length > 0 && args[0] && args[0].resourceUri
             ? (args[0].resourceUri as vscode.Uri)
             : undefined;
@@ -1190,6 +1221,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let sendWorkingTreeChangesDisposable = vscode.commands.registerCommand('herdr-collie.sendWorkingTreeChanges', async (...args) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const resourceUri = args.length > 0 && args[0] && args[0].resourceUri
             ? (args[0].resourceUri as vscode.Uri)
             : undefined;
@@ -1212,6 +1244,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let sendBranchContextDisposable = vscode.commands.registerCommand('herdr-collie.sendBranchContext', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const gitCtx = await resolveGitContextForUri(undefined, vscode.window.activeTextEditor?.document.uri);
         if (!gitCtx) return;
         const cwd = gitCtx.cwd;
@@ -1247,6 +1280,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let sendWorkspaceProblemsDisposable = vscode.commands.registerCommand('herdr-collie.sendWorkspaceProblems', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const diagnostics = vscode.languages.getDiagnostics();
         const problemsByFile: { [file: string]: { line: number; severity: 'Error' | 'Warning'; message: string }[] } = {};
         
@@ -1278,6 +1312,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let sendHoverInfoDisposable = vscode.commands.registerCommand('herdr-collie.sendHoverInfo', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
             vscode.window.showInformationMessage(l10n.t('Please place your cursor on a symbol in the editor.'));
@@ -1318,6 +1353,7 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     let sendTerminalOutputDisposable = vscode.commands.registerCommand('herdr-collie.sendTerminalOutput', async (terminalArg?: vscode.Terminal) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const terminal = terminalArg || vscode.window.activeTerminal;
         if (!terminal) {
             const latestAny = terminalShellMonitor.getLatestExecution();
@@ -1369,6 +1405,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let fixLastFailedCommandDisposable = vscode.commands.registerCommand('herdr-collie.fixLastFailedCommand', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         await terminalShellMonitor.fixFailedExecutionWizard();
     });
 
@@ -1407,7 +1444,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     const updateReviewStatusBar = (count: number) => {
         if (count > 0) {
-            reviewStatusBarItem.text = `$(comment-discussion) Review (${count})`;
+            reviewStatusBarItem.text = `$(comment-discussion) ${l10n.t('Review ({0})', count)}`;
             reviewStatusBarItem.tooltip = l10n.t('Review: {0} comments pending (Click to submit to agent)', count);
             reviewStatusBarItem.show();
         } else {
@@ -1696,7 +1733,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration(async (e) => {
-            if (e.affectsConfiguration('herdr-collie.sessionName')) {
+            if (e.affectsConfiguration('herdr-collie.sessionName') && isWorkspaceTrusted(vscode)) {
                 const newSession = getSessionName();
                 activeSidebarSession = newSession;
                 await ensureSessionServerRunning(newSession);
@@ -1789,12 +1826,14 @@ export function activate(context: vscode.ExtensionContext) {
     };
 
     let switchSessionDirectDisposable = vscode.commands.registerCommand('herdr-collie.switchSessionDirect', async (targetSession: string) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         if (targetSession) {
             await switchToSession(targetSession);
         }
     });
 
     let createSessionDisposable = vscode.commands.registerCommand('herdr-collie.createSession', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const input = await vscode.window.showInputBox({
             prompt: l10n.t('Enter name for new Herdr session'),
             placeHolder: l10n.t('e.g. feature-dev, debug-session'),
@@ -1809,6 +1848,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let switchSessionDisposable = vscode.commands.registerCommand('herdr-collie.switchSession', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const sessions = await fetchActiveSessions();
         const items: SessionQuickPickItem[] = sessions.map(name => ({
             label: name === activeSidebarSession ? `$(check) ${name}` : `$(server) ${name}`,
@@ -1866,6 +1906,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let deleteSessionDisposable = vscode.commands.registerCommand('herdr-collie.deleteSession', async (arg?: any) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         let sessionToDelete: string | undefined;
         if (typeof arg === 'string') {
             sessionToDelete = arg;
@@ -1890,9 +1931,17 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     // Auto-bind VS Code workspace to Herdr workspace safely without duplicates
-    const currentCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    const wsName = vscode.workspace.name || (currentCwd ? path.basename(currentCwd) : 'VSCode Workspace');
-    if (currentCwd && vscode.workspace.isTrusted !== false) {
+    let hasAutoBoundWorkspace = false;
+    const autoBindWorkspaceIfTrusted = () => {
+        if (hasAutoBoundWorkspace || !isWorkspaceTrusted(vscode)) {
+            return;
+        }
+        const currentCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const wsName = vscode.workspace.name || (currentCwd ? path.basename(currentCwd) : 'VSCode Workspace');
+        if (!currentCwd) {
+            return;
+        }
+        hasAutoBoundWorkspace = true;
         void (async () => {
             await sessionServerReadyPromise;
             if (!(await isCommandAvailable('herdr'))) {
@@ -1916,6 +1965,35 @@ export function activate(context: vscode.ExtensionContext) {
                 });
             });
         })();
+    };
+    autoBindWorkspaceIfTrusted();
+
+    if (typeof vscode.workspace.onDidGrantWorkspaceTrust === 'function') {
+        context.subscriptions.push(
+            vscode.workspace.onDidGrantWorkspaceTrust(() => {
+                const previousSession = activeSidebarSession;
+                const currentSession = getSessionName();
+                activeSidebarSession = currentSession;
+                const hideSidebar = vscode.workspace.getConfiguration('herdr-collie').get<boolean>('hideHerdrSidebar', true);
+                syncHerdrConfig(context, hideSidebar, currentSession, vscode);
+                sessionServerReadyPromise = ensureSessionServerRunning(currentSession).catch(() => false);
+                if (currentSession !== previousSession) {
+                    socketClient.dispose();
+                    socketClient = new HerdrSocketClient(currentSession);
+                    setupSocketListeners(socketClient);
+                    workspaceProvider.updateSocketClient(socketClient);
+                    agentProvider.updateSocketClient(socketClient);
+                    agentHUD.updateSocketClient(socketClient);
+                    workspaceHUD.updateSocketClient(socketClient);
+                    workspaceDragAndDropController.updateSocketClient(socketClient);
+                    updateTreeViewDescriptions();
+                }
+                socketClient.connect();
+                void restoreTerminalIfNeeded(currentSession).catch(() => {});
+                autoBindWorkspaceIfTrusted();
+                refreshAllProviders();
+            })
+        );
     }
 
     let refreshDisposable = vscode.commands.registerCommand('herdr-collie.refreshWorkspaces', () => {
@@ -1923,6 +2001,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let createWorkspaceDisposable = vscode.commands.registerCommand('herdr-collie.createWorkspace', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const label = await vscode.window.showInputBox({
             prompt: l10n.t('Enter label / name for the new workspace'),
             placeHolder: l10n.t('e.g. backend, frontend, docs')
@@ -1946,6 +2025,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let renameWorkspaceDisposable = vscode.commands.registerCommand('herdr-collie.renameWorkspace', async (item: HerdrWorkspaceTreeItem) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         if (!item) return;
         const targetId = item.rawId || (item.id ? item.id.split(':')[0] : '');
         if (!targetId) return;
@@ -1969,6 +2049,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let closeWorkspaceDisposable = vscode.commands.registerCommand('herdr-collie.closeWorkspace', async (item: HerdrWorkspaceTreeItem) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         if (!item) return;
         const targetId = item.rawId || (item.id ? item.id.split(':')[0] : '');
         if (!targetId) return;
@@ -2057,6 +2138,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Tab Navigation & Lifecycle Commands
     let focusTabDisposable = vscode.commands.registerCommand('herdr-collie.focusTab', async (tabId?: string, workspaceId?: string, sessionArg?: string) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         if (!tabId) return;
         const targetSession = sessionArg || getActiveSidebarSession();
         const wsId = workspaceId || (tabId.includes(':') ? tabId.split(':')[0] : '');
@@ -2064,6 +2146,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let createTabDisposable = vscode.commands.registerCommand('herdr-collie.createTab', async (item?: HerdrWorkspaceTreeItem) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const workspaceId = item?.rawId;
         const sessionName = getActiveSidebarSession();
         const args = ['--session', sessionName, 'tab', 'create'];
@@ -2081,6 +2164,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let closeTabDisposable = vscode.commands.registerCommand('herdr-collie.closeTab', async (item?: HerdrTabTreeItem) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         if (!item || !item.tabId) return;
         const sessionName = getActiveSidebarSession();
         const closeBtn = l10n.t('Close Tab');
@@ -2103,6 +2187,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Agent Live Output Peek Command
     let agentOutputChannel: vscode.OutputChannel | null = null;
     let peekAgentOutputDisposable = vscode.commands.registerCommand('herdr-collie.peekAgentOutput', async (item?: HerdrWorkspaceTreeItem | TargetQuickPickItem) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const targetSession = getActiveSidebarSession();
         let targetAgent = (item && 'rawId' in item) ? item.rawId : (item && 'targetId' in item ? item.targetId : undefined);
         
@@ -2147,14 +2232,17 @@ export function activate(context: vscode.ExtensionContext) {
 
     // P1: Smart Swarm & Worktree Commands
     let launchWorktreeAgentDisposable = vscode.commands.registerCommand('herdr-collie.launchWorktreeAgent', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         await launchWorktreeAgentWizard(getActiveSidebarSession(), () => refreshAllProviders(), socketClient);
     });
 
     let launchSwarmPlaybookDisposable = vscode.commands.registerCommand('herdr-collie.launchSwarmPlaybook', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         await launchSwarmPlaybookWizard(getActiveSidebarSession(), () => refreshAllProviders(), socketClient);
     });
 
     let mergeWorktreeDisposable = vscode.commands.registerCommand('herdr-collie.mergeWorktree', async (item?: HerdrWorkspaceTreeItem) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (!workspaceFolders || workspaceFolders.length === 0) {
             vscode.window.showErrorMessage(l10n.t('Please open a workspace folder first.'));
@@ -2260,6 +2348,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let removeWorktreeDisposable = vscode.commands.registerCommand('herdr-collie.removeWorktree', async (item?: HerdrWorkspaceTreeItem) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         let targetPath = item?.cwd;
         let targetId = item?.rawId || (item?.id ? item.id.split(':')[0] : undefined);
         let targetLabel = item?.label || 'Worktree';
@@ -2358,7 +2447,7 @@ export function activate(context: vscode.ExtensionContext) {
             }
         }
 
-        const lineRangeText = startLine === endLine ? `Line ${startLine}` : `Lines ${startLine}-${endLine}`;
+        const lineRangeText = startLine === endLine ? l10n.t('Line {0}', startLine) : l10n.t('Lines {0}-{1}', startLine, endLine);
         const comment = await vscode.window.showInputBox({
             title: l10n.t('Add Review Comment'),
             prompt: `${l10n.t('Enter review feedback for selected lines')} (${lineRangeText})`,
@@ -2380,6 +2469,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let submitReviewDisposable = vscode.commands.registerCommand('herdr-collie.submitReview', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const count = reviewController.commentCount;
         if (count === 0) {
             vscode.window.showInformationMessage(l10n.t('No pending review comments to submit'));
@@ -2531,6 +2621,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let createReviewCheckpointDisposable = vscode.commands.registerCommand('herdr-collie.createReviewCheckpoint', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const repoRoot = await reviewChangesProvider.getEffectiveRepoRoot();
         if (!repoRoot) {
             vscode.window.showWarningMessage(l10n.t('The current workspace is not a Git repository.'));
@@ -2546,6 +2637,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let rollbackReviewCheckpointDisposable = vscode.commands.registerCommand('herdr-collie.rollbackReviewCheckpoint', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const repoRoot = await reviewChangesProvider.getEffectiveRepoRoot();
         if (!repoRoot) {
             vscode.window.showWarningMessage(l10n.t('The current workspace is not a Git repository.'));
@@ -2644,6 +2736,7 @@ export function activate(context: vscode.ExtensionContext) {
     };
 
     let selectReviewTargetDisposable = vscode.commands.registerCommand('herdr-collie.selectReviewTarget', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const repoRoot = await resolveMainRepoRoot();
         if (!repoRoot) {
             vscode.window.showWarningMessage(l10n.t('The current workspace is not a Git repository.'));
@@ -2711,6 +2804,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let reviewWorktreeDisposable = vscode.commands.registerCommand('herdr-collie.reviewWorktree', async (item?: HerdrWorkspaceTreeItem) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         if (item?.cwd) {
             const repoRoot = await resolveMainRepoRoot(item.cwd);
             if (!repoRoot) {
@@ -2725,6 +2819,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let createPullRequestFromWorktreeDisposable = vscode.commands.registerCommand('herdr-collie.createPullRequestFromWorktree', async (item?: HerdrWorkspaceTreeItem) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const repoRoot = await resolveMainRepoRoot(item?.cwd);
         if (!repoRoot) {
             vscode.window.showWarningMessage(l10n.t('The current workspace is not a Git repository.'));
@@ -2918,6 +3013,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let manageIntegrationsDisposable = vscode.commands.registerCommand('herdr-collie.manageIntegrations', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         await manageIntegrationsWizard(socketClient);
     });
 
@@ -2937,9 +3033,12 @@ export function activate(context: vscode.ExtensionContext) {
             }
         }
     });
-    conflictRadar.scheduleScan(1200);
+    if (isWorkspaceTrusted(vscode)) {
+        conflictRadar.scheduleScan(1200);
+    }
 
     let showConflictRadarDisposable = vscode.commands.registerCommand('herdr-collie.showConflictRadar', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         await conflictRadar?.showConflictRadarWizard();
     });
 
@@ -2966,6 +3065,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let fixDiagnosticDisposable = vscode.commands.registerCommand('herdr-collie.fixDiagnosticWithAgent', async (uriArg?: vscode.Uri, diagArg?: any) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const editor = vscode.window.activeTextEditor;
         const uri = uriArg || editor?.document.uri;
         if (!uri) return;
@@ -2988,6 +3088,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let fixTestDisposable = vscode.commands.registerCommand('herdr-collie.fixTestWithAgent', async (uriArg?: vscode.Uri, testNameArg?: string, lineArg?: number, modeArg?: 'fix' | 'edge-cases') => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const editor = vscode.window.activeTextEditor;
         const uri = uriArg || editor?.document.uri;
         if (!uri) return;
@@ -3008,6 +3109,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let completeTodoDisposable = vscode.commands.registerCommand('herdr-collie.completeTodoWithAgent', async (uriArg?: vscode.Uri, todoTypeArg?: string, todoTextArg?: string, lineArg?: number) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const editor = vscode.window.activeTextEditor;
         const uri = uriArg || editor?.document.uri;
         if (!uri) return;
@@ -3025,6 +3127,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     let dispatchContextTaskDisposable = vscode.commands.registerCommand('herdr-collie.dispatchContextTask', async () => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
             vscode.window.showInformationMessage(l10n.t('Please open a file in the editor first.'));
@@ -3333,6 +3436,15 @@ class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.TreeItem>
         }
 
         // 2. CLI Fallback if socket is not connected
+        if (!isWorkspaceTrusted(vscode)) {
+            this.currentItems = [];
+            const restrictedItem = new vscode.TreeItem(
+                l10n.t('(Restricted Mode — trust workspace to connect Herdr)'),
+                vscode.TreeItemCollapsibleState.None
+            );
+            restrictedItem.iconPath = new vscode.ThemeIcon('shield');
+            return [restrictedItem];
+        }
         return new Promise((resolve) => {
             const sessionArgs = ['--session', sessionName];
 

@@ -9,6 +9,7 @@ import { HerdrSocketClient } from './socketClient';
 import { ParsedAgent, AgentStatusType, parseSnapshotAgents, parseAgents, extractCleanOutputSummary } from './parsers';
 import { execHerdr } from './executors';
 import { formatWorkspaceProblems, formatDurationCompact } from './formatters';
+import { isWorkspaceTrusted } from './workspaceTrust';
 
 export type AutoVerifyMode = 'prompt' | 'auto' | 'off';
 
@@ -296,6 +297,11 @@ export class AgentHUD implements vscode.Disposable {
 
         // Fallback to CLI if empty or not connected
         if (agents.length === 0 && !this.socketClient.isConnected) {
+            if (!isWorkspaceTrusted(vscode)) {
+                this.processAgentStateTransitions(agents);
+                this.updateHUDText(agents);
+                return;
+            }
             agents = await new Promise<ParsedAgent[]>((resolve) => {
                 const session = this.getSessionName();
                 execHerdr(['--session', session, 'agent', 'list'], (err: any, stdout: any) => {
@@ -451,7 +457,7 @@ export class AgentHUD implements vscode.Disposable {
             return;
         }
 
-        if (mode === 'auto') {
+        if (mode === 'auto' && isWorkspaceTrusted(vscode)) {
             const rawMaxRetries = config.get<number>('agentHUD.autoVerifyMaxRetries', 2);
             const maxRetries = Math.max(1, Math.min(5, typeof rawMaxRetries === 'number' ? rawMaxRetries : 2));
             const currentRetries = this.autoVerifyRetryCounts.get(agent.id) || 0;

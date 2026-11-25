@@ -6,6 +6,7 @@ import * as cp from 'child_process';
 import * as net from 'net';
 import * as path from 'path';
 import { getSessionSocketPath } from './socketClient';
+import { isWorkspaceTrusted } from './workspaceTrust';
 
 export { getSessionSocketPath };
 
@@ -16,6 +17,9 @@ const activeServerStartPromises = new Map<string, Promise<boolean>>();
  * Checks if the session server daemon is running, and spawns it in the background if not.
  */
 export async function ensureSessionServerRunning(sessionName: string = 'default'): Promise<boolean> {
+    if (!isWorkspaceTrusted()) {
+        return false;
+    }
     if (activeServerStartPromises.has(sessionName)) {
         return await activeServerStartPromises.get(sessionName)!;
     }

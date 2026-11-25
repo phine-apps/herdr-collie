@@ -15,7 +15,7 @@
   },
   "homepage": "https://phine-apps.github.io/",
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.93.0"
   },
   "categories": [
     "AI",
@@ -30,7 +30,14 @@
     },
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "%capabilities.untrustedWorkspaces.description%"
+      "description": "%capabilities.untrustedWorkspaces.description%",
+      "restrictedConfigurations": [
+        "herdr-collie.defaultAgentCommand",
+        "herdr-collie.worktree.postCreateCommand",
+        "herdr-collie.worktree.copyFiles",
+        "herdr-collie.sessionName",
+        "herdr-collie.agentHUD.autoVerifyDiagnostics"
+      ]
     }
   },
   "keywords": [
@@ -685,6 +692,7 @@
         "herdr-collie.sessionName": {
           "type": "string",
           "default": "vscode",
+          "restricted": true,
           "description": "%config.sessionName%"
         },
         "herdr-collie.worktreeLocation": {
@@ -709,6 +717,7 @@
             "off"
           ],
           "default": "prompt",
+          "restricted": true,
           "description": "%config.agentHUD.autoVerifyDiagnostics%"
         },
         "herdr-collie.agentHUD.autoVerifyMaxRetries": {
@@ -783,6 +792,7 @@
             ".env.development.local",
             ".env.test.local"
           ],
+          "restricted": true,
           "description": "%config.worktree.copyFiles%"
         },
         "herdr-collie.worktree.postCreateCommand": {
@@ -871,7 +881,7 @@
     "@types/chai": "^5.2.3",
     "@types/mocha": "^10.0.10",
     "@types/node": "~26.6.6",
-    "@types/vscode": "~1.90.0",
+    "@types/vscode": "~1.93.0",
     "@vscode/vsce": "^4.1.1",
     "chai": "^6.3.0",
     "esbuild": "^0.28.2",

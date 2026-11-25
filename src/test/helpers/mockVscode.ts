@@ -34,6 +34,9 @@ export interface MockVscodeState {
     warningMessageResponse?: string;
     informationMessageResponse?: string;
     inputBoxResponse?: string;
+    workspaceTrustRequestResponse?: boolean | undefined;
+    requestWorkspaceTrustCalls: any[];
+    grantWorkspaceTrustListeners: Array<() => any>;
     statusBarItems: MockStatusBarItem[];
     treeViews: Map<string, MockTreeView>;
     configurations: Map<string, any>;
@@ -42,6 +45,8 @@ export interface MockVscodeState {
 }
 
 export const mockState: MockVscodeState = {
+    requestWorkspaceTrustCalls: [],
+    grantWorkspaceTrustListeners: [],
     statusBarItems: [],
     treeViews: new Map(),
     configurations: new Map(),
@@ -67,6 +72,9 @@ export function resetMockState(): void {
     mockState.warningMessageResponse = undefined;
     mockState.informationMessageResponse = undefined;
     mockState.inputBoxResponse = undefined;
+    mockState.workspaceTrustRequestResponse = undefined;
+    mockState.requestWorkspaceTrustCalls = [];
+    mockState.grantWorkspaceTrustListeners = [];
     mockState.statusBarItems = [];
     mockState.treeViews = new Map();
     mockState.configurations.clear();
@@ -356,6 +364,27 @@ export const mockVscode = {
     },
     workspace: {
         isTrusted: true,
+        requestWorkspaceTrust: async (options?: any): Promise<boolean | undefined> => {
+            mockState.requestWorkspaceTrustCalls.push(options);
+            if (mockState.workspaceTrustRequestResponse === true) {
+                mockVscode.workspace.isTrusted = true;
+                for (const listener of [...mockState.grantWorkspaceTrustListeners]) {
+                    listener();
+                }
+            }
+            return mockState.workspaceTrustRequestResponse;
+        },
+        onDidGrantWorkspaceTrust: (listener: () => any) => {
+            mockState.grantWorkspaceTrustListeners.push(listener);
+            return {
+                dispose: () => {
+                    const idx = mockState.grantWorkspaceTrustListeners.indexOf(listener);
+                    if (idx >= 0) {
+                        mockState.grantWorkspaceTrustListeners.splice(idx, 1);
+                    }
+                }
+            };
+        },
         asRelativePath: (pathOrUri: any, _includeWorkspaceFolder?: boolean): string => {
             const p = typeof pathOrUri === 'string' ? pathOrUri : (pathOrUri?.fsPath || pathOrUri?.path || '');
             return path.basename(p);

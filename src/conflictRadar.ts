@@ -16,6 +16,7 @@ import {
     listGitWorktrees
 } from './worktreeManager';
 import { isSameOrSubPath } from './formatters';
+import { ensureWorkspaceTrustedForAction, isWorkspaceTrusted } from './workspaceTrust';
 
 export interface WorktreeTouchEntry {
     worktreePath: string;
@@ -382,7 +383,7 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
     }
 
     public scheduleScan(delayMs = 600): void {
-        if (!this.isEnabled()) {
+        if (!this.isEnabled() || !isWorkspaceTrusted(vscode)) {
             this.clearVisualState();
             return;
         }
@@ -396,7 +397,7 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
     }
 
     public async scanNow(force = true): Promise<ConflictScanResult | null> {
-        if (!this.isEnabled()) {
+        if (!this.isEnabled() || !isWorkspaceTrusted(vscode)) {
             this.clearVisualState();
             return null;
         }
@@ -469,10 +470,10 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
 
         const highCount = result.conflicts.filter(c => c.severity === 'high').length;
         if (highCount > 0) {
-            this.statusBarItem.text = `$(warning) Overlap: ${count}`;
+            this.statusBarItem.text = `$(warning) ${l10n.t('Overlap: {0}', count)}`;
             this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
         } else {
-            this.statusBarItem.text = `$(git-compare) Overlap: ${count}`;
+            this.statusBarItem.text = `$(git-compare) ${l10n.t('Overlap: {0}', count)}`;
             this.statusBarItem.backgroundColor = undefined;
         }
 
@@ -508,6 +509,9 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
     }
 
     public async showConflictRadarWizard(): Promise<void> {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+            return;
+        }
         const result = await this.scanNow(true);
         if (!result || result.worktreeCount < 2) {
             vscode.window.showInformationMessage(l10n.t('Need at least 2 Git worktrees to scan for parallel edit overlaps.'));

@@ -460,5 +460,16 @@
   "Skipped postCreateCommand because the workspace is not trusted.": "ワークスペースが信頼されていないため、postCreateCommand の実行をスキップしました。",
   "1 file (+{0}/-{1})": "1 ファイル (+{0}/-{1})",
   "⚠️ Cannot merge": "⚠️ マージ不可",
-  "GitHub CLI (gh) is not installed or not in PATH.": "GitHub CLI (gh) がインストールされていないか、PATH に見つかりません。"
+  "GitHub CLI (gh) is not installed or not in PATH.": "GitHub CLI (gh) がインストールされていないか、PATH に見つかりません。",
+  "Workspace Trust is required to run Herdr agents, external CLIs, or Git write operations in this workspace.": "このワークスペースで Herdr エージェント、外部 CLI、または Git の変更操作を実行するには、ワークスペースの信頼が必要です。",
+  "This action is disabled in Restricted Mode. Trust the workspace to continue.": "制限モードではこの操作は無効です。続行するにはワークスペースを信頼してください。",
+  "(Restricted Mode — trust workspace to connect Herdr)": "(制限モード — Herdr に接続するにはワークスペースを信頼してください)",
+  "Fix: {0} (exit {1})": "修正: {0} (終了コード {1})",
+  "exit {0} | {1}": "終了コード {0} | {1}",
+  "Review ({0})": "レビュー ({0})",
+  "Fix Diagnostic in {0}": "{0} の診断エラーを修正",
+  "Line {0}": "{0} 行目",
+  "Lines {0}-{1}": "{0}〜{1} 行目",
+  "Dispatch Task: {0}": "タスク送信: {0}",
+  "Overlap: {0}": "重複: {0}"
 }

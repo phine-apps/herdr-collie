@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ParsedIntegrationInfo } from './parsers';
 import { HerdrSocketClient } from './socketClient';
+import { ensureWorkspaceTrustedForAction } from './workspaceTrust';
 import {
     AgentOptionItem,
     bootstrapWorktreeEnvironment,
@@ -855,6 +856,9 @@ export async function launchSwarmPlaybookWizard(
     socketClient?: HerdrSocketClient
 ): Promise<void> {
     if (!vscode) return;
+    if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+        return;
+    }
 
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
