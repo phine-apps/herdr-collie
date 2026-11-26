@@ -52,7 +52,9 @@
     "orchestration",
     "swarm"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "l10n": "./l10n",
   "contributes": {
@@ -872,7 +874,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "package": "vsce package --no-dependencies",
-    "publish:vsce": "vsce publish",
+    "publish:vsce": "vsce publish --no-dependencies",
     "test:unit": "mocha -r ts-node/register 'src/test/unit/**/*.test.ts'",
     "test:integration": "mocha -r ts-node/register 'src/test/integration/**/*.test.ts'",
     "test": "pnpm run test:unit && pnpm run test:integration"

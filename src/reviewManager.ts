@@ -8,7 +8,7 @@ import * as os from 'os';
 import * as cp from 'child_process';
 import * as vscode from 'vscode';
 import * as l10n from '@vscode/l10n';
-import { runGitCmd } from './executors';
+import { runGitCmd, getErrorMessage } from './executors';
 import { formatCodeFence } from './formatters';
 import { isWorkspaceTrusted } from './workspaceTrust';
 
@@ -1114,7 +1114,10 @@ export interface RollbackOptions {
  * Snapshots tracked changes plus pre-existing untracked files (excluding .env* and .vscode/*)
  * so rollback preserves untracked user files created prior to the checkpoint.
  */
-export async function createReviewCheckpoint(repoRoot: string, label: string = 'pre-review'): Promise<ReviewCheckpoint | null> {
+export async function createReviewCheckpointWithDetails(
+    repoRoot: string,
+    label: string = 'pre-review'
+): Promise<{ checkpoint: ReviewCheckpoint | null; error?: string }> {
     try {
         const timestamp = Date.now();
         const safeLabel = (label || 'pre-review').replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -1135,7 +1138,7 @@ export async function createReviewCheckpoint(repoRoot: string, label: string = '
         }
 
         if (!commitHash) {
-            return null;
+            return { checkpoint: null, error: l10n.t('Repository has no commits yet') };
         }
 
         // Store as a ref under refs/herdr/checkpoints/
@@ -1180,14 +1183,21 @@ export async function createReviewCheckpoint(repoRoot: string, label: string = '
         }
 
         return {
-            id: checkpointId,
-            hash: commitHash,
-            timestamp,
-            description: safeLabel
+            checkpoint: {
+                id: checkpointId,
+                hash: commitHash,
+                timestamp,
+                description: safeLabel
+            }
         };
-    } catch {
-        return null;
+    } catch (err) {
+        return { checkpoint: null, error: getErrorMessage(err) };
     }
+}
+
+export async function createReviewCheckpoint(repoRoot: string, label: string = 'pre-review'): Promise<ReviewCheckpoint | null> {
+    const result = await createReviewCheckpointWithDetails(repoRoot, label);
+    return result.checkpoint;
 }
 
 function extractCheckpointTimestamp(cpId: string): number {

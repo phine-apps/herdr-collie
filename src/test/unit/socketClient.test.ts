@@ -7,30 +7,67 @@ import * as net from 'net';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
-import { HerdrSocketClient, getSessionSocketPath, validateSessionName } from '../../socketClient';
+import { HerdrSocketClient, getSessionSocketPath, validateSessionName, sanitizeSessionName, normalizeConfiguredSessionName } from '../../socketClient';
+
+function getTestSocketDir(): string {
+    return process.env['HERDR_TEST_SOCKET_DIR'] || os.tmpdir();
+}
+
+function assertUnixSocketSupported(sockDir: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const probePath = path.join(sockDir, `herdr-probe-${Date.now()}-${Math.random().toString(36).slice(2)}.sock`);
+        const probeServer = net.createServer((s) => s.destroy());
+        const cleanup = () => {
+            try { probeServer.close(); } catch {}
+            try { if (fs.existsSync(probePath)) fs.unlinkSync(probePath); } catch {}
+        };
+        probeServer.once('error', (err: NodeJS.ErrnoException) => {
+            cleanup();
+            reject(new Error(`Unix domain socket unavailable in test environment (${err.code || err.message}). Run outside sandbox or set HERDR_TEST_SOCKET_DIR.`));
+        });
+        probeServer.listen(probePath, () => {
+            const client = net.createConnection(probePath);
+            client.once('connect', () => {
+                client.destroy();
+                cleanup();
+                resolve();
+            });
+            client.once('error', (err: NodeJS.ErrnoException) => {
+                client.destroy();
+                cleanup();
+                reject(new Error(`Unix domain socket connection blocked in test environment (${err.code || err.message}). Run outside sandbox or set HERDR_TEST_SOCKET_DIR.`));
+            });
+        });
+    });
+}
 
 describe('HerdrSocketClient Unit Tests', function() {
     this.timeout(10000);
 
-    let mockServer: net.Server;
-    let tempSockPath: string;
-    let activeSockets: Set<net.Socket> = new Set();
-    let lastClientSocket: net.Socket | null = null;
-    let receivedServerData: string[] = [];
-    const createdClients: HerdrSocketClient[] = [];
+    describe('Socket Transport Tests', function() {
+        let mockServer: net.Server;
+        let tempSockPath: string;
+        let activeSockets: Set<net.Socket> = new Set();
+        let lastClientSocket: net.Socket | null = null;
+        let receivedServerData: string[] = [];
+        const createdClients: HerdrSocketClient[] = [];
 
-    const createClient = (socketPathOrSession?: string): HerdrSocketClient => {
-        const client = new HerdrSocketClient(socketPathOrSession);
-        createdClients.push(client);
-        return client;
-    };
+        const createClient = (socketPathOrSession?: string): HerdrSocketClient => {
+            const client = new HerdrSocketClient(socketPathOrSession);
+            createdClients.push(client);
+            return client;
+        };
 
-    beforeEach((done) => {
-        receivedServerData = [];
-        activeSockets.clear();
-        tempSockPath = path.join(os.tmpdir(), `herdr-test-${Date.now()}-${Math.random().toString(36).substring(7)}.sock`);
+        before(async () => {
+            await assertUnixSocketSupported(getTestSocketDir());
+        });
 
-        mockServer = net.createServer((socket) => {
+        beforeEach((done) => {
+            receivedServerData = [];
+            activeSockets.clear();
+            tempSockPath = path.join(getTestSocketDir(), `herdr-test-${Date.now()}-${Math.random().toString(36).substring(7)}.sock`);
+
+            mockServer = net.createServer((socket) => {
             activeSockets.add(socket);
             lastClientSocket = socket;
             socket.on('close', () => activeSockets.delete(socket));
@@ -91,6 +128,7 @@ describe('HerdrSocketClient Unit Tests', function() {
             });
         });
 
+        mockServer.once('error', (err) => done(err));
         mockServer.listen(tempSockPath, () => done());
     });
 
@@ -267,6 +305,7 @@ describe('HerdrSocketClient Unit Tests', function() {
 
         client.dispose();
     });
+    });
 
     describe('getSessionSocketPath', () => {
         let origSocketPath: string | undefined;
@@ -346,6 +385,27 @@ describe('HerdrSocketClient Unit Tests', function() {
             expect(validateSessionName('vscode')).to.be.null;
             expect(validateSessionName('project_1')).to.be.null;
             expect(validateSessionName('backend-api-2')).to.be.null;
+        });
+    });
+
+    describe('sanitizeSessionName', () => {
+        it('strips leading hyphens and disallowed characters while keeping valid characters', () => {
+            expect(sanitizeSessionName('-foo')).to.equal('foo');
+            expect(sanitizeSessionName('--flag;rm -rf')).to.equal('flagrm-rf');
+            expect(sanitizeSessionName('---')).to.equal('');
+            expect(sanitizeSessionName('  my_session-2  ')).to.equal('my_session-2');
+            expect(sanitizeSessionName(undefined)).to.equal('');
+        });
+    });
+
+    describe('normalizeConfiguredSessionName', () => {
+        it('returns valid trimmed session names and falls back on unsafe or invalid inputs', () => {
+            expect(normalizeConfiguredSessionName('  feature_1-dev  ')).to.equal('feature_1-dev');
+            expect(normalizeConfiguredSessionName('--evil')).to.equal('vscode');
+            expect(normalizeConfiguredSessionName('../escape')).to.equal('vscode');
+            expect(normalizeConfiguredSessionName('with spaces')).to.equal('vscode');
+            expect(normalizeConfiguredSessionName('')).to.equal('vscode');
+            expect(normalizeConfiguredSessionName(undefined, 'default')).to.equal('default');
         });
     });
 });

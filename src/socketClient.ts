@@ -118,6 +118,26 @@ export function validateSessionName(name: string): string | null {
 }
 
 /**
+ * Sanitizes a session name for CLI arguments, stripping disallowed characters and leading hyphens.
+ */
+export function sanitizeSessionName(name?: string): string {
+    if (!name) return '';
+    return name.trim().replace(/[^a-zA-Z0-9_-]/g, '').replace(/^-+/, '');
+}
+
+/**
+ * Normalizes a configured session name using validateSessionName(), falling back when invalid.
+ */
+export function normalizeConfiguredSessionName(name?: unknown, fallback: string = 'vscode'): string {
+    if (typeof name !== 'string') return fallback;
+    const trimmed = name.trim();
+    if (!trimmed || validateSessionName(trimmed) !== null) {
+        return fallback;
+    }
+    return trimmed;
+}
+
+/**
  * Resolves the socket path for a given session name.
  */
 export function getSessionSocketPath(sessionName?: string): string {

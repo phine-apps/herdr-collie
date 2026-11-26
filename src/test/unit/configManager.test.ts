@@ -279,11 +279,11 @@ sidebar_collapsed_mode = "compact"
             const { EventEmitter } = require('events');
             const fsModule = require('fs');
             const originalWatch = fsModule.watch;
-            const watchers: Array<{ emitter: any; closed: boolean }> = [];
+            const watchers: Array<{ targetDir: string; emitter: any; closed: boolean }> = [];
 
-            fsModule.watch = () => {
+            fsModule.watch = (targetDir: string) => {
                 const emitter: any = new EventEmitter();
-                const entry = { emitter, closed: false };
+                const entry = { targetDir, emitter, closed: false };
                 emitter.close = () => {
                     entry.closed = true;
                 };
@@ -291,32 +291,43 @@ sidebar_collapsed_mode = "compact"
                 return emitter;
             };
 
-            try {
-                const originalConfigFile = path.join(tempConfigDir, 'config.toml');
-                fs.writeFileSync(originalConfigFile, '[ui]\naccent = "cyan"\n', 'utf8');
-                setOriginalConfigPathForTesting(originalConfigFile);
+            const dir1 = fs.mkdtempSync(path.join(os.tmpdir(), 'collie-watch-1-'));
+            const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'collie-watch-2-'));
 
+            try {
+                const cfg1 = path.join(dir1, 'config.toml');
+                const cfg2 = path.join(dir2, 'config.toml');
+                fs.writeFileSync(cfg1, '[ui]\naccent = "cyan"\n', 'utf8');
+                fs.writeFileSync(cfg2, '[ui]\naccent = "green"\n', 'utf8');
+
+                setOriginalConfigPathForTesting(cfg1);
                 const handle1 = setupConfigManager(mockContext);
-                const handle2 = setupConfigManager(mockContext);
                 await handle1.ready;
+
+                setOriginalConfigPathForTesting(cfg2);
+                const handle2 = setupConfigManager(mockContext);
                 await handle2.ready;
-                // Wait a microtask tick for fs.promises.access().then(...) to attach watchers
-                await new Promise(resolve => setTimeout(resolve, 20));
 
                 expect(watchers).to.have.lengthOf(2);
+                const w1 = watchers.find(w => w.targetDir === dir1)!;
+                const w2 = watchers.find(w => w.targetDir === dir2)!;
+                expect(w1).to.exist;
+                expect(w2).to.exist;
 
                 // Disposing handle1 should only close watcher 1, leaving watcher 2 intact
                 handle1.dispose();
-                expect(watchers[0].closed).to.be.true;
-                expect(watchers[1].closed).to.be.false;
+                expect(w1.closed).to.be.true;
+                expect(w2.closed).to.be.false;
 
                 // Watcher error event must not throw unhandled error and should close watcher 2 cleanly
-                watchers[1].emitter.emit('error', new Error('ENOENT: dir removed'));
-                expect(watchers[1].closed).to.be.true;
+                w2.emitter.emit('error', new Error('ENOENT: dir removed'));
+                expect(w2.closed).to.be.true;
 
                 handle2.dispose();
             } finally {
                 fsModule.watch = originalWatch;
+                fs.rmSync(dir1, { recursive: true, force: true });
+                fs.rmSync(dir2, { recursive: true, force: true });
             }
         });
     });

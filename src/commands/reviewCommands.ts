@@ -11,6 +11,7 @@ import {
     ReviewChangeTreeItem,
     resolveDiffTargets,
     createReviewCheckpoint,
+    createReviewCheckpointWithDetails,
     rollbackReviewCheckpoint,
     listReviewCheckpoints
 } from '../reviewManager';
@@ -224,12 +225,12 @@ export function registerReviewCommands(context: vscode.ExtensionContext, ctx: Co
             vscode.window.showWarningMessage(l10n.t('The current workspace is not a Git repository.'));
             return;
         }
-        const checkpoint = await createReviewCheckpoint(repoRoot);
+        const { checkpoint, error } = await createReviewCheckpointWithDetails(repoRoot);
         if (checkpoint) {
             ctx.reviewChangesProvider.setBaseCheckpoint(checkpoint);
             vscode.window.showInformationMessage(l10n.t('Created review checkpoint: {0}', checkpoint.id));
         } else {
-            vscode.window.showErrorMessage(l10n.t('Failed to create review checkpoint: {0}', 'error'));
+            vscode.window.showErrorMessage(l10n.t('Failed to create review checkpoint: {0}', error || l10n.t('Unknown Git error')));
         }
     });
 

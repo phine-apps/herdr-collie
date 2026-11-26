@@ -16,7 +16,7 @@ import {
     parseSnapshotPanes,
     parseSnapshotAgents
 } from './parsers';
-import { HerdrSocketClient } from './socketClient';
+import { HerdrSocketClient, sanitizeSessionName, normalizeConfiguredSessionName } from './socketClient';
 import { isWorkspaceTrusted, ensureWorkspaceTrustedForAction } from './workspaceTrust';
 import { isHerdrRunningInTerminal } from './gitContext';
 
@@ -36,7 +36,7 @@ export interface SessionQuickPickItem extends vscode.QuickPickItem {
 
 export function getSessionName(): string {
     const config = vscode.workspace.getConfiguration('herdr-collie');
-    return config.get<string>('sessionName', 'vscode') || 'vscode';
+    return normalizeConfiguredSessionName(config.get<string>('sessionName', 'vscode'), 'vscode');
 }
 
 export function fetchActiveSessions(extraSession?: string): Promise<string[]> {
@@ -92,9 +92,50 @@ export interface TerminalBridge extends vscode.Disposable {
     registerListeners(context: vscode.ExtensionContext, getActiveSession: () => string): void;
 }
 
+export interface SessionSwitchCoordinator {
+    begin(): number;
+    isLatest(token: number): boolean;
+    invalidate(): number;
+    getPendingTarget(): string | null;
+    runSwitch(targetSession: string, task: (isLatest: () => boolean) => Promise<void>): Promise<boolean>;
+}
+
+export function createSessionSwitchCoordinator(): SessionSwitchCoordinator {
+    let generation = 0;
+    let pendingTarget: string | null = null;
+    return {
+        begin: () => ++generation,
+        isLatest: (token: number) => token === generation,
+        invalidate: () => {
+            pendingTarget = null;
+            return ++generation;
+        },
+        getPendingTarget: () => pendingTarget,
+        runSwitch: async (targetSession: string, task: (isLatest: () => boolean) => Promise<void>): Promise<boolean> => {
+            pendingTarget = targetSession;
+            const token = ++generation;
+            const checkLatest = () => token === generation;
+            try {
+                await task(checkLatest);
+                return checkLatest();
+            } finally {
+                if (checkLatest()) {
+                    pendingTarget = null;
+                }
+            }
+        }
+    };
+}
+
+export interface TerminalBridgeDeps {
+    ensureServerRunning?: (sessionName?: string) => Promise<boolean>;
+}
+
 export function createTerminalBridge(
-    onAttached: () => void
+    onAttached: () => void,
+    deps?: TerminalBridgeDeps
 ): TerminalBridge {
+    const ensureServerRunning = deps?.ensureServerRunning ?? ensureSessionServerRunning;
     const extensionManagedTerminals = new Set<vscode.Terminal>();
     const pendingTimers = new Set<NodeJS.Timeout>();
     let creatingTerminal = false;
@@ -165,11 +206,12 @@ export function createTerminalBridge(
         extensionManagedTerminals.add(terminal);
 
         // Determine effective target session from terminal name or fallback to sessionName
-        let effectiveSession = sessionName;
+        let rawEffectiveSession = sessionName;
         const sessionMatch = terminal.name.match(/^Herdr\s*\(([^)]+)\)/);
         if (sessionMatch && sessionMatch[1]) {
-            effectiveSession = sessionMatch[1].trim();
+            rawEffectiveSession = sessionMatch[1].trim();
         }
+        const effectiveSession = sanitizeSessionName(rawEffectiveSession) || 'default';
 
         // Wait for processId to resolve to ensure shell is spawned
         let processWaitTimer: NodeJS.Timeout | undefined;
@@ -193,12 +235,11 @@ export function createTerminalBridge(
 
         const isRunning = await isHerdrRunningInTerminal(terminal);
         if (!isRunning && !disposed) {
-            await ensureSessionServerRunning(effectiveSession);
+            await ensureServerRunning(effectiveSession);
             if (disposed) {
                 return;
             }
-            const safeSession = effectiveSession ? effectiveSession.replace(/[^a-zA-Z0-9_-]/g, '') : '';
-            const sessionFlag = safeSession && safeSession !== 'default' ? `--session ${safeSession}` : '';
+            const sessionFlag = effectiveSession !== 'default' ? `--session ${effectiveSession}` : '';
             const command = `herdr ${sessionFlag}`.trim();
             // Generous shell startup delay (600ms) to ensure zsh/bash completed loading
             scheduleTrackedTimeout(() => {
@@ -229,8 +270,9 @@ export function createTerminalBridge(
         if (!(await ensureWorkspaceTrustedForAction(vscode))) {
             return;
         }
+        const normalizedSession = sanitizeSessionName(targetSession) || 'default';
         // Manage a single unified Herdr TUI terminal per session
-        const sessionLabel = targetSession && targetSession !== 'default' ? ` (${targetSession})` : '';
+        const sessionLabel = normalizedSession !== 'default' ? ` (${normalizedSession})` : '';
         const baseTerminalName = `Herdr${sessionLabel}`;
         const terminalName = baseTerminalName;
 
@@ -240,33 +282,32 @@ export function createTerminalBridge(
                 const wsId = targetWorkspaceId || (target.includes(':') ? target.split(':')[0] : undefined);
                 if (wsId) {
                     await new Promise<void>((resolve) => {
-                        execHerdr(['--session', targetSession, 'workspace', 'focus', wsId], () => resolve());
+                        execHerdr(['--session', normalizedSession, 'workspace', 'focus', wsId], () => resolve());
                     });
                 }
                 await new Promise<void>((resolve) => {
-                    execHerdr(['--session', targetSession, 'agent', 'focus', target], () => resolve());
+                    execHerdr(['--session', normalizedSession, 'agent', 'focus', target], () => resolve());
                 });
             } else if (targetTabId) {
                 await new Promise<void>((resolve) => {
-                    execHerdr(['--session', targetSession, 'workspace', 'focus', target], () => resolve());
+                    execHerdr(['--session', normalizedSession, 'workspace', 'focus', target], () => resolve());
                 });
                 await new Promise<void>((resolve) => {
-                    execHerdr(['--session', targetSession, 'tab', 'focus', targetTabId], () => resolve());
+                    execHerdr(['--session', normalizedSession, 'tab', 'focus', targetTabId], () => resolve());
                 });
             } else {
                 await new Promise<void>((resolve) => {
-                    execHerdr(['--session', targetSession, 'workspace', 'focus', target], () => resolve());
+                    execHerdr(['--session', normalizedSession, 'workspace', 'focus', target], () => resolve());
                 });
             }
         }
 
-        const safeSession = targetSession ? targetSession.replace(/[^a-zA-Z0-9_-]/g, '') : '';
-        const sessionFlag = safeSession && safeSession !== 'default' ? `--session ${safeSession}` : '';
+        const sessionFlag = normalizedSession !== 'default' ? `--session ${normalizedSession}` : '';
         const command = `herdr ${sessionFlag}`.trim();
 
         const existingTerminal = vscode.window.terminals.find(t =>
             t.name === baseTerminalName ||
-            (targetSession === 'default' && t.name === 'Herdr (default)') ||
+            (normalizedSession === 'default' && t.name === 'Herdr (default)') ||
             t.name.startsWith(`Herdr Workspace${sessionLabel}:`) ||
             t.name.startsWith(`Herdr Agent${sessionLabel}:`)
         );
@@ -283,19 +324,19 @@ export function createTerminalBridge(
                     return;
                 }
                 // Terminal shell is alive but Herdr is not running (e.g. restored terminal on VS Code restart)
-                await ensureSessionServerRunning(targetSession);
+                await ensureServerRunning(normalizedSession);
                 existingTerminal.show();
                 existingTerminal.sendText(command);
                 extensionManagedTerminals.add(existingTerminal);
                 const targetType = isAgent ? l10n.t('Agent') : l10n.t('Workspace');
-                const label = displayLabel || target || targetSession || 'Herdr';
+                const label = displayLabel || target || normalizedSession || 'Herdr';
                 vscode.window.showInformationMessage(l10n.t('Attached to Herdr{0} ({1}: {2})', sessionLabel, targetType, label));
                 onAttached();
                 return;
             }
         }
 
-        await ensureSessionServerRunning(targetSession);
+        await ensureServerRunning(normalizedSession);
 
         const envOverrides: { [key: string]: string | null | undefined } = {
             HERDR_WORKSPACE: null,
@@ -321,7 +362,7 @@ export function createTerminalBridge(
         terminal.sendText(command);
 
         const targetType = isAgent ? l10n.t('Agent') : l10n.t('Workspace');
-        const label = displayLabel || target || targetSession || 'Herdr';
+        const label = displayLabel || target || normalizedSession || 'Herdr';
         vscode.window.showInformationMessage(l10n.t('Attached to Herdr{0} ({1}: {2})', sessionLabel, targetType, label));
         onAttached();
     }

@@ -478,5 +478,8 @@
   "{0} (All Targets)": "{0} (All Targets)",
   "Launch Herdr ({0})": "Launch Herdr ({0})",
   "Attach to {0} session": "Attach to {0} session",
-  "Path: {0}": "Path: {0}"
+  "Path: {0}": "Path: {0}",
+  "Repository has no commits yet": "Repository has no commits yet",
+  "Unknown Git error": "Unknown Git error",
+  "Invalid session name: {0}": "Invalid session name: {0}"
 }

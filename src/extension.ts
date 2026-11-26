@@ -17,7 +17,7 @@ import {
     parsePanes,
     GitWorktreeInfo
 } from './parsers';
-import { HerdrSocketClient } from './socketClient';
+import { HerdrSocketClient, validateSessionName } from './socketClient';
 import { setupConfigManager, reloadConfigForSessions, ConfigManagerHandle } from './configManager';
 import { AgentHUD } from './agentHUD';
 import { WorkspaceHUD } from './workspaceHUD';
@@ -61,6 +61,7 @@ import {
     getSessionName,
     fetchActiveSessions,
     createTerminalBridge,
+    createSessionSwitchCoordinator,
     sendPromptToHerdr
 } from './herdrBridge';
 import { CommandContext } from './commands/types';
@@ -98,13 +99,20 @@ export function activate(context: vscode.ExtensionContext) {
         return configManager;
     };
 
+    const ensureSessionServerAfterConfigReady = async (sessionName?: string): Promise<boolean> => {
+        if (!isWorkspaceTrusted(vscode)) {
+            return false;
+        }
+        const cm = ensureConfigManagerInitialized();
+        await cm.ready.catch(() => undefined);
+        await cm.whenIdle().catch(() => undefined);
+        return await ensureSessionServerRunning(sessionName);
+    };
+
     // Ensure session server is running in background (when herdr CLI is available and workspace is trusted)
     let sessionServerReadyPromise = !isWorkspaceTrusted(vscode)
         ? Promise.resolve(false)
-        : ensureConfigManagerInitialized().ready
-            .catch(() => undefined)
-            .then(() => ensureSessionServerRunning(initialSession))
-            .catch(() => false);
+        : ensureSessionServerAfterConfigReady(initialSession).catch(() => false);
 
     let socketClient = new HerdrSocketClient(activeSidebarSession);
     if (isWorkspaceTrusted(vscode)) {
@@ -113,7 +121,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     let refreshAllProviders: (options?: { includeHUDs?: boolean; snapshotMaxAgeMs?: number }) => void = () => {};
 
-    const terminalBridge = createTerminalBridge(() => refreshAllProviders());
+    const terminalBridge = createTerminalBridge(() => refreshAllProviders(), {
+        ensureServerRunning: ensureSessionServerAfterConfigReady
+    });
     terminalBridge.restoreTerminalIfNeeded(initialSession).catch(() => {});
     terminalBridge.registerListeners(context, getActiveSidebarSession);
 
@@ -462,6 +472,8 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    const sessionSwitchCoordinator = createSessionSwitchCoordinator();
+
     const replaceSessionSocket = (newSession: string) => {
         socketListenerDisposable?.dispose();
         socketClient.dispose();
@@ -477,13 +489,28 @@ export function activate(context: vscode.ExtensionContext) {
         refreshAllProviders();
     };
 
+    const shouldSkipSessionSwitch = (targetSession: string): boolean => {
+        if (!targetSession) return true;
+        const pending = sessionSwitchCoordinator.getPendingTarget();
+        if (pending === null && targetSession === activeSidebarSession) return true;
+        if (pending === targetSession) return true;
+        return false;
+    };
+
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration(async (e) => {
             if (e.affectsConfiguration('herdr-collie.sessionName') && isWorkspaceTrusted(vscode)) {
                 const newSession = getSessionName();
-                activeSidebarSession = newSession;
-                await ensureSessionServerRunning(newSession);
-                replaceSessionSocket(newSession);
+                if (!shouldSkipSessionSwitch(newSession)) {
+                    await sessionSwitchCoordinator.runSwitch(newSession, async (isLatest) => {
+                        await ensureSessionServerAfterConfigReady(newSession);
+                        if (!isLatest()) {
+                            return;
+                        }
+                        activeSidebarSession = newSession;
+                        replaceSessionSocket(newSession);
+                    });
+                }
             }
             if (e.affectsConfiguration('herdr-collie.agentSortOrder')) {
                 const newSort = vscode.workspace.getConfiguration('herdr-collie').get<AgentSortOrder>('agentSortOrder', 'grouped') || 'grouped';
@@ -499,43 +526,55 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     const switchToSession = async (targetSession: string) => {
-        if (!targetSession || targetSession === activeSidebarSession) return;
+        if (shouldSkipSessionSwitch(targetSession)) return;
 
-        activeSidebarSession = targetSession;
-        await ensureSessionServerRunning(activeSidebarSession);
-        if (vscode.workspace.getConfiguration('herdr-collie').get<boolean>('hideHerdrSidebar', true)) {
-            reloadConfigForSessions(activeSidebarSession);
+        const applied = await sessionSwitchCoordinator.runSwitch(targetSession, async (isLatest) => {
+            await ensureSessionServerAfterConfigReady(targetSession);
+            if (!isLatest()) {
+                return;
+            }
+            activeSidebarSession = targetSession;
+            if (vscode.workspace.getConfiguration('herdr-collie').get<boolean>('hideHerdrSidebar', true)) {
+                reloadConfigForSessions(targetSession);
+            }
+            replaceSessionSocket(targetSession);
+        });
+        if (applied) {
+            vscode.window.showInformationMessage(l10n.t('Herdr Collie view switched to session "{0}"', targetSession));
         }
-
-        replaceSessionSocket(activeSidebarSession);
-        vscode.window.showInformationMessage(l10n.t('Herdr Collie view switched to session "{0}"', activeSidebarSession));
     };
 
     const performDeleteSession = async (sessionToDelete: string) => {
-        if (!sessionToDelete || sessionToDelete === 'default') {
+        const trimmedSession = sessionToDelete ? sessionToDelete.trim() : '';
+        if (!trimmedSession || trimmedSession === 'default') {
             vscode.window.showWarningMessage(l10n.t('The "default" session cannot be deleted.'));
+            return;
+        }
+        const validationError = validateSessionName(trimmedSession);
+        if (validationError) {
+            vscode.window.showWarningMessage(l10n.t('Invalid session name: {0}', validationError));
             return;
         }
 
         const deleteBtn = l10n.t('Delete Session');
         const answer = await vscode.window.showWarningMessage(
-            l10n.t('Are you sure you want to delete session "{0}"? This will terminate all its workspaces and panes.', sessionToDelete),
+            l10n.t('Are you sure you want to delete session "{0}"? This will terminate all its workspaces and panes.', trimmedSession),
             { modal: true },
             deleteBtn
         );
 
         if (answer !== deleteBtn) return;
 
-        execHerdr(['session', 'stop', sessionToDelete], () => {
-            execHerdr(['session', 'delete', sessionToDelete], async (err) => {
+        execHerdr(['session', 'stop', trimmedSession], () => {
+            execHerdr(['session', 'delete', trimmedSession], async (err) => {
                 if (err) {
                     vscode.window.showErrorMessage(l10n.t('Failed to delete session: {0}', err.message));
                     return;
                 }
-                vscode.window.showInformationMessage(l10n.t('Session "{0}" deleted.', sessionToDelete));
+                vscode.window.showInformationMessage(l10n.t('Session "{0}" deleted.', trimmedSession));
 
-                if (activeSidebarSession === sessionToDelete) {
-                    const fallbackSession = getSessionName() !== sessionToDelete ? getSessionName() : 'default';
+                if (activeSidebarSession === trimmedSession) {
+                    const fallbackSession = getSessionName() !== trimmedSession ? getSessionName() : 'default';
                     await switchToSession(fallbackSession);
                 } else {
                     refreshAllProviders();
@@ -587,17 +626,15 @@ export function activate(context: vscode.ExtensionContext) {
                 const previousSession = activeSidebarSession;
                 const currentSession = getSessionName();
                 activeSidebarSession = currentSession;
-                const cm = ensureConfigManagerInitialized();
-                sessionServerReadyPromise = cm.ready
-                    .catch(() => undefined)
-                    .then(() => ensureSessionServerRunning(currentSession))
-                    .catch(() => false);
+                sessionSwitchCoordinator.invalidate();
+                sessionServerReadyPromise = ensureSessionServerAfterConfigReady(currentSession).catch(() => false);
                 if (currentSession !== previousSession) {
                     replaceSessionSocket(currentSession);
                 } else {
                     socketClient.connect();
                     refreshAllProviders();
                 }
+                reviewChangesProvider.refresh();
                 void terminalBridge.restoreTerminalIfNeeded(currentSession).catch(() => {});
                 autoBindWorkspaceIfTrusted();
             })

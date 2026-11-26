@@ -7,6 +7,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as toml from 'smol-toml';
 import { isWorkspaceTrusted } from './workspaceTrust';
+import { normalizeConfiguredSessionName } from './socketClient';
 
 let originalConfigPathCache: string | null = null;
 
@@ -218,9 +219,9 @@ export function setupConfigManager(
         const sessions = new Set<string>();
         if (vscode && vscode.workspace) {
             const config = vscode.workspace.getConfiguration('herdr-collie');
-            const configured = config.get('sessionName', 'vscode');
-            if (typeof configured === 'string' && configured.trim()) {
-                sessions.add(configured.trim());
+            const configured = normalizeConfiguredSessionName(config.get('sessionName', 'vscode'), '');
+            if (configured) {
+                sessions.add(configured);
             }
         }
         if (getSessionNames) {
@@ -251,7 +252,7 @@ export function setupConfigManager(
     };
 
     // Non-blocking initial sync
-    const ready = triggerSync();
+    const initialSyncPromise = triggerSync();
 
     // Watch original config.toml
     const origPath = getOriginalConfigPath();
@@ -268,7 +269,7 @@ export function setupConfigManager(
         }, 200);
     }
 
-    void fs.promises.access(configDir)
+    const watcherReady = fs.promises.access(configDir)
         .then(() => {
             if (disposed) return;
             const watcher = fs.watch(configDir, (eventType, filename) => {
@@ -292,6 +293,8 @@ export function setupConfigManager(
                 console.warn('[herdr-collie] Could not watch config directory:', e);
             }
         });
+
+    const ready = Promise.all([initialSyncPromise, watcherReady]).then(([embeddedPath]) => embeddedPath);
 
     let configChangeSub: { dispose(): void } | null = null;
     if (vscode && vscode.workspace && vscode.workspace.onDidChangeConfiguration) {

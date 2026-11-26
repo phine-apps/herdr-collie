@@ -478,5 +478,8 @@
   "{0} (All Targets)": "{0} (所有目标)",
   "Launch Herdr ({0})": "启动 Herdr ({0})",
   "Attach to {0} session": "附加到 {0} 会话",
-  "Path: {0}": "路径: {0}"
+  "Path: {0}": "路径: {0}",
+  "Repository has no commits yet": "仓库尚无任何提交",
+  "Unknown Git error": "未知 Git 错误",
+  "Invalid session name: {0}": "无效的会话名称: {0}"
 }

@@ -6,7 +6,7 @@ import '../helpers/mockVscode'; // Must be first to install global mock
 import { expect } from 'chai';
 import cp = require('child_process');
 import { mockState, mockVscode, resetMockState } from '../helpers/mockVscode';
-import { createTerminalBridge, sendPromptToHerdr } from '../../herdrBridge';
+import { createTerminalBridge, createSessionSwitchCoordinator, getSessionName, sendPromptToHerdr } from '../../herdrBridge';
 import { HerdrSocketClient } from '../../socketClient';
 
 describe('herdrBridge Unit Tests', () => {
@@ -90,7 +90,9 @@ describe('herdrBridge Unit Tests', () => {
             return {} as any;
         };
 
-        const bridge = createTerminalBridge(() => {});
+        const bridge = createTerminalBridge(() => {}, {
+            ensureServerRunning: async () => true
+        });
         await bridge.restoreTerminalIfNeeded('vscode', mockTerminal);
         bridge.dispose();
 
@@ -125,13 +127,55 @@ describe('herdrBridge Unit Tests', () => {
             };
         };
 
-        const bridge = createTerminalBridge(() => {});
+        const startedSessions: Array<string | undefined> = [];
+        const bridge = createTerminalBridge(() => {}, {
+            ensureServerRunning: async (session) => {
+                startedSessions.push(session);
+                return true;
+            }
+        });
         try {
             await bridge.openOrAttachTerminal('', false, 'vscode', 'vscode');
             expect(defaultTerminalCalls).to.be.empty;
             expect(createdTerminals).to.have.lengthOf(1);
             expect(createdTerminals[0].name).to.equal('Herdr (vscode)');
             expect(createdTerminals[0].sent).to.deep.equal(['herdr --session vscode']);
+
+            await bridge.openOrAttachTerminal('ws-1', false, 'malicious', '--evil');
+            expect(createdTerminals).to.have.lengthOf(2);
+            expect(createdTerminals[1].name).to.equal('Herdr (evil)');
+            expect(createdTerminals[1].sent).to.deep.equal(['herdr --session evil']);
+            expect(startedSessions).to.deep.equal(['vscode', 'evil']);
+            expect(execFileCalls).to.deep.include(['--session', 'evil', 'workspace', 'focus', 'ws-1']);
+        } finally {
+            bridge.dispose();
+        }
+    });
+
+    it('sanitizes session extracted from restored terminal name consistently across server start and sendText', async () => {
+        const sentTexts: string[] = [];
+        const startedSessions: Array<string | undefined> = [];
+        const mockTerminal: any = {
+            name: 'Herdr (--bad;name)',
+            exitStatus: undefined,
+            processId: Promise.resolve(undefined),
+            sendText: (text: string) => sentTexts.push(text),
+            show: () => {},
+            dispose: () => {}
+        };
+        (mockVscode.window as any).terminals = [mockTerminal];
+
+        const bridge = createTerminalBridge(() => {}, {
+            ensureServerRunning: async (session) => {
+                startedSessions.push(session);
+                return true;
+            }
+        });
+        try {
+            await bridge.restoreTerminalIfNeeded('vscode', mockTerminal);
+            await new Promise(resolve => setTimeout(resolve, 650));
+            expect(startedSessions).to.deep.equal(['badname']);
+            expect(sentTexts).to.deep.equal(['herdr --session badname']);
         } finally {
             bridge.dispose();
         }
@@ -170,5 +214,78 @@ describe('herdrBridge Unit Tests', () => {
         );
         expect(discoveryCalls).to.be.empty;
         expect(execFileCalls).to.deep.include(['--session', 'vscode', 'agent', 'prompt', 'w1:p1', 'Check tests']);
+    });
+
+    it('invalidates stale session switch generations in createSessionSwitchCoordinator', async () => {
+        const coordinator = createSessionSwitchCoordinator();
+
+        const results: string[] = [];
+        const runSwitch = async (session: string, delayMs: number) => {
+            const token = coordinator.begin();
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+            if (coordinator.isLatest(token)) {
+                results.push(session);
+            }
+        };
+
+        await Promise.all([
+            runSwitch('older-slow', 40),
+            (async () => {
+                await new Promise(resolve => setTimeout(resolve, 10));
+                await runSwitch('newer-fast', 5);
+            })()
+        ]);
+
+        expect(results).to.deep.equal(['newer-fast']);
+
+        const pendingToken = coordinator.begin();
+        coordinator.invalidate();
+        expect(coordinator.isLatest(pendingToken)).to.be.false;
+    });
+
+    it('resets pending target safely in runSwitch when task throws and prevents stale failure from clearing newer switch', async () => {
+        const coordinator = createSessionSwitchCoordinator();
+
+        let threw = false;
+        try {
+            await coordinator.runSwitch('failing-session', async () => {
+                expect(coordinator.getPendingTarget()).to.equal('failing-session');
+                throw new Error('server start error');
+            });
+        } catch {
+            threw = true;
+        }
+        expect(threw).to.be.true;
+        expect(coordinator.getPendingTarget()).to.be.null;
+
+        // Overlap: slow failing switch must not clear newer active pending target
+        const slowSwitch = coordinator.runSwitch('slow-old', async () => {
+            await new Promise(resolve => setTimeout(resolve, 40));
+            throw new Error('slow fail');
+        }).catch(() => false);
+
+        await new Promise(resolve => setTimeout(resolve, 10));
+        const fastSwitch = coordinator.runSwitch('fast-new', async (isLatest) => {
+            expect(coordinator.getPendingTarget()).to.equal('fast-new');
+            await new Promise(resolve => setTimeout(resolve, 50));
+            expect(isLatest()).to.be.true;
+        });
+
+        await slowSwitch;
+        // fast-new is still running when slow-old finishes/rejects
+        expect(coordinator.getPendingTarget()).to.equal('fast-new');
+        expect(await fastSwitch).to.be.true;
+        expect(coordinator.getPendingTarget()).to.be.null;
+    });
+
+    it('falls back to "vscode" in getSessionName() when configured sessionName is unsafe or invalid', () => {
+        mockState.configurations.set('herdr-collie.sessionName', '--evil');
+        expect(getSessionName()).to.equal('vscode');
+
+        mockState.configurations.set('herdr-collie.sessionName', 'bad;session');
+        expect(getSessionName()).to.equal('vscode');
+
+        mockState.configurations.set('herdr-collie.sessionName', '  team_alpha-1  ');
+        expect(getSessionName()).to.equal('team_alpha-1');
     });
 });

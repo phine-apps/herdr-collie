@@ -478,5 +478,8 @@
   "{0} (All Targets)": "{0} (すべてのターゲット)",
   "Launch Herdr ({0})": "Herdr を起動 ({0})",
   "Attach to {0} session": "{0} セッションにアタッチ",
-  "Path: {0}": "パス: {0}"
+  "Path: {0}": "パス: {0}",
+  "Repository has no commits yet": "リポジトリにまだコミットがありません",
+  "Unknown Git error": "不明な Git エラー",
+  "Invalid session name: {0}": "無効なセッション名です: {0}"
 }

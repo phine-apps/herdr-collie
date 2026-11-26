@@ -1,6 +1,8 @@
 # Editor & SCM
 .vscode/
 .github/
+.agent/
+.agents/
 .gitignore
 
 # Source & Tests

@@ -20,6 +20,7 @@ import {
     resolveWorktreeMergeBase,
     getWorktreeChangedFiles,
     createReviewCheckpoint,
+    createReviewCheckpointWithDetails,
     rollbackReviewCheckpoint,
     listReviewCheckpoints
 } from '../../reviewManager';
@@ -425,6 +426,24 @@ describe('Integrated Review & Diff-to-Prompt Integration Tests (P3)', function()
         } finally {
             await runGitCmd(['worktree', 'remove', '--force', '--', wtDir], tempRepoDir).catch(() => {});
             fs.rmSync(wtDir, { recursive: true, force: true });
+        }
+    });
+
+    it('returns descriptive error reason from createReviewCheckpointWithDetails when repository is invalid or has no commits', async () => {
+        const nonRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collie-no-git-'));
+        const emptyRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collie-empty-git-'));
+        try {
+            const nonRepoResult = await createReviewCheckpointWithDetails(nonRepoDir);
+            expect(nonRepoResult.checkpoint).to.be.null;
+            expect(nonRepoResult.error).to.be.a('string').and.not.empty;
+
+            await runGitCmd(['init'], emptyRepoDir);
+            const emptyRepoResult = await createReviewCheckpointWithDetails(emptyRepoDir);
+            expect(emptyRepoResult.checkpoint).to.be.null;
+            expect(emptyRepoResult.error).to.be.a('string').and.not.empty;
+        } finally {
+            fs.rmSync(nonRepoDir, { recursive: true, force: true });
+            fs.rmSync(emptyRepoDir, { recursive: true, force: true });
         }
     });
 });
