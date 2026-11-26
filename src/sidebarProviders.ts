@@ -222,6 +222,7 @@ export class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.Tr
                             return items;
                         }
                         this.currentItems = [];
+                        this._onDidUpdateItems.fire();
                         const emptyItem = new vscode.TreeItem(l10n.t('(No workspaces found)'), vscode.TreeItemCollapsibleState.None);
                         emptyItem.iconPath = new vscode.ThemeIcon('info');
                         return [emptyItem];
@@ -266,6 +267,7 @@ export class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.Tr
                             return items;
                         }
                         this.currentItems = [];
+                        this._onDidUpdateItems.fire();
                         const emptyItem = new vscode.TreeItem(l10n.t('(No agents running)'), vscode.TreeItemCollapsibleState.None);
                         emptyItem.iconPath = new vscode.ThemeIcon('info');
                         return [emptyItem];

@@ -24,6 +24,7 @@ import {
     collectWorktreeScorecardMap,
     formatWorktreeScorecardBadge
 } from '../../worktreeManager';
+import { resolveMainRepositoryRoot } from '../../gitContext';
 
 describe('Smart Swarm & Git Worktree Integration Tests (W-01 ~ W-06, A-02, A-05)', function() {
     this.timeout(15000);
@@ -303,6 +304,25 @@ describe('Smart Swarm & Git Worktree Integration Tests (W-01 ~ W-06, A-02, A-05)
             expect(conflictCard.hasUncommittedChanges).to.be.true;
             expect(formatWorktreeScorecardBadge(conflictCard)).to.include('2 files');
             expect(formatWorktreeScorecardBadge(conflictCard)).to.include('conflict');
+        });
+
+        it('resolves the main repository root even when hinted with a linked worktree path and removes the worktree cleanly', async () => {
+            const branchName = 'feat/linked-root-check';
+            const worktreePath = resolveWorktreePath(mainRepoDir, branchName, 'sibling');
+            await createWorktree(mainRepoDir, branchName, worktreePath, 'main');
+
+            // git rev-parse inside the linked worktree returns worktreePath, whereas resolveMainRepositoryRoot must return mainRepoDir
+            const realWorktreePath = fs.realpathSync(worktreePath);
+            const realMainRepoDir = fs.realpathSync(mainRepoDir);
+            const toplevel = await getRepoRoot(worktreePath);
+            expect(toplevel).to.equal(realWorktreePath);
+
+            const resolvedMain = await resolveMainRepositoryRoot(worktreePath);
+            expect(resolvedMain).to.equal(realMainRepoDir);
+
+            await removeWorktree(resolvedMain!, worktreePath, true);
+            const remaining = await listGitWorktrees(mainRepoDir);
+            expect(remaining.some(w => w.worktree === realWorktreePath)).to.be.false;
         });
     });
 });

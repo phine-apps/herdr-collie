@@ -24,7 +24,7 @@ import {
 } from '../microTaskManager';
 import { extractSnippet } from '../reviewManager';
 import { ensureWorkspaceTrustedForAction } from '../workspaceTrust';
-import { resolveGitContextForUri, captureTerminalOutputWithClipboard } from '../gitContext';
+import { resolveGitContextForUri, captureTerminalOutputWithClipboard, collectBranchLogSummary } from '../gitContext';
 import { CommandContext } from './types';
 
 export function registerContextCommands(context: vscode.ExtensionContext, ctx: CommandContext): void {
@@ -112,22 +112,7 @@ export function registerContextCommands(context: vscode.ExtensionContext, ctx: C
         const cwd = gitCtx.cwd;
 
         try {
-            const branchOut = await runGitCmd(['branch', '--show-current'], cwd);
-            const currentBranch = branchOut.trim() || 'HEAD detached';
-
-            let logArgs = ['log', '-n', '15', '--oneline'];
-            try {
-                const hasMain = (await runGitCmd(['rev-parse', '--verify', 'main'], cwd).catch(() => '')).trim() !== '';
-                const baseBranch = hasMain ? 'main' : 'master';
-                logArgs = ['log', `${baseBranch}..HEAD`, '--oneline'];
-            } catch {
-                // Ignore fallback to recent 15 commits
-            }
-
-            let logOut = await runGitCmd(logArgs, cwd);
-            if (!logOut.trim()) {
-                logOut = await runGitCmd(['log', '-n', '15', '--oneline'], cwd);
-            }
+            const { currentBranch, logOut } = await collectBranchLogSummary(cwd);
 
             const richText = formatBranchContext(currentBranch, logOut);
             await ctx.sendToHerdr(richText, l10n.t('Branch Context sent successfully'), l10n.t('Send Branch Context to Herdr'));

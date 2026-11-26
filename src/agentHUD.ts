@@ -172,6 +172,9 @@ export class AgentHUD implements vscode.Disposable {
 
     public updateSocketClient(newSocketClient: HerdrSocketClient): void {
         this.cleanupSocketEvents();
+        this.previousAgentStates.clear();
+        this.notifiedBlockedAgents.clear();
+        this.autoVerifyRetryCounts.clear();
         this.socketClient = newSocketClient;
         this.setupSocketEvents(this.socketClient);
         this.refresh();

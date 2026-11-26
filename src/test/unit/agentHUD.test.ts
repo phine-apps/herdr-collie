@@ -303,5 +303,36 @@ describe('AgentHUD & Status Classification Unit Tests', () => {
 
             hud.dispose();
         });
+
+        it('clears prior session tracking state on updateSocketClient so same pane IDs do not misfire', async () => {
+            mockState.configurations.set('herdr-collie.agentHUD.enableNotifications', true);
+
+            const makeClient = (agents: any[]) => ({
+                on: () => {},
+                off: () => {},
+                isConnected: true,
+                getSnapshot: async () => ({ agents })
+            }) as unknown as HerdrSocketClient;
+
+            const sessionAClient = makeClient([
+                { pane_id: 'w1:p1', name: 'claude-a', agent_status: 'working' }
+            ]);
+            const sessionBClient = makeClient([
+                { pane_id: 'w1:p1', name: 'claude-b', agent_status: 'done' }
+            ]);
+
+            const hud = new AgentHUD(sessionAClient, () => 'session-a');
+            try {
+                await hud.refresh();
+                expect(mockState.lastInformationMessage).to.be.undefined;
+
+                // Switch to session B where pane w1:p1 is already done; must NOT fire completion notification from session A's working state
+                hud.updateSocketClient(sessionBClient);
+                await hud.refresh();
+                expect(mockState.lastInformationMessage).to.be.undefined;
+            } finally {
+                hud.dispose();
+            }
+        });
     });
 });

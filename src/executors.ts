@@ -12,6 +12,15 @@ export { getSessionSocketPath };
 
 
 const activeServerStartPromises = new Map<string, Promise<boolean>>();
+let preServerStartHook: (() => Promise<void>) | null = null;
+
+/**
+ * Registers an optional hook awaited before auto-starting a Herdr session server
+ * (used by extension activation to ensure HERDR_CONFIG_PATH sync completes first).
+ */
+export function setPreServerStartHook(hook: (() => Promise<void>) | null): void {
+    preServerStartHook = hook;
+}
 
 /**
  * Checks if the session server daemon is running, and spawns it in the background if not.
@@ -19,6 +28,9 @@ const activeServerStartPromises = new Map<string, Promise<boolean>>();
 export async function ensureSessionServerRunning(sessionName: string = 'default'): Promise<boolean> {
     if (!isWorkspaceTrusted()) {
         return false;
+    }
+    if (preServerStartHook) {
+        await preServerStartHook().catch(() => undefined);
     }
     if (activeServerStartPromises.has(sessionName)) {
         return await activeServerStartPromises.get(sessionName)!;
@@ -106,7 +118,10 @@ export async function ensureSessionServerRunning(sessionName: string = 'default'
     }
 }
 
-export type ExecHerdrOptions = cp.ExecFileOptionsWithStringEncoding & { _isRetry?: boolean };
+export type ExecHerdrOptions = cp.ExecFileOptionsWithStringEncoding & {
+    _isRetry?: boolean;
+    skipAutoStart?: boolean;
+};
 export type ExecHerdrCallback = (
     error: cp.ExecFileException | null,
     stdout: string,
@@ -155,7 +170,7 @@ export function execHerdr(
 
     if (cb) {
         cp.execFile('herdr', args, options, async (error: cp.ExecFileException | null, stdout: string, stderr: string) => {
-            if (error && !options._isRetry && (
+            if (error && !options._isRetry && !options.skipAutoStart && (
                 (error.message && error.message.includes('server_not_running')) ||
                 (stderr && stderr.includes('server_not_running')) ||
                 (stdout && stdout.includes('server_not_running'))

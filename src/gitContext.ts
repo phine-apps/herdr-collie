@@ -5,14 +5,35 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { isProcessDescendantRunning } from './executors';
+import { isProcessDescendantRunning, runGitCmd } from './executors';
 import { GitWorktreeInfo } from './parsers';
 import { getRepoRoot, listGitWorktrees } from './worktreeManager';
 
 const WORKTREE_CACHE_TTL_MS = 350;
+const MAX_WORKTREE_CACHE_ENTRIES = 50;
 let worktreeCacheGeneration = 0;
 const inFlightWorktreeQueries = new Map<string, Promise<GitWorktreeInfo[]>>();
 const worktreeQueryCache = new Map<string, { data: GitWorktreeInfo[]; timestamp: number }>();
+
+function pruneWorktreeCache(now: number = Date.now()): void {
+    for (const [key, entry] of worktreeQueryCache.entries()) {
+        if (now - entry.timestamp > WORKTREE_CACHE_TTL_MS) {
+            worktreeQueryCache.delete(key);
+        }
+    }
+    while (worktreeQueryCache.size > MAX_WORKTREE_CACHE_ENTRIES) {
+        const oldestKey = worktreeQueryCache.keys().next().value;
+        if (oldestKey === undefined) break;
+        worktreeQueryCache.delete(oldestKey);
+    }
+}
+
+/**
+ * Returns the current worktree cache entry count (for unit testing).
+ */
+export function getWorktreeQueryCacheSizeForTesting(): number {
+    return worktreeQueryCache.size;
+}
 
 /**
  * Invalidates cached Git worktree queries so subsequent lookups fetch fresh repository state.
@@ -27,12 +48,15 @@ export function invalidateWorktreeCache(): void {
  * Collects Git worktree metadata across the given CWDs and open workspace folders, deduplicated and short-TTL cached.
  */
 export async function getWorktreesForCwds(cwds: (string | undefined)[]): Promise<GitWorktreeInfo[]> {
+    const now = Date.now();
+    pruneWorktreeCache(now);
+
     const validCwds = Array.from(new Set(cwds.filter((c): c is string => Boolean(c)))).sort();
     const folderPaths = (vscode.workspace.workspaceFolders || []).map(wf => wf.uri.fsPath).sort();
     const cacheKey = JSON.stringify({ validCwds, folderPaths });
 
     const cached = worktreeQueryCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp <= WORKTREE_CACHE_TTL_MS) {
+    if (cached && now - cached.timestamp <= WORKTREE_CACHE_TTL_MS) {
         return cached.data;
     }
 
@@ -73,7 +97,9 @@ export async function getWorktreesForCwds(cwds: (string | undefined)[]): Promise
         }
 
         if (gen === worktreeCacheGeneration) {
-            worktreeQueryCache.set(cacheKey, { data: allWorktrees, timestamp: Date.now() });
+            const updatedAt = Date.now();
+            worktreeQueryCache.set(cacheKey, { data: allWorktrees, timestamp: updatedAt });
+            pruneWorktreeCache(updatedAt);
         }
         return allWorktrees;
     })().finally(() => {
@@ -129,7 +155,7 @@ export async function resolveGitContextForUri(
     const contextUri = resourceUri || fallbackUri;
 
     let cwd: string | undefined;
-    if (contextUri?.fsPath) {
+    if (contextUri?.scheme === 'file' && contextUri.fsPath) {
         try {
             const repoRoot = await getRepoRoot(path.dirname(contextUri.fsPath));
             if (repoRoot) {
@@ -153,13 +179,76 @@ export async function resolveGitContextForUri(
     }
 
     let targetFile = '';
-    if (resourceUri?.fsPath) {
+    if (resourceUri?.scheme === 'file' && resourceUri.fsPath) {
         targetFile = computeGitRelativePath(cwd, resourceUri.fsPath);
     } else if (resourceUri) {
         targetFile = vscode.workspace.asRelativePath(resourceUri, false);
     }
 
     return { cwd, targetFile };
+}
+
+/**
+ * Resolves the primary (main) Git repository root for a path inside either the main repo or a linked worktree.
+ */
+export async function resolveMainRepositoryRoot(targetPath?: string): Promise<string | null> {
+    if (!targetPath) {
+        return null;
+    }
+    const topLevel = await getRepoRoot(targetPath).catch(() => null);
+    if (!topLevel) {
+        return null;
+    }
+    try {
+        const worktrees = await listGitWorktrees(topLevel);
+        const mainWt = worktrees.find(w => w.isMain);
+        if (mainWt?.worktree) {
+            return mainWt.worktree;
+        }
+    } catch {
+        // Fall back to git rev-parse toplevel
+    }
+    return topLevel;
+}
+
+/**
+ * Collects the active branch name and commit log summary relative to main/master/origin HEAD,
+ * falling back cleanly to the most recent 15 commits for repositories using custom default branches.
+ */
+export async function collectBranchLogSummary(cwd: string): Promise<{ currentBranch: string; logOut: string }> {
+    const branchOut = await runGitCmd(['branch', '--show-current'], cwd);
+    const currentBranch = branchOut.trim() || 'HEAD detached';
+
+    let baseBranch: string | null = null;
+    const candidates = ['main', 'master'];
+    for (const candidate of candidates) {
+        const verified = (await runGitCmd(['rev-parse', '--verify', candidate], cwd).catch(() => '')).trim();
+        if (verified) {
+            baseBranch = candidate;
+            break;
+        }
+    }
+    if (!baseBranch) {
+        const remoteHead = (await runGitCmd(['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'], cwd).catch(() => '')).trim();
+        if (remoteHead) {
+            baseBranch = remoteHead.replace(/^refs\/remotes\//, '');
+        }
+    }
+
+    let logOut = '';
+    if (baseBranch && baseBranch !== currentBranch) {
+        try {
+            logOut = await runGitCmd(['log', `${baseBranch}..HEAD`, '--oneline'], cwd);
+        } catch {
+            logOut = '';
+        }
+    }
+
+    if (!logOut.trim()) {
+        logOut = await runGitCmd(['log', '-n', '15', '--oneline'], cwd);
+    }
+
+    return { currentBranch, logOut };
 }
 
 /**

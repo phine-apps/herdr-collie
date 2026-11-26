@@ -6,7 +6,7 @@ import * as vscode from 'vscode';
 import * as l10n from '@vscode/l10n';
 import * as os from 'os';
 import * as path from 'path';
-import { execHerdr, ensureSessionServerRunning, isCommandAvailable } from './executors';
+import { execHerdr, ensureSessionServerRunning, isCommandAvailable, setPreServerStartHook } from './executors';
 import {
     findMatchingWorkspaceForCwd,
     isSameOrSubPath,
@@ -53,6 +53,7 @@ import {
     getWorktreesForCwds,
     computeGitRelativePath,
     resolveGitContextForUri,
+    resolveMainRepositoryRoot,
     captureTerminalOutputWithClipboard,
     isHerdrRunningInTerminal
 } from './gitContext';
@@ -109,6 +110,16 @@ export function activate(context: vscode.ExtensionContext) {
         return await ensureSessionServerRunning(sessionName);
     };
 
+    setPreServerStartHook(async () => {
+        if (!isWorkspaceTrusted(vscode)) {
+            return;
+        }
+        const cm = ensureConfigManagerInitialized();
+        await cm.ready.catch(() => undefined);
+        await cm.whenIdle().catch(() => undefined);
+    });
+    context.subscriptions.push({ dispose: () => setPreServerStartHook(null) });
+
     // Ensure session server is running in background (when herdr CLI is available and workspace is trusted)
     let sessionServerReadyPromise = !isWorkspaceTrusted(vscode)
         ? Promise.resolve(false)
@@ -119,7 +130,7 @@ export function activate(context: vscode.ExtensionContext) {
         socketClient.connect();
     }
 
-    let refreshAllProviders: (options?: { includeHUDs?: boolean; snapshotMaxAgeMs?: number }) => void = () => {};
+    let refreshAllProviders: (options?: { includeHUDs?: boolean; includeSessions?: boolean; snapshotMaxAgeMs?: number }) => void = () => {};
 
     const terminalBridge = createTerminalBridge(() => refreshAllProviders(), {
         ensureServerRunning: ensureSessionServerAfterConfigReady
@@ -380,10 +391,17 @@ export function activate(context: vscode.ExtensionContext) {
 
     let refreshDebounceTimer: NodeJS.Timeout | null = null;
     let pendingIncludeHUDs = false;
+    let pendingIncludeSessions = false;
     let pendingSnapshotMaxAgeMs = 0;
-    const scheduleRefreshAllProviders = (delayMs = 120, options?: { includeHUDs?: boolean; snapshotMaxAgeMs?: number }) => {
+    const scheduleRefreshAllProviders = (
+        delayMs = 120,
+        options?: { includeHUDs?: boolean; includeSessions?: boolean; snapshotMaxAgeMs?: number }
+    ) => {
         if (options?.includeHUDs ?? true) {
             pendingIncludeHUDs = true;
+        }
+        if (options?.includeSessions ?? true) {
+            pendingIncludeSessions = true;
         }
         if (typeof options?.snapshotMaxAgeMs === 'number') {
             pendingSnapshotMaxAgeMs = Math.max(pendingSnapshotMaxAgeMs, options.snapshotMaxAgeMs);
@@ -394,22 +412,27 @@ export function activate(context: vscode.ExtensionContext) {
         refreshDebounceTimer = setTimeout(() => {
             refreshDebounceTimer = null;
             const includeHUDs = pendingIncludeHUDs;
+            const includeSessions = pendingIncludeSessions;
             const snapshotMaxAgeMs = pendingSnapshotMaxAgeMs;
             pendingIncludeHUDs = false;
+            pendingIncludeSessions = false;
             pendingSnapshotMaxAgeMs = 0;
-            refreshAllProviders({ includeHUDs, snapshotMaxAgeMs });
+            refreshAllProviders({ includeHUDs, includeSessions, snapshotMaxAgeMs });
         }, delayMs);
     };
 
     let conflictRadar: WorktreeConflictRadar | undefined;
 
-    refreshAllProviders = (options?: { includeHUDs?: boolean; snapshotMaxAgeMs?: number }) => {
+    refreshAllProviders = (options?: { includeHUDs?: boolean; includeSessions?: boolean; snapshotMaxAgeMs?: number }) => {
         const includeHUDs = options?.includeHUDs ?? true;
+        const includeSessions = options?.includeSessions ?? true;
         const maxAgeMs = options?.snapshotMaxAgeMs ?? 0;
         if (includeHUDs) {
             invalidateWorktreeCache();
         }
-        sessionProvider.refresh();
+        if (includeSessions) {
+            sessionProvider.refresh();
+        }
         workspaceProvider.refresh({ maxAgeMs });
         agentProvider.refresh({ maxAgeMs });
         if (includeHUDs) {
@@ -421,9 +444,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     let socketListenerDisposable: vscode.Disposable | null = null;
     const setupSocketListeners = (client: HerdrSocketClient): vscode.Disposable => {
-        const onConnect = () => scheduleRefreshAllProviders(50, { includeHUDs: false });
-        const onEvent = () => scheduleRefreshAllProviders(120, { includeHUDs: false, snapshotMaxAgeMs: 150 });
-        const onDisconnect = () => scheduleRefreshAllProviders(50, { includeHUDs: false });
+        const onConnect = () => scheduleRefreshAllProviders(50, { includeHUDs: false, includeSessions: true });
+        const onEvent = () => scheduleRefreshAllProviders(120, { includeHUDs: false, includeSessions: false, snapshotMaxAgeMs: 150 });
+        const onDisconnect = () => scheduleRefreshAllProviders(50, { includeHUDs: false, includeSessions: true });
         const onError = () => {};
 
         client.on('connect', onConnect);
@@ -497,17 +520,29 @@ export function activate(context: vscode.ExtensionContext) {
         return false;
     };
 
+    const runSessionServerSwitch = (
+        targetSession: string,
+        onActivated: () => void
+    ): Promise<boolean> => {
+        let serverStarted = false;
+        const switchPromise = sessionSwitchCoordinator.runSwitch(targetSession, async (isLatest) => {
+            serverStarted = await ensureSessionServerAfterConfigReady(targetSession);
+            if (!isLatest()) {
+                return;
+            }
+            activeSidebarSession = targetSession;
+            onActivated();
+        });
+        sessionServerReadyPromise = switchPromise.then((applied) => applied && serverStarted).catch(() => false);
+        return switchPromise;
+    };
+
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration(async (e) => {
             if (e.affectsConfiguration('herdr-collie.sessionName') && isWorkspaceTrusted(vscode)) {
                 const newSession = getSessionName();
                 if (!shouldSkipSessionSwitch(newSession)) {
-                    await sessionSwitchCoordinator.runSwitch(newSession, async (isLatest) => {
-                        await ensureSessionServerAfterConfigReady(newSession);
-                        if (!isLatest()) {
-                            return;
-                        }
-                        activeSidebarSession = newSession;
+                    await runSessionServerSwitch(newSession, () => {
                         replaceSessionSocket(newSession);
                     });
                 }
@@ -528,12 +563,7 @@ export function activate(context: vscode.ExtensionContext) {
     const switchToSession = async (targetSession: string) => {
         if (shouldSkipSessionSwitch(targetSession)) return;
 
-        const applied = await sessionSwitchCoordinator.runSwitch(targetSession, async (isLatest) => {
-            await ensureSessionServerAfterConfigReady(targetSession);
-            if (!isLatest()) {
-                return;
-            }
-            activeSidebarSession = targetSession;
+        const applied = await runSessionServerSwitch(targetSession, () => {
             if (vscode.workspace.getConfiguration('herdr-collie').get<boolean>('hideHerdrSidebar', true)) {
                 reloadConfigForSessions(targetSession);
             }
@@ -596,7 +626,11 @@ export function activate(context: vscode.ExtensionContext) {
         }
         hasAutoBoundWorkspace = true;
         void (async () => {
-            await sessionServerReadyPromise;
+            let awaitedReadyPromise: Promise<boolean>;
+            do {
+                awaitedReadyPromise = sessionServerReadyPromise;
+                await awaitedReadyPromise;
+            } while (awaitedReadyPromise !== sessionServerReadyPromise);
             if (!(await isCommandAvailable('herdr'))) {
                 return;
             }
@@ -625,16 +659,15 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.workspace.onDidGrantWorkspaceTrust(() => {
                 const previousSession = activeSidebarSession;
                 const currentSession = getSessionName();
-                activeSidebarSession = currentSession;
-                sessionSwitchCoordinator.invalidate();
-                sessionServerReadyPromise = ensureSessionServerAfterConfigReady(currentSession).catch(() => false);
-                if (currentSession !== previousSession) {
-                    replaceSessionSocket(currentSession);
-                } else {
-                    socketClient.connect();
-                    refreshAllProviders();
-                }
                 reviewChangesProvider.refresh();
+                void runSessionServerSwitch(currentSession, () => {
+                    if (currentSession !== previousSession) {
+                        replaceSessionSocket(currentSession);
+                    } else {
+                        socketClient.connect();
+                        refreshAllProviders();
+                    }
+                }).catch(() => {});
                 void terminalBridge.restoreTerminalIfNeeded(currentSession).catch(() => {});
                 autoBindWorkspaceIfTrusted();
             })
@@ -659,13 +692,16 @@ export function activate(context: vscode.ExtensionContext) {
 
     const resolveMainRepoRoot = async (hintPath?: string): Promise<string | null> => {
         if (hintPath) {
-            const fromHint = await getRepoRoot(hintPath).catch(() => null);
+            const fromHint = await resolveMainRepositoryRoot(hintPath).catch(() => null);
             if (fromHint) return fromHint;
         }
         const fromActive = await getActiveRepoRoot();
-        if (fromActive) return fromActive;
+        if (fromActive) {
+            const resolvedActive = await resolveMainRepositoryRoot(fromActive).catch(() => null);
+            return resolvedActive || fromActive;
+        }
         const firstFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        return firstFolder ? await getRepoRoot(firstFolder).catch(() => null) : null;
+        return firstFolder ? await resolveMainRepositoryRoot(firstFolder).catch(() => null) : null;
     };
 
     const activateWorktreeReviewTarget = async (

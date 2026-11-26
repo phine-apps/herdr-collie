@@ -253,8 +253,10 @@ sidebar_collapsed_mode = "compact"
             const executors = require('../../executors');
             const originalExecHerdr = executors.execHerdr;
             const recordedCalls: string[][] = [];
-            executors.execHerdr = (args: string[]) => {
+            const recordedOptions: any[] = [];
+            executors.execHerdr = (args: string[], optionsOrCb?: any) => {
                 recordedCalls.push(args);
+                recordedOptions.push(typeof optionsOrCb === 'object' ? optionsOrCb : undefined);
             };
 
             try {
@@ -262,6 +264,10 @@ sidebar_collapsed_mode = "compact"
                 expect(recordedCalls).to.deep.equal([
                     ['server', 'reload-config'],
                     ['--session', 'vscode', 'server', 'reload-config']
+                ]);
+                expect(recordedOptions).to.deep.equal([
+                    { skipAutoStart: true },
+                    { skipAutoStart: true }
                 ]);
 
                 recordedCalls.length = 0;

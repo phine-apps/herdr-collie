@@ -101,10 +101,10 @@ export function reloadConfigForSessions(sessionNames?: string | string[], vscode
 
     try {
         const { execHerdr } = require('./executors');
-        execHerdr(['server', 'reload-config'], () => {});
+        execHerdr(['server', 'reload-config'], { skipAutoStart: true }, () => {});
         for (const session of targets) {
             if (session !== 'default') {
-                execHerdr(['--session', session, 'server', 'reload-config'], () => {});
+                execHerdr(['--session', session, 'server', 'reload-config'], { skipAutoStart: true }, () => {});
             }
         }
     } catch (e) {}

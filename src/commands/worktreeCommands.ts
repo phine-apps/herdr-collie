@@ -13,7 +13,6 @@ import { launchSwarmPlaybookWizard } from '../swarmPlaybooks';
 import {
     launchWorktreeAgentWizard,
     listGitWorktrees,
-    getRepoRoot,
     removeWorktree,
     mergeWorktreeBranch,
     verifyWorktreeMerge,
@@ -42,12 +41,7 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
 
     const mergeWorktreeDisposable = vscode.commands.registerCommand('herdr-collie.mergeWorktree', async (item?: HerdrWorkspaceTreeItem) => {
         if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders || workspaceFolders.length === 0) {
-            vscode.window.showErrorMessage(l10n.t('Please open a workspace folder first.'));
-            return;
-        }
-        const repoRoot = await getRepoRoot(workspaceFolders[0].uri.fsPath);
+        const repoRoot = await ctx.resolveMainRepoRoot(item?.cwd);
         if (!repoRoot) {
             vscode.window.showErrorMessage(l10n.t('The current workspace is not a Git repository.'));
             return;
@@ -150,14 +144,7 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
         const targetId = item?.rawId || (item?.id ? item.id.split(':')[0] : undefined);
         let targetLabel = item?.label || 'Worktree';
 
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        let repoRoot: string | null = null;
-        if (targetPath) {
-            repoRoot = await getRepoRoot(targetPath);
-        }
-        if (!repoRoot && workspaceFolders && workspaceFolders.length > 0) {
-            repoRoot = await getRepoRoot(workspaceFolders[0].uri.fsPath);
-        }
+        const repoRoot = await ctx.resolveMainRepoRoot(targetPath);
         if (!repoRoot) return;
 
         if (!targetPath) {
@@ -209,7 +196,14 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
 
         try {
             if (targetId) {
-                execHerdr(['--session', ctx.getActiveSidebarSession(), 'workspace', 'close', targetId], () => {});
+                await new Promise<void>((resolve) => {
+                    execHerdr(['--session', ctx.getActiveSidebarSession(), 'workspace', 'close', targetId], (err) => {
+                        if (err) {
+                            console.warn('[herdr-collie] Failed to close Herdr workspace before removing worktree:', err);
+                        }
+                        resolve();
+                    });
+                });
             }
             await removeWorktree(repoRoot, targetPath, true);
             vscode.window.showInformationMessage(l10n.t("Worktree '{0}' removed.", targetLabel));

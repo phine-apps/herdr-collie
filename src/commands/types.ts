@@ -15,7 +15,7 @@ import { WorktreeScorecard } from '../worktreeManager';
 export interface CommandContext {
     getActiveSidebarSession(): string;
     getSocketClient(): HerdrSocketClient;
-    refreshAllProviders(options?: { includeHUDs?: boolean; snapshotMaxAgeMs?: number }): void;
+    refreshAllProviders(options?: { includeHUDs?: boolean; includeSessions?: boolean; snapshotMaxAgeMs?: number }): void;
     updateTreeViewDescriptions(): void;
     openOrAttachTerminal(
         target: string,
