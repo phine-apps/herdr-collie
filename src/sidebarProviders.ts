@@ -133,9 +133,11 @@ export class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.Tr
         return this.sortOrder;
     }
 
-    updateSocketClient(newSocketClient: HerdrSocketClient) {
+    updateSocketClient(newSocketClient: HerdrSocketClient, options?: { refresh?: boolean }) {
         this.socketClient = newSocketClient;
-        this.refresh();
+        if (options?.refresh !== false) {
+            this.refresh();
+        }
     }
 
     refresh(options?: { maxAgeMs?: number }): void {

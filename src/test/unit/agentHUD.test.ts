@@ -126,12 +126,20 @@ describe('AgentHUD & Status Classification Unit Tests', () => {
             expect(registeredListeners['connect']).to.have.lengthOf(1);
             expect(registeredListeners['event']).to.have.lengthOf(1);
             expect(registeredListeners['disconnect']).to.have.lengthOf(1);
+            expect(registeredListeners['error']).to.have.lengthOf(1);
 
-            // Update to new client
-            hud.updateSocketClient(client2 as unknown as HerdrSocketClient);
+            // Update to new client without triggering immediate refresh
+            let c2SnapshotCalls = 0;
+            client2.getSnapshot = async () => {
+                c2SnapshotCalls++;
+                return null;
+            };
+            hud.updateSocketClient(client2 as unknown as HerdrSocketClient, { refresh: false });
             expect(removedListeners['connect']).to.have.lengthOf(1);
             expect(removedListeners['event']).to.have.lengthOf(1);
             expect(removedListeners['disconnect']).to.have.lengthOf(1);
+            expect(removedListeners['error']).to.have.lengthOf(1);
+            expect(c2SnapshotCalls).to.equal(0);
 
             // Dispose
             hud.dispose();

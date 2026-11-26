@@ -27,6 +27,18 @@ import { ensureWorkspaceTrustedForAction } from '../workspaceTrust';
 import { resolveGitContextForUri, captureTerminalOutputWithClipboard, collectBranchLogSummary } from '../gitContext';
 import { CommandContext } from './types';
 
+function extractResourceUri(arg: unknown): vscode.Uri | undefined {
+    if (!arg || typeof arg !== 'object') return undefined;
+    const candidate = arg as { scheme?: unknown; fsPath?: unknown; resourceUri?: vscode.Uri };
+    if (typeof candidate.scheme === 'string' && typeof candidate.fsPath === 'string') {
+        return arg as vscode.Uri;
+    }
+    if (candidate.resourceUri) {
+        return candidate.resourceUri;
+    }
+    return undefined;
+}
+
 export function registerContextCommands(context: vscode.ExtensionContext, ctx: CommandContext): void {
     const sendContextDisposable = vscode.commands.registerCommand('herdr-collie.sendContext', async () => {
         if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
@@ -61,9 +73,7 @@ export function registerContextCommands(context: vscode.ExtensionContext, ctx: C
 
     const sendStagedChangesDisposable = vscode.commands.registerCommand('herdr-collie.sendStagedChanges', async (...args) => {
         if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
-        const resourceUri = args.length > 0 && args[0] && args[0].resourceUri
-            ? (args[0].resourceUri as vscode.Uri)
-            : undefined;
+        const resourceUri = args.length > 0 ? extractResourceUri(args[0]) : undefined;
         const gitCtx = await resolveGitContextForUri(resourceUri, vscode.window.activeTextEditor?.document.uri);
         if (!gitCtx) return;
         const { cwd, targetFile } = gitCtx;
@@ -84,9 +94,7 @@ export function registerContextCommands(context: vscode.ExtensionContext, ctx: C
 
     const sendWorkingTreeChangesDisposable = vscode.commands.registerCommand('herdr-collie.sendWorkingTreeChanges', async (...args) => {
         if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
-        const resourceUri = args.length > 0 && args[0] && args[0].resourceUri
-            ? (args[0].resourceUri as vscode.Uri)
-            : undefined;
+        const resourceUri = args.length > 0 ? extractResourceUri(args[0]) : undefined;
         const gitCtx = await resolveGitContextForUri(resourceUri, vscode.window.activeTextEditor?.document.uri);
         if (!gitCtx) return;
         const { cwd, targetFile } = gitCtx;

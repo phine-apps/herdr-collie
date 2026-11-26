@@ -118,7 +118,6 @@ export function registerReviewCommands(context: vscode.ExtensionContext, ctx: Co
             customInstruction = input.trim();
         }
 
-        const workspaceFolders = vscode.workspace.workspaceFolders;
         const reviewTarget = ctx.reviewChangesProvider.getReviewTarget();
         let currentBranch: string | undefined;
         let repoRoot: string | null = null;
@@ -126,24 +125,12 @@ export function registerReviewCommands(context: vscode.ExtensionContext, ctx: Co
             repoRoot = reviewTarget.worktreePath;
             try {
                 currentBranch = reviewTarget.branchName || await getCurrentGitBranch(repoRoot);
-                if (submitModePick.mode !== 'clipboard') {
-                    const cp = await createReviewCheckpoint(repoRoot, 'pre-review-submit');
-                    if (cp) {
-                        ctx.reviewChangesProvider.setBaseCheckpoint(cp);
-                    }
-                }
             } catch {}
-        } else if (workspaceFolders && workspaceFolders.length > 0) {
+        } else {
             try {
-                repoRoot = await getRepoRoot(workspaceFolders[0].uri.fsPath);
+                repoRoot = await ctx.reviewChangesProvider.getEffectiveRepoRoot() || await ctx.resolveMainRepoRoot();
                 if (repoRoot) {
                     currentBranch = await getCurrentGitBranch(repoRoot);
-                    if (submitModePick.mode !== 'clipboard') {
-                        const cp = await createReviewCheckpoint(repoRoot, 'pre-review-submit');
-                        if (cp) {
-                            ctx.reviewChangesProvider.setBaseCheckpoint(cp);
-                        }
-                    }
                 }
             } catch {}
         }
@@ -152,7 +139,7 @@ export function registerReviewCommands(context: vscode.ExtensionContext, ctx: Co
             ? { preferredCwd: reviewTarget.worktreePath, preferredAgentId: reviewTarget.agentId }
             : {};
 
-        await ctx.reviewController.submitSafely(
+        const delivered = await ctx.reviewController.submitSafely(
             async (prompt) => {
                 if (submitModePick.mode === 'clipboard') {
                     await vscode.env.clipboard.writeText(prompt);
@@ -181,6 +168,15 @@ export function registerReviewCommands(context: vscode.ExtensionContext, ctx: Co
                 customInstruction
             }
         );
+
+        if (delivered && repoRoot && submitModePick.mode !== 'clipboard' && submitModePick.mode !== 'crystallize') {
+            try {
+                const cp = await createReviewCheckpoint(repoRoot, 'pre-review-submit');
+                if (cp) {
+                    ctx.reviewChangesProvider.setBaseCheckpoint(cp);
+                }
+            } catch {}
+        }
     });
 
     const clearReviewDisposable = vscode.commands.registerCommand('herdr-collie.clearReview', async () => {
@@ -194,6 +190,7 @@ export function registerReviewCommands(context: vscode.ExtensionContext, ctx: Co
     });
 
     const openDiffDisposable = vscode.commands.registerCommand('herdr-collie.openDiff', async (item?: ReviewChangeTreeItem) => {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         if (!item || item.isFolder) return;
         try {
             const baseRef = ctx.reviewChangesProvider.getEffectiveBaseRef();

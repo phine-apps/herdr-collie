@@ -446,4 +446,26 @@ describe('Integrated Review & Diff-to-Prompt Integration Tests (P3)', function()
             fs.rmSync(emptyRepoDir, { recursive: true, force: true });
         }
     });
+
+    it('removes newly staged files on rollbackReviewCheckpoint while preserving protected .env files and generates unique diff temp paths', async () => {
+        fs.writeFileSync(path.join(tempRepoDir, '.env'), 'SECRET=keep-me\n', 'utf8');
+        const cp = await createReviewCheckpoint(tempRepoDir, 'before-staged-new-file');
+        expect(cp).to.not.be.null;
+
+        const stagedNewFile = path.join(tempRepoDir, 'new-agent-module.ts');
+        fs.writeFileSync(stagedNewFile, 'export const leaked = true;\n', 'utf8');
+        await runGitCmd(['add', 'new-agent-module.ts'], tempRepoDir);
+
+        const rolledBack = await rollbackReviewCheckpoint(tempRepoDir, cp!.hash);
+        expect(rolledBack).to.be.true;
+        expect(fs.existsSync(stagedNewFile)).to.be.false;
+        expect(fs.existsSync(path.join(tempRepoDir, '.env'))).to.be.true;
+        const statusOut = await runGitCmd(['status', '--porcelain'], tempRepoDir);
+        expect(statusOut).to.not.include('new-agent-module.ts');
+
+        // prepareOriginalFileForDiff called twice in the same tick must yield unique paths
+        const p1 = await prepareOriginalFileForDiff(tempRepoDir, 'auth.ts');
+        const p2 = await prepareOriginalFileForDiff(tempRepoDir, 'auth.ts');
+        expect(p1).to.not.equal(p2);
+    });
 });

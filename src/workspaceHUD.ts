@@ -25,6 +25,7 @@ export class WorkspaceHUD implements vscode.Disposable {
     private connectListener?: () => void;
     private eventListener?: () => void;
     private disconnectListener?: () => void;
+    private errorListener?: () => void;
     private eventRefreshTimer: NodeJS.Timeout | null = null;
 
     constructor(
@@ -46,11 +47,13 @@ export class WorkspaceHUD implements vscode.Disposable {
         this.setupSocketEvents(this.socketClient);
     }
 
-    public updateSocketClient(newSocketClient: HerdrSocketClient): void {
+    public updateSocketClient(newSocketClient: HerdrSocketClient, options?: { refresh?: boolean }): void {
         this.cleanupSocketEvents();
         this.socketClient = newSocketClient;
         this.setupSocketEvents(this.socketClient);
-        this.refresh();
+        if (options?.refresh !== false) {
+            this.refresh();
+        }
     }
 
     private scheduleEventRefresh(delayMs: number = 30): void {
@@ -75,10 +78,12 @@ export class WorkspaceHUD implements vscode.Disposable {
             this.updateHUDText(undefined);
         };
 
+        this.errorListener = () => {};
+
         client.on('connect', this.connectListener);
         client.on('event', this.eventListener);
         client.on('disconnect', this.disconnectListener);
-        client.on('error', () => {});
+        client.on('error', this.errorListener);
     }
 
     private cleanupSocketEvents(): void {
@@ -98,6 +103,10 @@ export class WorkspaceHUD implements vscode.Disposable {
             if (this.disconnectListener) {
                 this.socketClient.off('disconnect', this.disconnectListener);
                 this.disconnectListener = undefined;
+            }
+            if (this.errorListener) {
+                this.socketClient.off('error', this.errorListener);
+                this.errorListener = undefined;
             }
         }
     }

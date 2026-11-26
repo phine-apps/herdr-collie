@@ -362,6 +362,9 @@ export async function sendPromptToAgent(
     options?: { socketClient?: HerdrSocketClient; sessionName?: string; cwd?: string }
 ): Promise<boolean> {
     const socket = options?.socketClient;
+    if (!agentId || agentId.startsWith('-')) {
+        return false;
+    }
     const sessionName = options?.sessionName || 'vscode';
     const cwd = options?.cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 

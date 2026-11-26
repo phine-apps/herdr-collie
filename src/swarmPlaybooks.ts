@@ -22,6 +22,7 @@ import {
     getCurrentGitBranch,
     getInstalledAgentOptions,
     getRepoRoot,
+    resolveMainRepoRootFromPath,
     getWorktreeBootstrapOptions,
     listGitBranches,
     resolveWorktreePath,
@@ -866,7 +867,16 @@ export async function launchSwarmPlaybookWizard(
         return;
     }
 
-    const repoRoot = await getRepoRoot(workspaceFolders[0].uri.fsPath);
+    const activeDocUri = vscode.window.activeTextEditor?.document?.uri;
+    let repoRoot: string | null = activeDocUri?.scheme === 'file' && activeDocUri.fsPath
+        ? await resolveMainRepoRootFromPath(path.dirname(activeDocUri.fsPath))
+        : null;
+    if (!repoRoot) {
+        for (const folder of workspaceFolders) {
+            repoRoot = await resolveMainRepoRootFromPath(folder.uri.fsPath);
+            if (repoRoot) break;
+        }
+    }
     if (!repoRoot) {
         vscode.window.showErrorMessage(l10n.t('The current workspace is not a Git repository.'));
         return;

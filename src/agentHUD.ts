@@ -151,6 +151,7 @@ export class AgentHUD implements vscode.Disposable {
     private connectListener?: () => void;
     private eventListener?: (event: unknown) => void;
     private disconnectListener?: () => void;
+    private errorListener?: () => void;
     private eventRefreshTimer: NodeJS.Timeout | null = null;
 
     constructor(
@@ -170,14 +171,16 @@ export class AgentHUD implements vscode.Disposable {
         this.setupSocketEvents(this.socketClient);
     }
 
-    public updateSocketClient(newSocketClient: HerdrSocketClient): void {
+    public updateSocketClient(newSocketClient: HerdrSocketClient, options?: { refresh?: boolean }): void {
         this.cleanupSocketEvents();
         this.previousAgentStates.clear();
         this.notifiedBlockedAgents.clear();
         this.autoVerifyRetryCounts.clear();
         this.socketClient = newSocketClient;
         this.setupSocketEvents(this.socketClient);
-        this.refresh();
+        if (options?.refresh !== false) {
+            this.refresh();
+        }
     }
 
     private scheduleEventRefresh(delayMs: number = 30): void {
@@ -205,10 +208,12 @@ export class AgentHUD implements vscode.Disposable {
             this.updateHUDText([]);
         };
 
+        this.errorListener = () => {};
+
         client.on('connect', this.connectListener);
         client.on('event', this.eventListener);
         client.on('disconnect', this.disconnectListener);
-        client.on('error', () => {});
+        client.on('error', this.errorListener);
     }
 
     private cleanupSocketEvents(): void {
@@ -228,6 +233,10 @@ export class AgentHUD implements vscode.Disposable {
             if (this.disconnectListener) {
                 this.socketClient.off('disconnect', this.disconnectListener);
                 this.disconnectListener = undefined;
+            }
+            if (this.errorListener) {
+                this.socketClient.off('error', this.errorListener);
+                this.errorListener = undefined;
             }
         }
     }
@@ -541,6 +550,9 @@ export class AgentHUD implements vscode.Disposable {
      * Sends a prompt string to an agent via socket or CLI fallback
      */
     private async sendPromptToAgent(agentId: string, prompt: string, cwd?: string): Promise<boolean> {
+        if (!agentId || agentId.startsWith('-')) {
+            return false;
+        }
         if (this.socketClient.isConnected) {
             try {
                 await this.socketClient.sendAgentPrompt(agentId, prompt);
@@ -573,6 +585,7 @@ export class AgentHUD implements vscode.Disposable {
      * Sends key strokes (e.g. ['y', 'enter']) to agent pane
      */
     private async sendKeysToAgent(agentId: string, keys: string[]): Promise<void> {
+        if (!agentId || agentId.startsWith('-')) return;
         if (this.socketClient.isConnected) {
             try {
                 await this.socketClient.sendPaneKeys(agentId, keys);
@@ -591,6 +604,7 @@ export class AgentHUD implements vscode.Disposable {
      * Sends text input string (and optional trailing keys like ['enter']) to agent pane
      */
     private async sendInputToAgent(agentId: string, text: string, keys?: string[]): Promise<void> {
+        if (!agentId || agentId.startsWith('-')) return;
         if (this.socketClient.isConnected) {
             try {
                 await this.socketClient.sendPaneInput(agentId, text, keys);
@@ -775,6 +789,9 @@ export class AgentHUD implements vscode.Disposable {
                         } catch {
                             // Fallback to CLI
                         }
+                    }
+                    if (!targetAgent.id || targetAgent.id.startsWith('-')) {
+                        return;
                     }
                     execHerdr(['--session', sessionName, 'agent', 'prompt', targetAgent.id, prompt.trim()], () => {
                         vscode.window.showInformationMessage(l10n.t("Prompt sent to '{0}'", targetAgent.name));

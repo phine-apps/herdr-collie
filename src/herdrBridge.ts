@@ -563,6 +563,9 @@ export async function sendPromptToHerdr(params: {
     }
 
     const target = selected.targetId;
+    if (!target || target.startsWith('-')) {
+        return false;
+    }
     const sessionName = selected.sessionName;
     const sessionArgs = sessionName ? ['--session', sessionName] : [];
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -596,6 +599,16 @@ export async function sendPromptToHerdr(params: {
                 resolve(true);
             });
         });
+    }
+
+    if (socketClient.isConnected && (!sessionName || sessionName === activeSidebarSession) && typeof socketClient.sendAgentPrompt === 'function') {
+        try {
+            await socketClient.sendAgentPrompt(target, richText);
+            vscode.window.showInformationMessage(l10n.t('{0} (Agent)', successMsg));
+            return true;
+        } catch {
+            // Fallback to CLI
+        }
     }
 
     return await new Promise<boolean>((resolve) => {

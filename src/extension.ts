@@ -79,7 +79,13 @@ export {
 };
 
 export function activate(context: vscode.ExtensionContext) {
-    if (vscode.l10n?.uri) {
+    if (vscode.l10n?.bundle) {
+        try {
+            l10n.config({ contents: vscode.l10n.bundle as any });
+        } catch {
+            // Ignore in test environments
+        }
+    } else if (vscode.l10n?.uri) {
         try {
             l10n.config({ fsPath: vscode.l10n.uri.fsPath });
         } catch {
@@ -503,10 +509,10 @@ export function activate(context: vscode.ExtensionContext) {
         socketClient = new HerdrSocketClient(newSession);
         socketClient.connect();
         socketListenerDisposable = setupSocketListeners(socketClient);
-        workspaceProvider.updateSocketClient(socketClient);
-        agentProvider.updateSocketClient(socketClient);
-        agentHUD.updateSocketClient(socketClient);
-        workspaceHUD.updateSocketClient(socketClient);
+        workspaceProvider.updateSocketClient(socketClient, { refresh: false });
+        agentProvider.updateSocketClient(socketClient, { refresh: false });
+        agentHUD.updateSocketClient(socketClient, { refresh: false });
+        workspaceHUD.updateSocketClient(socketClient, { refresh: false });
         workspaceDragAndDropController.updateSocketClient(socketClient);
         updateTreeViewDescriptions();
         refreshAllProviders();

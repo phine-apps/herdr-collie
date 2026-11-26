@@ -11,8 +11,11 @@ import cp = require('child_process');
 import { mockState, mockVscode, resetMockState, MockUri } from '../helpers/mockVscode';
 import { registerWorktreeCommands } from '../../commands/worktreeCommands';
 import { registerContextCommands } from '../../commands/contextCommands';
+import { registerReviewCommands } from '../../commands/reviewCommands';
+import { registerSessionCommands } from '../../commands/sessionCommands';
 import { CommandContext } from '../../commands/types';
 import { createWorktree, resolveWorktreePath, listGitWorktrees } from '../../worktreeManager';
+import { HerdrReviewController, HerdrReviewChangesProvider } from '../../reviewManager';
 import { resolveMainRepositoryRoot } from '../../gitContext';
 import { runGitCmd } from '../../executors';
 
@@ -190,5 +193,106 @@ describe('Command Handler Unit & Multi-Root Tests', () => {
         expect(sentPrompts).to.have.lengthOf(1);
         expect(sentPrompts[0].richText).to.include('trunk');
         expect(sentPrompts[0].richText).to.include('Initial commit');
+    });
+
+    it('herdr-collie.sendStagedChanges and sendWorkingTreeChanges scope diff to file when invoked from editor/context with a Uri', async () => {
+        const repoDir = await createTempGitRepo('main');
+        const fileA = path.join(repoDir, 'a.ts');
+        const fileB = path.join(repoDir, 'b.ts');
+        fs.writeFileSync(fileA, 'export const a = 1;\n', 'utf8');
+        fs.writeFileSync(fileB, 'export const b = 1;\n', 'utf8');
+        await runGitCmd(['add', 'a.ts', 'b.ts'], repoDir);
+        await runGitCmd(['commit', '-m', 'Add a and b'], repoDir);
+
+        // Stage change in a.ts and working change in b.ts + a.ts
+        fs.writeFileSync(fileA, 'export const a = 2;\n', 'utf8');
+        await runGitCmd(['add', 'a.ts'], repoDir);
+        fs.writeFileSync(fileA, 'export const a = 3;\n', 'utf8');
+        fs.writeFileSync(fileB, 'export const b = 2;\n', 'utf8');
+
+        const sentPrompts: string[] = [];
+        const fakeContext = { subscriptions: [] } as any;
+        registerContextCommands(fakeContext, createMockCommandContext({
+            sendToHerdr: async (richText) => {
+                sentPrompts.push(richText);
+                return true;
+            }
+        }));
+
+        await registeredHandlers.get('herdr-collie.sendStagedChanges')!(MockUri.file(fileA));
+        await registeredHandlers.get('herdr-collie.sendWorkingTreeChanges')!(MockUri.file(fileB));
+
+        expect(sentPrompts).to.have.lengthOf(2);
+        expect(sentPrompts[0]).to.include('a.ts');
+        expect(sentPrompts[0]).to.not.include('b.ts');
+        expect(sentPrompts[1]).to.include('b.ts');
+        expect(sentPrompts[1]).to.not.include('a.ts');
+    });
+
+    it('herdr-collie.submitReview does not advance baseCheckpoint when target QuickPick is cancelled, and openDiff respects Restricted Mode', async () => {
+        const repoDir = await createTempGitRepo('main');
+        fs.writeFileSync(path.join(repoDir, 'file.ts'), 'export const x = 1;\n', 'utf8');
+
+        const controller = new HerdrReviewController();
+        const changesProvider = new HerdrReviewChangesProvider(async () => repoDir, 'flat');
+        try {
+            controller.addCommentFromEditor(MockUri.file(path.join(repoDir, 'file.ts')) as any, 1, 1, 'Fix x', 'export const x = 1;', repoDir);
+            expect(changesProvider.getBaseCheckpoint()).to.be.null;
+
+            const fakeContext = { subscriptions: [] } as any;
+            registerReviewCommands(fakeContext, createMockCommandContext({
+                reviewController: controller,
+                reviewChangesProvider: changesProvider,
+                resolveMainRepoRoot: async () => repoDir,
+                sendToHerdr: async () => false // User cancelled agent selection QuickPick
+            }));
+
+            // First QuickPick item from mockVscode is Standard Review
+            await registeredHandlers.get('herdr-collie.submitReview')!();
+
+            // Comments preserved and baseCheckpoint NOT created/advanced on cancel
+            expect(controller.commentCount).to.equal(1);
+            expect(changesProvider.getBaseCheckpoint()).to.be.null;
+
+            // openDiff must guard Restricted Mode
+            mockVscode.workspace.isTrusted = false;
+            mockState.workspaceTrustRequestResponse = false;
+            await registeredHandlers.get('herdr-collie.openDiff')!({
+                isFolder: false,
+                repoRoot: repoDir,
+                change: { filePath: 'file.ts', fileName: 'file.ts', status: 'M' }
+            });
+            expect(mockState.requestWorkspaceTrustCalls).to.have.lengthOf(1);
+            expect(mockState.executedCommands).to.be.empty;
+        } finally {
+            controller.dispose();
+            changesProvider.dispose();
+        }
+    });
+
+    it('herdr-collie.renameWorkspace rejects leading-hyphen workspace IDs and switchSession handles createQuickPick.onDidHide cleanly', async () => {
+        const execCalls: string[][] = [];
+        (cp as any).execFile = (_file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+            execCalls.push(args);
+            const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+            if (callback) {
+                callback(null, JSON.stringify({ sessions: [{ name: 'vscode', default: false, running: true }] }), '');
+            }
+            return {} as any;
+        };
+
+        const fakeContext = { subscriptions: [] } as any;
+        registerSessionCommands(fakeContext, createMockCommandContext());
+
+        mockState.inputBoxResponse = 'New Label';
+        await registeredHandlers.get('herdr-collie.renameWorkspace')!({
+            rawId: '-malicious-id',
+            label: 'Old'
+        });
+        expect(execCalls).to.be.empty;
+
+        // Exercise switchSession QuickPick path (requires createQuickPick.onDidHide in mockVscode)
+        await registeredHandlers.get('herdr-collie.switchSession')!();
+        expect(execCalls.some(a => a[0] === 'session' && a[1] === 'list')).to.be.true;
     });
 });

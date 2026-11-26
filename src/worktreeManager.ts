@@ -273,7 +273,21 @@ export function validateBranchName(val: string): string | null {
     const trimmed = val.trim();
     if (trimmed.startsWith('-')) return l10n.t('Branch name cannot start with a hyphen (-)');
     if (/\s/.test(trimmed)) return l10n.t('Branch name cannot contain spaces');
-    if (/[\0~^:?*\[\\]|\.\.|\/\/|@\{/.test(trimmed)) return l10n.t('Branch name contains invalid Git ref characters');
+    if (
+        /[\0~^:?*\[\\]|\.\.|\/\/|@\{/.test(trimmed) ||
+        trimmed === '.' ||
+        trimmed === '@' ||
+        trimmed.startsWith('/') ||
+        trimmed.endsWith('/') ||
+        trimmed.endsWith('.') ||
+        trimmed.endsWith('.lock')
+    ) {
+        return l10n.t('Branch name contains invalid Git ref characters');
+    }
+    const slug = sanitizeBranchSlug(trimmed);
+    if (!slug || slug === '.' || slug === '..') {
+        return l10n.t('Branch name contains invalid Git ref characters');
+    }
     return null;
 }
 
@@ -295,6 +309,29 @@ export async function getRepoRoot(cwd: string): Promise<string | null> {
     } catch {
         return null;
     }
+}
+
+/**
+ * Resolves the primary (main) repository root from either the main repo or a linked worktree path.
+ */
+export async function resolveMainRepoRootFromPath(targetPath?: string): Promise<string | null> {
+    if (!targetPath) {
+        return null;
+    }
+    const topLevel = await getRepoRoot(targetPath);
+    if (!topLevel) {
+        return null;
+    }
+    try {
+        const worktrees = await listGitWorktrees(topLevel);
+        const mainWt = worktrees.find(w => w.isMain);
+        if (mainWt?.worktree) {
+            return mainWt.worktree;
+        }
+    } catch {
+        // Fall back to rev-parse toplevel
+    }
+    return topLevel;
 }
 
 /**
@@ -1004,6 +1041,9 @@ export function resolveWorktreePath(
 ): string {
     const repoBasename = path.basename(repoRoot);
     const slug = sanitizeBranchSlug(branchName);
+    if (!slug || slug === '.' || slug === '..') {
+        throw new Error(l10n.t('Branch name contains invalid Git ref characters'));
+    }
 
     if (locationPreference === '.worktrees') {
         return path.join(repoRoot, '.worktrees', slug);
@@ -1842,11 +1882,13 @@ export async function launchWorktreeAgentWizard(
         return;
     }
 
-    const activeDocPath = vscode.window.activeTextEditor?.document?.uri?.fsPath;
-    let repoRoot: string | null = activeDocPath ? await getRepoRoot(path.dirname(activeDocPath)) : null;
+    const activeDocUri = vscode.window.activeTextEditor?.document?.uri;
+    let repoRoot: string | null = activeDocUri?.scheme === 'file' && activeDocUri.fsPath
+        ? await resolveMainRepoRootFromPath(path.dirname(activeDocUri.fsPath))
+        : null;
     if (!repoRoot) {
         for (const folder of workspaceFolders) {
-            repoRoot = await getRepoRoot(folder.uri.fsPath);
+            repoRoot = await resolveMainRepoRootFromPath(folder.uri.fsPath);
             if (repoRoot) break;
         }
     }

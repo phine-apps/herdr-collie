@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { isProcessDescendantRunning, runGitCmd } from './executors';
 import { GitWorktreeInfo } from './parsers';
-import { getRepoRoot, listGitWorktrees } from './worktreeManager';
+import { getRepoRoot, listGitWorktrees, resolveMainRepoRootFromPath } from './worktreeManager';
 
 const WORKTREE_CACHE_TTL_MS = 350;
 const MAX_WORKTREE_CACHE_ENTRIES = 50;
@@ -192,23 +192,7 @@ export async function resolveGitContextForUri(
  * Resolves the primary (main) Git repository root for a path inside either the main repo or a linked worktree.
  */
 export async function resolveMainRepositoryRoot(targetPath?: string): Promise<string | null> {
-    if (!targetPath) {
-        return null;
-    }
-    const topLevel = await getRepoRoot(targetPath).catch(() => null);
-    if (!topLevel) {
-        return null;
-    }
-    try {
-        const worktrees = await listGitWorktrees(topLevel);
-        const mainWt = worktrees.find(w => w.isMain);
-        if (mainWt?.worktree) {
-            return mainWt.worktree;
-        }
-    } catch {
-        // Fall back to git rev-parse toplevel
-    }
-    return topLevel;
+    return await resolveMainRepoRootFromPath(targetPath);
 }
 
 /**

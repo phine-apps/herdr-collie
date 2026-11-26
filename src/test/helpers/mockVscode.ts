@@ -336,15 +336,24 @@ export const mockVscode = {
             return Array.isArray(items) && items.length > 0 ? items[0] : undefined;
         },
         createQuickPick: () => {
+            const hideListeners: Array<() => void> = [];
             return {
                 title: '',
                 placeholder: '',
                 items: [],
                 selectedItems: [],
-                onDidTriggerItemButton: (cb: any) => {},
-                onDidAccept: (cb: any) => {},
+                onDidTriggerItemButton: (cb: any) => ({ dispose: () => {} }),
+                onDidAccept: (cb: any) => ({ dispose: () => {} }),
+                onDidHide: (cb: () => void) => {
+                    hideListeners.push(cb);
+                    return { dispose: () => {} };
+                },
                 show: () => {},
-                hide: () => {},
+                hide: () => {
+                    for (const listener of [...hideListeners]) {
+                        listener();
+                    }
+                },
                 dispose: () => {}
             };
         },

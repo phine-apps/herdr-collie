@@ -498,7 +498,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
         if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         if (!item) return;
         const targetId = item.rawId || (item.id ? item.id.split(':')[0] : '');
-        if (!targetId) return;
+        if (!targetId || targetId.startsWith('-')) return;
 
         const currentLabel = item.label.replace('★ ', '').replace(/\(\d+ panes\)/, '').trim();
 
@@ -507,9 +507,10 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
             value: currentLabel
         });
 
-        if (!newLabel) return;
+        const trimmedLabel = newLabel?.trim();
+        if (!trimmedLabel) return;
 
-        execHerdr(['--session', ctx.getActiveSidebarSession(), 'workspace', 'rename', targetId, newLabel], (error) => {
+        execHerdr(['--session', ctx.getActiveSidebarSession(), 'workspace', 'rename', targetId, trimmedLabel], (error) => {
             if (error) {
                 vscode.window.showErrorMessage(l10n.t('Failed to rename workspace: {0}', error.message));
                 return;

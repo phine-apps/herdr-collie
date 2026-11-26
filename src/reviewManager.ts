@@ -711,6 +711,8 @@ export function cleanDiffCache(maxAgeMs = 3600000): void {
 /**
  * Prepares the base version (HEAD or specified checkpoint ref) of a file in a temporary location for VS Code diffing
  */
+let diffTempFileSeq = 0;
+
 export async function prepareOriginalFileForDiff(
     repoRoot: string,
     filePath: string,
@@ -723,7 +725,7 @@ export async function prepareOriginalFileForDiff(
         fs.mkdirSync(cacheDir, { recursive: true });
     }
 
-    const safeFileName = `${Date.now()}_${path.basename(filePath)}`;
+    const safeFileName = `${Date.now()}_${++diffTempFileSeq}_${Math.random().toString(36).slice(2, 8)}_${path.basename(filePath)}`;
     const tempFilePath = path.join(cacheDir, safeFileName);
 
     // Normalize Windows backslashes to POSIX slashes for Git CLI compatibility
@@ -750,7 +752,7 @@ export function prepareEmptyFileForDiff(filePath: string): string {
     if (!fs.existsSync(cacheDir)) {
         fs.mkdirSync(cacheDir, { recursive: true });
     }
-    const safeFileName = `${Date.now()}_deleted_${path.basename(filePath)}`;
+    const safeFileName = `${Date.now()}_${++diffTempFileSeq}_${Math.random().toString(36).slice(2, 8)}_deleted_${path.basename(filePath)}`;
     const tempFilePath = path.join(cacheDir, safeFileName);
     fs.writeFileSync(tempFilePath, '', 'utf8');
     return tempFilePath;
@@ -1262,6 +1264,22 @@ export async function rollbackReviewCheckpoint(
 
     try {
         const untrackedRef = await resolveCheckpointUntrackedRef(repoRoot, checkpointHashOrRef);
+
+        const addedInIndexOut = await runGitCmd(
+            ['diff', '--cached', '--name-only', '--diff-filter=A', checkpointHashOrRef, '-z'],
+            repoRoot
+        ).catch(() => '');
+        const addedInIndex = addedInIndexOut
+            .split('\0')
+            .filter(Boolean)
+            .filter(f => !path.basename(f).startsWith('.env') && !f.startsWith('.vscode/') && f !== '.vscode');
+        if (addedInIndex.length > 0) {
+            const chunkSize = 50;
+            for (let i = 0; i < addedInIndex.length; i += chunkSize) {
+                const chunk = addedInIndex.slice(i, i + chunkSize);
+                await runGitCmd(['rm', '-f', '--cached', '--', ...chunk], repoRoot).catch(() => {});
+            }
+        }
 
         await runGitCmd(['checkout', checkpointHashOrRef, '--', '.'], repoRoot);
         if (options.cleanUntracked !== false) {

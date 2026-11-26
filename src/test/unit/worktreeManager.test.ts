@@ -173,6 +173,15 @@ describe('worktreeManager Unit Tests', () => {
             expect(validateBranchName('feat*branch')).to.equal('Branch name contains invalid Git ref characters');
             expect(validateBranchName('feat[branch')).to.equal('Branch name contains invalid Git ref characters');
             expect(validateBranchName('feat@{1}')).to.equal('Branch name contains invalid Git ref characters');
+            expect(validateBranchName('.')).to.equal('Branch name contains invalid Git ref characters');
+            expect(validateBranchName('/')).to.equal('Branch name contains invalid Git ref characters');
+            expect(validateBranchName('/leading')).to.equal('Branch name contains invalid Git ref characters');
+            expect(validateBranchName('trailing/')).to.equal('Branch name contains invalid Git ref characters');
+            expect(validateBranchName('trailing.')).to.equal('Branch name contains invalid Git ref characters');
+            expect(validateBranchName('branch.lock')).to.equal('Branch name contains invalid Git ref characters');
+            expect(validateBranchName('@')).to.equal('Branch name contains invalid Git ref characters');
+            expect(() => resolveWorktreePath('/repo', '.', '.worktrees')).to.throw();
+            expect(() => resolveWorktreePath('/repo', '/', '.worktrees')).to.throw();
         });
 
         it('returns null for valid branch names', () => {
