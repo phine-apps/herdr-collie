@@ -30,6 +30,9 @@ export class HerdrWorkspaceTreeItem extends vscode.TreeItem {
         this.tabs = tabs;
         // Include status signature in TreeItem.id so VS Code re-renders dynamic status changes
         this.id = statusSignature ? `${rawId}:${statusSignature}` : rawId;
+        (this as any).accessibilityInformation = {
+            label: branchName ? `${label} (${branchName})` : label
+        };
     }
 }
 
@@ -49,6 +52,9 @@ export class HerdrTabTreeItem extends vscode.TreeItem {
         this.iconPath = new vscode.ThemeIcon(isFocused ? 'window' : 'terminal');
         this.description = isFocused ? l10n.t('(Active)') : (paneCount > 1 ? `${paneCount} panes` : undefined);
         this.tooltip = l10n.t('Tab {0} (ID: {1}, Panes: {2})', label, tabId, paneCount);
+        (this as any).accessibilityInformation = {
+            label: this.tooltip
+        };
         this.command = {
             command: 'herdr-collie.focusTab',
             title: l10n.t('Focus Tab'),

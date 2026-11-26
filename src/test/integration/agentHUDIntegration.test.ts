@@ -56,7 +56,7 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
     const createdHuds: AgentHUD[] = [];
 
     const createClient = (sockPath: string): HerdrSocketClient => {
-        const client = new HerdrSocketClient(sockPath);
+        const client = HerdrSocketClient.fromSocketPath(sockPath);
         client.on('error', () => {});
         createdClients.push(client);
         return client;

@@ -399,26 +399,26 @@ export function formatWorkspaceDisplay(
 
     // Build rich tooltip
     const tooltipLines: string[] = [
-        `Workspace: ${ws.label}${isFocused ? ' (Active in Herdr)' : ''}`
+        l10n.t('Workspace: {0}', `${ws.label}${isFocused ? l10n.t(' (Active in Herdr)') : ''}`)
     ];
     if (ws.cwd) {
-        tooltipLines.push(`Path: ${ws.cwd}`);
+        tooltipLines.push(l10n.t('Path: {0}', ws.cwd));
     }
     if (branchName) {
-        tooltipLines.push(`Branch: ${branchName}${isWorktree ? ' (Git Worktree)' : ''}`);
+        tooltipLines.push(l10n.t('Branch: {0}', `${branchName}${isWorktree ? l10n.t(' (Git Worktree)') : ''}`));
     }
     if (isCurrentWindow) {
-        tooltipLines.push(`VS Code Window: Matches current open folder`);
+        tooltipLines.push(l10n.t('VS Code Window: Matches current open folder'));
     }
-    tooltipLines.push(`Workspace ID: ${ws.id}`);
+    tooltipLines.push(l10n.t('Workspace ID: {0}', ws.id));
 
     if (wsAgents.length > 0) {
-        tooltipLines.push(`\nActive Agents (${wsAgents.length}):`);
+        tooltipLines.push(`\n${l10n.t('Active Agents ({0}):', wsAgents.length)}`);
         for (const a of wsAgents) {
             tooltipLines.push(`- ${a.statusIcon} ${a.name} (${a.status})`);
         }
     } else {
-        tooltipLines.push(`\nActive Agents: (None)`);
+        tooltipLines.push(`\n${l10n.t('Active Agents: (None)')}`);
     }
 
     const tooltip = tooltipLines.join('\n');
@@ -526,20 +526,20 @@ export function formatAgentDisplay(
     }
 
     const tooltipLines: string[] = [
-        `Agent: ${agentName}`,
-        `Workspace: ${agent.workspaceLabel || (agent.workspaceId ? `Workspace ${agent.workspaceId}` : 'Unknown')}`
+        l10n.t('Agent: {0}', agentName),
+        l10n.t('Workspace: {0}', agent.workspaceLabel || (agent.workspaceId ? l10n.t('Workspace {0}', agent.workspaceId) : l10n.t('Unknown')))
     ];
     if (branchName) {
-        tooltipLines.push(`Branch: ${branchName}`);
+        tooltipLines.push(l10n.t('Branch: {0}', branchName));
     }
     if (agent.workspaceCwd) {
-        tooltipLines.push(`Path: ${agent.workspaceCwd}`);
+        tooltipLines.push(l10n.t('Path: {0}', agent.workspaceCwd));
     }
-    tooltipLines.push(`Pane ID: ${agent.id}`);
+    tooltipLines.push(l10n.t('Pane ID: {0}', agent.id));
     const statusWithDuration = durationText ? `${agent.status} (${durationText})` : agent.status;
-    tooltipLines.push(`Status: ${statusWithDuration}${agent.isBlocked ? '\n⚠️ Waiting for user confirmation' : ''}`);
+    tooltipLines.push(`${l10n.t('Status: {0}', statusWithDuration)}${agent.isBlocked ? `\n${l10n.t('⚠️ Waiting for user confirmation')}` : ''}`);
     if (agent.latestOutput) {
-        tooltipLines.push(`Latest Output: ${agent.latestOutput}`);
+        tooltipLines.push(l10n.t('Latest Output: {0}', agent.latestOutput));
     }
 
     const tooltip = tooltipLines.join('\n');

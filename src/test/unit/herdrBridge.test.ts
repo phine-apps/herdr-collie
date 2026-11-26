@@ -288,4 +288,58 @@ describe('herdrBridge Unit Tests', () => {
         mockState.configurations.set('herdr-collie.sessionName', '  team_alpha-1  ');
         expect(getSessionName()).to.equal('team_alpha-1');
     });
+
+    it('coalesces concurrent openOrAttachTerminal calls and rejects unsafe CLI targets', async () => {
+        let createTerminalCalls = 0;
+        const createdTerminals: any[] = [];
+        (mockVscode.window as any).createTerminal = (opts: any) => {
+            createTerminalCalls++;
+            const term: any = {
+                name: opts.name,
+                exitStatus: undefined,
+                processId: Promise.resolve(undefined),
+                sendText: () => {},
+                show: () => {},
+                dispose: () => {}
+            };
+            createdTerminals.push(term);
+            return term;
+        };
+        Object.defineProperty(mockVscode.window, 'terminals', {
+            configurable: true,
+            get: () => createdTerminals
+        });
+        (mockVscode.window as any).onDidOpenTerminal = () => ({ dispose: () => {} });
+        (mockVscode.window as any).onDidCloseTerminal = () => ({ dispose: () => {} });
+
+        (cp as any).execFile = (_file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+            execFileCalls.push(args);
+            const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+            if (callback) {
+                setTimeout(() => callback(null, '', ''), 20);
+            }
+            return {} as any;
+        };
+
+        const bridge = createTerminalBridge(
+            () => {},
+            { ensureServerRunning: async () => true }
+        );
+        try {
+            // Reject unsafe target / unsafe tabId before issuing CLI commands or terminals
+            await bridge.openOrAttachTerminal('-evil-id', false, 'Bad', 'vscode');
+            await bridge.openOrAttachTerminal('w1', false, 'BadTab', 'vscode', 'w1', '--evil-tab');
+            expect(execFileCalls).to.be.empty;
+            expect(createTerminalCalls).to.equal(0);
+
+            // Concurrent calls for the same session must coalesce to a single createTerminal
+            await Promise.all([
+                bridge.openOrAttachTerminal('w1', false, 'App 1', 'vscode'),
+                bridge.openOrAttachTerminal('w1', false, 'App 1', 'vscode')
+            ]);
+            expect(createTerminalCalls).to.equal(1);
+        } finally {
+            bridge.dispose();
+        }
+    });
 });

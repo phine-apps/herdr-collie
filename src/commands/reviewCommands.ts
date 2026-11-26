@@ -10,6 +10,7 @@ import { isSameOrSubPath } from '../formatters';
 import {
     ReviewChangeTreeItem,
     resolveDiffTargets,
+    getDiffCacheDir,
     createReviewCheckpoint,
     createReviewCheckpointWithDetails,
     rollbackReviewCheckpoint,
@@ -30,6 +31,10 @@ export function registerReviewCommands(context: vscode.ExtensionContext, ctx: Co
         const editor = vscode.window.activeTextEditor;
         const uri = uriArg || editor?.document.uri;
         if (!uri) return;
+        if (isSameOrSubPath(uri.fsPath, getDiffCacheDir())) {
+            vscode.window.showWarningMessage(l10n.t('Cannot add a review comment to a temporary baseline file. Please add comments on the working-tree side of the diff.'));
+            return;
+        }
 
         let startLine = 1;
         let endLine = 1;

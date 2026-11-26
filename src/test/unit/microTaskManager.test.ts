@@ -402,6 +402,16 @@ describe('microTaskManager Unit Tests', () => {
             const lenses = provider.provideCodeLenses(fakeDoc, {} as any);
             expect(lenses).to.be.empty;
         });
+
+        it('returns empty array immediately when cancellation token is already cancelled', () => {
+            const fakeDoc: any = {
+                uri: { fsPath: '/app/src/auth.test.ts', path: '/app/src/auth.test.ts' },
+                lineCount: 1,
+                lineAt: () => ({ text: "it('test', () => {})" })
+            };
+            const lenses = provider.provideCodeLenses(fakeDoc, { isCancellationRequested: true } as any);
+            expect(lenses).to.be.empty;
+        });
     });
 
     describe('promptAndDispatchTask', () => {

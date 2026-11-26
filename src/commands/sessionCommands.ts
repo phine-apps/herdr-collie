@@ -15,7 +15,7 @@ import {
     parseSnapshotWorkspaces,
     parseSnapshotAgents
 } from '../parsers';
-import { validateSessionName } from '../socketClient';
+import { validateSessionName, isSafeCliTargetId } from '../socketClient';
 import { listGitWorktrees, getRepoRoot, openWorkspaceFolderInWindow } from '../worktreeManager';
 import { HerdrWorkspaceTreeItem, HerdrTabTreeItem } from '../workspaceDragAndDrop';
 import { ensureWorkspaceTrustedForAction } from '../workspaceTrust';
@@ -363,7 +363,12 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
     const switchSessionDirectDisposable = vscode.commands.registerCommand('herdr-collie.switchSessionDirect', async (targetSession: string) => {
         if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         if (targetSession) {
-            await ctx.switchToSession(targetSession);
+            const validationError = validateSessionName(targetSession);
+            if (validationError) {
+                vscode.window.showWarningMessage(l10n.t('Invalid session name: {0}', validationError));
+                return;
+            }
+            await ctx.switchToSession(targetSession.trim());
         }
     });
 
@@ -523,7 +528,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
         if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         if (!item) return;
         const targetId = item.rawId || (item.id ? item.id.split(':')[0] : '');
-        if (!targetId) return;
+        if (!isSafeCliTargetId(targetId)) return;
         const closeBtn = l10n.t('Close Workspace');
         const confirm = await vscode.window.showWarningMessage(
             l10n.t('Are you sure you want to close workspace "{0}"? All running panes inside it will be terminated.', item.label || targetId),
@@ -637,7 +642,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
 
     const closeTabDisposable = vscode.commands.registerCommand('herdr-collie.closeTab', async (item?: HerdrTabTreeItem) => {
         if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
-        if (!item || !item.tabId) return;
+        if (!item || !isSafeCliTargetId(item.tabId)) return;
         const sessionName = ctx.getActiveSidebarSession();
         const closeBtn = l10n.t('Close Tab');
         const confirm = await vscode.window.showWarningMessage(
@@ -679,7 +684,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
             }
         }
 
-        if (!targetAgent) {
+        if (!isSafeCliTargetId(targetAgent)) {
             vscode.window.showInformationMessage(l10n.t('No active agent selected to inspect.'));
             return;
         }

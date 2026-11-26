@@ -430,7 +430,7 @@ export async function promptAndDispatchTask(
         if (success) {
             vscode.window.showInformationMessage(l10n.t("Dispatched task to '{0}'", singleAgent.name));
         } else {
-            vscode.window.showErrorMessage(l10n.t('Failed to send context: {0}', 'agent prompt failed'));
+            vscode.window.showErrorMessage(l10n.t('Failed to send context: {0}', l10n.t('agent prompt failed')));
         }
         return success;
     }
@@ -454,7 +454,7 @@ export async function promptAndDispatchTask(
         return {
             label: `${icon} ${agent.name}${statusTag}${wsInfo}`,
             description: agent.status,
-            detail: agent.cwd ? `Path: ${agent.cwd}` : undefined,
+            detail: agent.cwd ? l10n.t('Path: {0}', agent.cwd) : undefined,
             agent
         };
     });
@@ -472,7 +472,7 @@ export async function promptAndDispatchTask(
     if (success) {
         vscode.window.showInformationMessage(l10n.t("Dispatched task to '{0}'", selected.agent.name));
     } else {
-        vscode.window.showErrorMessage(l10n.t('Failed to send context: {0}', 'agent prompt failed'));
+        vscode.window.showErrorMessage(l10n.t('Failed to send context: {0}', l10n.t('agent prompt failed')));
     }
     return success;
 }
@@ -555,7 +555,7 @@ export class HerdrCodeLensProvider implements vscode.CodeLensProvider, vscode.Di
     ): vscode.CodeLens[] {
         const config = vscode.workspace.getConfiguration('herdr-collie');
         const isEnabled = config.get<boolean>('codeLens.enable', true);
-        if (!isEnabled) {
+        if (!isEnabled || _token?.isCancellationRequested) {
             return [];
         }
 
@@ -563,6 +563,9 @@ export class HerdrCodeLensProvider implements vscode.CodeLensProvider, vscode.Di
         const maxScanLines = Math.min(document.lineCount, 3000);
 
         for (let i = 0; i < maxScanLines; i++) {
+            if (_token?.isCancellationRequested) {
+                return [];
+            }
             const line = document.lineAt(i);
             const lineText = line.text;
             const prevLineText = i > 0 ? document.lineAt(i - 1).text : undefined;

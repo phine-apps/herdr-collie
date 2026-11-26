@@ -687,14 +687,21 @@ export function getDiffCacheDir(): string {
     return path.join(os.tmpdir(), 'herdr-collie-diff-cache');
 }
 
+let lastDiffCacheCleanMs = 0;
+const DIFF_CACHE_CLEAN_INTERVAL_MS = 60_000;
+
 /**
  * Cleans up temporary diff cache files older than maxAgeMs (default: 1 hour)
  */
 export function cleanDiffCache(maxAgeMs = 3600000): void {
     try {
+        const now = Date.now();
+        if (maxAgeMs > 0 && now - lastDiffCacheCleanMs < DIFF_CACHE_CLEAN_INTERVAL_MS) {
+            return;
+        }
+        lastDiffCacheCleanMs = now;
         const cacheDir = getDiffCacheDir();
         if (!fs.existsSync(cacheDir)) return;
-        const now = Date.now();
         const entries = fs.readdirSync(cacheDir);
         for (const entry of entries) {
             const fullPath = path.join(cacheDir, entry);
@@ -798,6 +805,9 @@ export class ReviewChangeTreeItem extends vscode.TreeItem {
             ? `${dir} [${change.statusLabel}]`
             : `[${change.statusLabel}]`;
         this.tooltip = `${change.filePath} (${change.statusLabel})`;
+        (this as any).accessibilityInformation = {
+            label: l10n.t('Changed file {0}, status {1}', change.filePath, change.statusLabel)
+        };
 
         let iconName = 'diff-modified';
         if (change.status === 'A' || change.status === '??') {

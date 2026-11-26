@@ -16,7 +16,7 @@ import {
     parseSnapshotPanes,
     parseSnapshotAgents
 } from './parsers';
-import { HerdrSocketClient, sanitizeSessionName, normalizeConfiguredSessionName } from './socketClient';
+import { HerdrSocketClient, sanitizeSessionName, normalizeConfiguredSessionName, isSafeCliTargetId } from './socketClient';
 import { isWorkspaceTrusted, ensureWorkspaceTrustedForAction } from './workspaceTrust';
 import { isHerdrRunningInTerminal } from './gitContext';
 
@@ -138,6 +138,7 @@ export function createTerminalBridge(
     const ensureServerRunning = deps?.ensureServerRunning ?? ensureSessionServerRunning;
     const extensionManagedTerminals = new Set<vscode.Terminal>();
     const pendingTimers = new Set<NodeJS.Timeout>();
+    const inFlightAttachBySession = new Map<string, Promise<void>>();
     let creatingTerminal = false;
     let disposed = false;
 
@@ -270,7 +271,42 @@ export function createTerminalBridge(
         if (!(await ensureWorkspaceTrustedForAction(vscode))) {
             return;
         }
+        if (target && !isSafeCliTargetId(target)) {
+            return;
+        }
+        if (targetTabId && !isSafeCliTargetId(targetTabId)) {
+            return;
+        }
         const normalizedSession = sanitizeSessionName(targetSession) || 'default';
+        const existingInFlight = inFlightAttachBySession.get(normalizedSession);
+        if (existingInFlight) {
+            return await existingInFlight;
+        }
+
+        const runPromise = openOrAttachTerminalInternal(
+            target,
+            isAgent,
+            displayLabel,
+            normalizedSession,
+            targetWorkspaceId,
+            targetTabId
+        ).finally(() => {
+            if (inFlightAttachBySession.get(normalizedSession) === runPromise) {
+                inFlightAttachBySession.delete(normalizedSession);
+            }
+        });
+        inFlightAttachBySession.set(normalizedSession, runPromise);
+        return await runPromise;
+    }
+
+    async function openOrAttachTerminalInternal(
+        target: string,
+        isAgent: boolean,
+        displayLabel: string,
+        normalizedSession: string,
+        targetWorkspaceId?: string,
+        targetTabId?: string
+    ): Promise<void> {
         // Manage a single unified Herdr TUI terminal per session
         const sessionLabel = normalizedSession !== 'default' ? ` (${normalizedSession})` : '';
         const baseTerminalName = `Herdr${sessionLabel}`;
@@ -473,7 +509,7 @@ export async function sendPromptToHerdr(params: {
                 (isCurrentSession ? 1 : 0);
             const item: TargetQuickPickItem = {
                 label: `[${sessionName}] $(terminal) Pane: ${p.name || p.id}`,
-                description: `Session: ${sessionName}${p.command ? ` | ${p.command}` : ''}${tag}`,
+                description: `${l10n.t('Session: {0}', sessionName)}${p.command ? ` | ${p.command}` : ''}${tag}`,
                 targetId: p.id,
                 sessionName,
                 isAgent: false,
@@ -503,7 +539,7 @@ export async function sendPromptToHerdr(params: {
                 (isCurrentSession ? 1 : 0);
             const item: TargetQuickPickItem = {
                 label: `[${sessionName}] $(hubot) Agent: ${a.name || a.id}`,
-                description: `Session: ${sessionName} | Status: ${a.status}${tag}`,
+                description: `${l10n.t('Session: {0} | Status: {1}', sessionName, a.status)}${tag}`,
                 targetId: a.id,
                 sessionName,
                 isAgent: true,

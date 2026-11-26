@@ -38,6 +38,9 @@ export class HerdrSessionTreeItem extends vscode.TreeItem {
         this.description = isActive ? l10n.t('(active)') : '';
         this.iconPath = new vscode.ThemeIcon(isActive ? 'star-full' : 'symbol-event');
         this.tooltip = isActive ? l10n.t('Active Herdr Session: {0}', sessionName) : l10n.t('Click to switch to session: {0}', sessionName);
+        (this as any).accessibilityInformation = {
+            label: this.tooltip
+        };
         if (!isActive) {
             this.command = {
                 command: 'herdr-collie.switchSessionDirect',

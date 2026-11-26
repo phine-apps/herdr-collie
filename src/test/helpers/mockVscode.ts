@@ -269,6 +269,11 @@ export const mockVscode = {
         Collapsed: 1,
         Expanded: 2
     },
+    ProgressLocation: {
+        SourceControl: 1,
+        Window: 10,
+        Notification: 15
+    },
     Position: MockPosition,
     Range: MockRange,
     CodeAction: MockCodeAction,
@@ -325,9 +330,16 @@ export const mockVscode = {
             mockState.lastWarningMessage = { message, items };
             return mockState.warningMessageResponse;
         },
+        showErrorMessage: async (message: string, ...items: any[]): Promise<string | undefined> => {
+            mockState.lastWarningMessage = { message, items };
+            return mockState.warningMessageResponse;
+        },
         showInformationMessage: async (message: string, ...items: any[]): Promise<string | undefined> => {
             mockState.lastInformationMessage = { message, items };
             return mockState.informationMessageResponse;
+        },
+        withProgress: async <R>(_options: any, task: (progress: { report: (value: any) => void }, token: any) => Promise<R>): Promise<R> => {
+            return await task({ report: () => {} }, { isCancellationRequested: false });
         },
         showInputBox: async (options?: any): Promise<string | undefined> => {
             return mockState.inputBoxResponse;

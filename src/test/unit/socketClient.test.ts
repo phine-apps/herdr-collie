@@ -7,7 +7,7 @@ import * as net from 'net';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
-import { HerdrSocketClient, getSessionSocketPath, validateSessionName, sanitizeSessionName, normalizeConfiguredSessionName } from '../../socketClient';
+import { HerdrSocketClient, getSessionSocketPath, validateSessionName, sanitizeSessionName, normalizeConfiguredSessionName, isSafeCliTargetId } from '../../socketClient';
 
 function getTestSocketDir(): string {
     return process.env['HERDR_TEST_SOCKET_DIR'] || os.tmpdir();
@@ -53,7 +53,9 @@ describe('HerdrSocketClient Unit Tests', function() {
         const createdClients: HerdrSocketClient[] = [];
 
         const createClient = (socketPathOrSession?: string): HerdrSocketClient => {
-            const client = new HerdrSocketClient(socketPathOrSession);
+            const client = socketPathOrSession && (socketPathOrSession.includes('/') || socketPathOrSession.includes('\\'))
+                ? HerdrSocketClient.fromSocketPath(socketPathOrSession)
+                : new HerdrSocketClient(socketPathOrSession);
             createdClients.push(client);
             return client;
         };
@@ -406,6 +408,54 @@ describe('HerdrSocketClient Unit Tests', function() {
             expect(normalizeConfiguredSessionName('with spaces')).to.equal('vscode');
             expect(normalizeConfiguredSessionName('')).to.equal('vscode');
             expect(normalizeConfiguredSessionName(undefined, 'default')).to.equal('default');
+        });
+    });
+
+    describe('Session Validation, Target Guards & Missing-Daemon Backoff', () => {
+        it('rejects path-like or unsafe session names in new HerdrSocketClient while allowing fromSocketPath()', () => {
+            expect(() => new HerdrSocketClient('/tmp/herdr.sock')).to.throw();
+            expect(() => new HerdrSocketClient('../evil')).to.throw();
+            expect(() => new HerdrSocketClient('--flag')).to.throw();
+            expect(() => HerdrSocketClient.fromSocketPath('')).to.throw();
+
+            const direct = HerdrSocketClient.fromSocketPath(path.join(getTestSocketDir(), 'valid.sock'));
+            expect(direct).to.be.instanceOf(HerdrSocketClient);
+            direct.dispose();
+        });
+
+        it('validates CLI target IDs via isSafeCliTargetId', () => {
+            expect(isSafeCliTargetId('w1:p1')).to.be.true;
+            expect(isSafeCliTargetId('tab-1_main')).to.be.true;
+            expect(isSafeCliTargetId('-evil')).to.be.false;
+            expect(isSafeCliTargetId('--option')).to.be.false;
+            expect(isSafeCliTargetId('id;rm -rf /')).to.be.false;
+            expect(isSafeCliTargetId('id with space')).to.be.false;
+            expect(isSafeCliTargetId('')).to.be.false;
+            expect(isSafeCliTargetId(null)).to.be.false;
+        });
+
+        it('does not emit disconnect before first successful connection and supports retryNow()', async () => {
+            const missingSock = path.join(getTestSocketDir(), `herdr-missing-${Date.now()}.sock`);
+            const client = HerdrSocketClient.fromSocketPath(missingSock);
+            let disconnectCount = 0;
+            let errorCount = 0;
+            client.on('disconnect', () => { disconnectCount++; });
+            client.on('error', () => { errorCount++; });
+
+            try {
+                client.connect();
+                await new Promise(resolve => setTimeout(resolve, 60));
+                expect(disconnectCount).to.equal(0);
+                expect(errorCount).to.be.greaterThan(0);
+
+                const prevErrors = errorCount;
+                client.retryNow();
+                await new Promise(resolve => setTimeout(resolve, 60));
+                expect(errorCount).to.be.greaterThan(prevErrors);
+                expect(disconnectCount).to.equal(0);
+            } finally {
+                client.dispose();
+            }
         });
     });
 });

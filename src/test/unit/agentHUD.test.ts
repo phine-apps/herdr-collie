@@ -338,6 +338,43 @@ describe('AgentHUD & Status Classification Unit Tests', () => {
                 hud.updateSocketClient(sessionBClient);
                 await hud.refresh();
                 expect(mockState.lastInformationMessage).to.be.undefined;
+                expect((mockState.statusBarItems[0] as any)?.accessibilityInformation?.label).to.be.a('string');
+            } finally {
+                hud.dispose();
+            }
+        });
+
+        it('drops stale in-flight refresh results that resolve after updateSocketClient()', async () => {
+            let resolveStale!: (val: any) => void;
+            const stalePromise = new Promise(resolve => { resolveStale = resolve; });
+
+            const staleClient: any = {
+                on: () => {},
+                off: () => {},
+                isConnected: true,
+                getSnapshot: () => stalePromise
+            };
+            const freshClient: any = {
+                on: () => {},
+                off: () => {},
+                isConnected: true,
+                getSnapshot: async () => ({ agents: [] })
+            };
+
+            const hud = new AgentHUD(staleClient as unknown as HerdrSocketClient, () => 'session-a');
+            try {
+                const inflight = hud.refresh();
+                // While session-a snapshot is still pending, switch to session-b and settle session-b
+                hud.updateSocketClient(freshClient as unknown as HerdrSocketClient, { refresh: true });
+                await new Promise(r => setTimeout(r, 20));
+                const textAfterFresh = mockState.statusBarItems[0].text;
+
+                // Now resolve stale session-a response with a blocked agent -> must be ignored
+                resolveStale({ agents: [{ pane_id: 'stale:p1', name: 'stale-bot', agent_status: 'blocked' }] });
+                await inflight;
+
+                expect(mockState.statusBarItems[0].text).to.equal(textAfterFresh);
+                expect(mockState.statusBarItems[0].text).to.not.include('stale-bot');
             } finally {
                 hud.dispose();
             }

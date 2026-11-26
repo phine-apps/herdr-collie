@@ -476,7 +476,28 @@ export function activate(context: vscode.ExtensionContext) {
             socketListenerDisposable = null;
         }
     });
-    refreshAllProviders();
+
+    if (!isWorkspaceTrusted(vscode)) {
+        refreshAllProviders();
+    } else {
+        // Allow initial async socket connect to succeed before triggering CLI fallback refresh
+        const initialRefreshFallbackTimer = setTimeout(() => {
+            if (!socketClient.isConnected) {
+                refreshAllProviders({ includeHUDs: false, includeSessions: true });
+            }
+        }, 250);
+        context.subscriptions.push({ dispose: () => clearTimeout(initialRefreshFallbackTimer) });
+    }
+
+    if (typeof vscode.window.onDidChangeWindowState === 'function') {
+        context.subscriptions.push(
+            vscode.window.onDidChangeWindowState((state) => {
+                if (state.focused && isWorkspaceTrusted(vscode) && !socketClient.isConnected) {
+                    socketClient.retryNow();
+                }
+            })
+        );
+    }
 
     // Background safety net polling (relaxed from 1.2s to 10s to prevent socket FD exhaustion)
     const statusPollInterval = setInterval(() => {
@@ -567,6 +588,7 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     const switchToSession = async (targetSession: string) => {
+        if (!targetSession || validateSessionName(targetSession) !== null) return;
         if (shouldSkipSessionSwitch(targetSession)) return;
 
         const applied = await runSessionServerSwitch(targetSession, () => {

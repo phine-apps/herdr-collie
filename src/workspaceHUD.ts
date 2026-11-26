@@ -48,6 +48,7 @@ export class WorkspaceHUD implements vscode.Disposable {
     }
 
     public updateSocketClient(newSocketClient: HerdrSocketClient, options?: { refresh?: boolean }): void {
+        this.refreshSequence++;
         this.cleanupSocketEvents();
         this.socketClient = newSocketClient;
         this.setupSocketEvents(this.socketClient);
@@ -197,12 +198,14 @@ export class WorkspaceHUD implements vscode.Disposable {
         if (!displayInfo) {
             this.statusBarItem.text = `$(window) Herdr`;
             this.statusBarItem.tooltip = l10n.t("Herdr Collie: No workspace active\nClick to select workspace");
+            (this.statusBarItem as any).accessibilityInformation = { label: l10n.t('Herdr Workspace: None active') };
             return;
         }
 
         const icon = displayInfo.isWorktree ? '$(git-branch)' : (displayInfo.isCurrentWindow ? '$(folder-active)' : '$(window)');
         const label = displayInfo.branchName || displayInfo.displayLabel || displayInfo.label;
         this.statusBarItem.text = `${icon} ${label}`;
+        (this.statusBarItem as any).accessibilityInformation = { label: l10n.t('Herdr Workspace: {0}', label) };
 
         // Build rich markdown tooltip (do not enable isTrusted to prevent command URI injection)
         const md = new vscode.MarkdownString();

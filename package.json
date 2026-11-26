@@ -683,6 +683,20 @@
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "herdr-collie.reviewChanges",
+        "contents": "%viewsWelcome.reviewChanges%"
+      },
+      {
+        "view": "herdr-collie.workspaces",
+        "contents": "%viewsWelcome.workspaces%"
+      },
+      {
+        "view": "herdr-collie.agents",
+        "contents": "%viewsWelcome.agents%"
+      }
+    ],
     "configuration": {
       "title": "%configuration.title%",
       "properties": {

@@ -172,6 +172,7 @@ export class AgentHUD implements vscode.Disposable {
     }
 
     public updateSocketClient(newSocketClient: HerdrSocketClient, options?: { refresh?: boolean }): void {
+        this.refreshSequence++;
         this.cleanupSocketEvents();
         this.previousAgentStates.clear();
         this.notifiedBlockedAgents.clear();
@@ -642,6 +643,7 @@ export class AgentHUD implements vscode.Disposable {
             this.statusBarItem.text = `$(hubot) Herdr`;
             this.statusBarItem.tooltip = l10n.t('Herdr Collie: No active agents');
             this.statusBarItem.backgroundColor = undefined;
+            (this.statusBarItem as any).accessibilityInformation = { label: l10n.t('Herdr Collie: No active agents') };
             return;
         }
 
@@ -649,14 +651,20 @@ export class AgentHUD implements vscode.Disposable {
         const idleCount = agents.length - blockedCount - workingCount;
 
         if (blockedCount > 0) {
-            this.statusBarItem.text = `$(alert) ` + l10n.t('{0} Waiting', blockedCount);
+            const label = l10n.t('{0} Waiting', blockedCount);
+            this.statusBarItem.text = `$(alert) ${label}`;
             this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+            (this.statusBarItem as any).accessibilityInformation = { label: l10n.t('Herdr Agents: {0}', label) };
         } else if (workingCount > 0) {
-            this.statusBarItem.text = `$(sync~spin) ` + l10n.t('{0} Working', workingCount);
+            const label = l10n.t('{0} Working', workingCount);
+            this.statusBarItem.text = `$(sync~spin) ${label}`;
             this.statusBarItem.backgroundColor = undefined;
+            (this.statusBarItem as any).accessibilityInformation = { label: l10n.t('Herdr Agents: {0}', label) };
         } else {
-            this.statusBarItem.text = `$(hubot) ` + l10n.t('{0} Idle', idleCount);
+            const label = l10n.t('{0} Idle', idleCount);
+            this.statusBarItem.text = `$(hubot) ${label}`;
             this.statusBarItem.backgroundColor = undefined;
+            (this.statusBarItem as any).accessibilityInformation = { label: l10n.t('Herdr Agents: {0}', label) };
         }
 
         // Build rich markdown tooltip

@@ -526,9 +526,9 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
         const pickedCluster = await vscode.window.showQuickPick(
             result.conflicts.map(c => ({
                 label: `${c.severity === 'high' ? '$(warning)' : '$(git-compare)'} ${c.filePath}`,
-                description: `${c.touches.length} worktrees (${c.severity.toUpperCase()})`,
+                description: l10n.t('{0} worktrees ({1})', c.touches.length, c.severity.toUpperCase()),
                 detail: c.touches
-                    .map(t => `${t.branchName}${t.dirty ? ' [uncommitted]' : ''}${t.agentName ? ` • ${t.agentName}` : ''}`)
+                    .map(t => `${t.branchName}${t.dirty ? l10n.t(' [uncommitted]') : ''}${t.agentName ? ` • ${t.agentName}` : ''}`)
                     .join('  ⚔  '),
                 cluster: c
             })),
@@ -604,7 +604,7 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
         const picked = await vscode.window.showQuickPick(
             cluster.touches.map(t => ({
                 label: `$(git-branch) ${t.branchName}`,
-                description: `${t.dirty ? 'uncommitted' : 'committed'}${t.agentName ? ` | Agent: ${t.agentName}` : ''}`,
+                description: `${t.dirty ? l10n.t('uncommitted') : l10n.t('committed')}${t.agentName ? l10n.t(' | Agent: {0}', t.agentName) : ''}`,
                 detail: t.worktreePath,
                 touch: t
             })),

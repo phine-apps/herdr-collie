@@ -34,7 +34,8 @@ import {
     fetchOpenGitHubIssues,
     parseFailingPrChecksJson,
     extractGitHubRunIdFromUrl,
-    fetchFailingPrChecksWithLogs
+    fetchFailingPrChecksWithLogs,
+    launchWorktreeAgentWizard
 } from '../../worktreeManager';
 
 describe('worktreeManager Unit Tests', () => {
@@ -709,6 +710,119 @@ describe('worktreeManager Unit Tests', () => {
             const noPr = await fetchFailingPrChecksWithLogs('/repos/demo-wt', 'fix/no-pr');
             expect(noPr.checks).to.be.empty;
             expect(noPr.prError).to.include('no pull requests found');
+        });
+    });
+
+    describe('launchWorktreeAgentWizard Safety & Failure Handling', () => {
+        let tempRoot: string;
+        let origShowInputBox: any;
+        let origShowQuickPick: any;
+        let origWorkspaceFolders: PropertyDescriptor | undefined;
+
+        beforeEach(() => {
+            tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-wizard-test-'));
+            origShowInputBox = mockVscode.window.showInputBox;
+            origShowQuickPick = mockVscode.window.showQuickPick;
+            origWorkspaceFolders = Object.getOwnPropertyDescriptor(mockVscode.workspace, 'workspaceFolders');
+        });
+
+        afterEach(() => {
+            mockVscode.window.showInputBox = origShowInputBox;
+            mockVscode.window.showQuickPick = origShowQuickPick;
+            if (origWorkspaceFolders) {
+                Object.defineProperty(mockVscode.workspace, 'workspaceFolders', origWorkspaceFolders);
+            } else {
+                delete (mockVscode.workspace as any).workspaceFolders;
+            }
+            fs.rmSync(tempRoot, { recursive: true, force: true });
+        });
+
+        it('rejects whitespace-only CUSTOM agent command and avoids false success notification when startAgentInPane fails', async () => {
+            const repoDir = path.join(tempRoot, 'repo');
+            fs.mkdirSync(repoDir, { recursive: true });
+            const { execFileSync } = require('child_process');
+            execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir });
+            execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoDir });
+            execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+            fs.writeFileSync(path.join(repoDir, 'README.md'), '# demo\n', 'utf8');
+            execFileSync('git', ['add', '.'], { cwd: repoDir });
+            execFileSync('git', ['commit', '-m', 'init'], { cwd: repoDir });
+
+            Object.defineProperty(mockVscode.workspace, 'workspaceFolders', {
+                configurable: true,
+                get: () => [{ uri: { fsPath: repoDir }, name: 'repo', index: 0 }]
+            });
+
+            (cp as any).execFile = (file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+                if (file === 'git') {
+                    return originalExecFile.call(cp, file, args, optionsOrCb, cb);
+                }
+                const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+                if (file === 'which' || file === 'where') {
+                    callback?.(new Error('not found'), '', '');
+                    return {} as any;
+                }
+                if (file.includes('herdr')) {
+                    // workspace / pane succeeds ONLY if explicitly called, agent start fails
+                    if (args.includes('agent') && args.includes('start')) {
+                        callback?.(new Error('agent start rejected'), '', 'agent start rejected');
+                        return {} as any;
+                    }
+                    callback?.(new Error('cli error'), '', '');
+                    return {} as any;
+                }
+                callback?.(new Error('unexpected command'), '', '');
+                return {} as any;
+            };
+
+            // Case 1: CUSTOM selected with whitespace-only command -> must abort before creating worktree
+            let inputStep = 0;
+            mockVscode.window.showInputBox = async () => {
+                inputStep++;
+                return inputStep === 1 ? 'feat/blank-custom' : '   ';
+            };
+            mockVscode.window.showQuickPick = async (items: any[]) => {
+                const baseMatch = items.find((i: any) => i.branchName === 'main');
+                if (baseMatch) return baseMatch;
+                return items.find((i: any) => i.cmd === 'CUSTOM');
+            };
+
+            const mockSocket: any = {
+                isConnected: true,
+                getSnapshot: async () => ({ agents: [] }),
+                listIntegrations: async () => [],
+                createWorkspace: async () => ({
+                    workspace: { workspace_id: 'w1' },
+                    tab: { tab_id: 'w1:t1' },
+                    root_pane: { pane_id: 'w1:p1' }
+                }),
+                startAgent: async () => { throw new Error('rpc start failed'); },
+                request: async () => { throw new Error('rpc request failed'); }
+            };
+
+            await launchWorktreeAgentWizard('vscode', undefined, mockSocket);
+            expect(inputStep).to.equal(2);
+            expect(fs.existsSync(path.join(tempRoot, 'repo-feat-blank-custom'))).to.be.false;
+
+            // Case 2: Valid CUSTOM agent command, workspace succeeds, but startAgentInPane fails -> must warn, NOT show "🚀 Agent launched"
+            resetMockState();
+            inputStep = 0;
+            mockVscode.window.showInputBox = async () => {
+                inputStep++;
+                if (inputStep === 1) return 'feat/launch-fail';
+                if (inputStep === 2) return 'my-custom-agent';
+                return 'implement x';
+            };
+            mockVscode.window.showQuickPick = async (items: any[]) => {
+                const baseMatch = items.find((i: any) => i.branchName === 'main');
+                if (baseMatch) return baseMatch;
+                return items.find((i: any) => i.cmd === 'CUSTOM');
+            };
+
+            await launchWorktreeAgentWizard('vscode', undefined, mockSocket);
+            expect(inputStep).to.equal(3);
+            expect(mockState.lastWarningMessage?.message).to.include('failed to launch agent');
+            expect(mockState.lastInformationMessage).to.be.undefined;
         });
     });
 });

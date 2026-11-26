@@ -15,7 +15,7 @@ import { registerReviewCommands } from '../../commands/reviewCommands';
 import { registerSessionCommands } from '../../commands/sessionCommands';
 import { CommandContext } from '../../commands/types';
 import { createWorktree, resolveWorktreePath, listGitWorktrees } from '../../worktreeManager';
-import { HerdrReviewController, HerdrReviewChangesProvider } from '../../reviewManager';
+import { HerdrReviewController, HerdrReviewChangesProvider, getDiffCacheDir } from '../../reviewManager';
 import { resolveMainRepositoryRoot } from '../../gitContext';
 import { runGitCmd } from '../../executors';
 
@@ -294,5 +294,50 @@ describe('Command Handler Unit & Multi-Root Tests', () => {
         // Exercise switchSession QuickPick path (requires createQuickPick.onDidHide in mockVscode)
         await registeredHandlers.get('herdr-collie.switchSession')!();
         expect(execCalls.some(a => a[0] === 'session' && a[1] === 'list')).to.be.true;
+    });
+
+    it('rejects invalid session names in switchSessionDirect, unsafe target IDs in tree commands, and baseline diff-cache files in addReviewComment', async () => {
+        const execCalls: string[][] = [];
+        const switchedSessions: string[] = [];
+        (cp as any).execFile = (_file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+            execCalls.push(args);
+            const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+            callback?.(null, '', '');
+            return {} as any;
+        };
+
+        const controller = new HerdrReviewController();
+        const changesProvider = new HerdrReviewChangesProvider(async () => null, 'flat');
+        const fakeContext = { subscriptions: [] } as any;
+        try {
+            registerSessionCommands(fakeContext, createMockCommandContext({
+                switchToSession: async (s: string) => { switchedSessions.push(s); }
+            }));
+            registerReviewCommands(fakeContext, createMockCommandContext({
+                reviewController: controller,
+                reviewChangesProvider: changesProvider
+            }));
+
+            // switchSessionDirect must reject path traversal / flag injection
+            await registeredHandlers.get('herdr-collie.switchSessionDirect')!('../evil');
+            await registeredHandlers.get('herdr-collie.switchSessionDirect')!('--flag');
+            expect(switchedSessions).to.be.empty;
+            expect(mockState.lastWarningMessage?.message).to.include('Invalid session name');
+
+            // Tree commands must reject leading-hyphen target IDs before invoking execHerdr
+            await registeredHandlers.get('herdr-collie.closeWorkspace')!({ rawId: '-bad-ws' });
+            await registeredHandlers.get('herdr-collie.closeTab')!({ tabId: '-bad-tab' });
+            await registeredHandlers.get('herdr-collie.peekAgentOutput')!({ rawId: '-bad-agent' });
+            expect(execCalls).to.be.empty;
+
+            // addReviewComment must warn and abort for temporary diff-cache baseline URIs
+            const baselineUri = MockUri.file(path.join(getDiffCacheDir(), 'head-baseline.ts'));
+            await registeredHandlers.get('herdr-collie.addReviewComment')!(baselineUri);
+            expect(mockState.lastWarningMessage?.message).to.include('temporary baseline file');
+            expect(controller.commentCount).to.equal(0);
+        } finally {
+            controller.dispose();
+            changesProvider.dispose();
+        }
     });
 });

@@ -1990,7 +1990,15 @@ export async function launchWorktreeAgentWizard(
     const defaultAgent = config.get<string>('defaultAgentCommand', 'claude');
 
     const integrations = await fetchIntegrationStatuses(socketClient).catch(() => [] as ParsedIntegrationInfo[]);
-    const agentOptions = await getInstalledAgentOptions(socketClient, integrations);
+    const rawAgentOptions = await getInstalledAgentOptions(socketClient, integrations);
+    const normalizedDefault = (defaultAgent || '').trim().toLowerCase();
+    const agentOptions = [...rawAgentOptions].sort((a, b) => {
+        const aMatches = a.cmd && normalizedDefault && (a.cmd === defaultAgent || a.cmd.toLowerCase() === normalizedDefault);
+        const bMatches = b.cmd && normalizedDefault && (b.cmd === defaultAgent || b.cmd.toLowerCase() === normalizedDefault);
+        if (aMatches && !bMatches) return -1;
+        if (!aMatches && bMatches) return 1;
+        return 0;
+    });
 
     let chosenAgentCmd = defaultAgent;
     let chosenAgentKind: string | undefined;
@@ -2005,10 +2013,11 @@ export async function launchWorktreeAgentWizard(
         const customCmd = await vscode.window.showInputBox({
             title: l10n.t('Custom Agent Command'),
             prompt: l10n.t('Enter command to run inside the worktree workspace'),
+            value: defaultAgent && defaultAgent !== 'CUSTOM' ? defaultAgent : undefined,
             placeHolder: l10n.t('e.g. claude --dangerously-skip-permissions')
         });
-        if (!customCmd) return;
-        chosenAgentCmd = customCmd;
+        if (!customCmd || !customCmd.trim()) return;
+        chosenAgentCmd = customCmd.trim();
     } else {
         chosenAgentCmd = selectedAgent.cmd;
         chosenAgentKind = selectedAgent.agentKind;
@@ -2094,11 +2103,12 @@ export async function launchWorktreeAgentWizard(
         }
 
         // Spawn agent if agent command specified
+        let agentLaunched = !chosenAgentCmd;
         if (chosenAgentCmd) {
             progress.report({ message: l10n.t('Starting Agent ({0})...', chosenAgentCmd) });
             if (targetPaneId) {
                 const agentName = sanitizeAgentName(branchName, existingAgentNames);
-                await startAgentInPane({
+                const startRes = await startAgentInPane({
                     sessionName,
                     paneId: targetPaneId,
                     agentName,
@@ -2108,6 +2118,12 @@ export async function launchWorktreeAgentWizard(
                     cwd: worktreePath,
                     socketClient
                 });
+                agentLaunched = startRes.started;
+                if (!startRes.started) {
+                    vscode.window.showWarningMessage(
+                        l10n.t("Workspace '{0}' was created, but failed to launch agent ({1}). You can attach the terminal to start it manually.", branchName, chosenAgentCmd)
+                    );
+                }
             } else {
                 vscode.window.showWarningMessage(l10n.t("Workspace '{0}' was created, but initial pane could not be determined. Please start the agent manually in the terminal.", branchName));
             }
@@ -2115,6 +2131,10 @@ export async function launchWorktreeAgentWizard(
 
         if (onSuccess) {
             onSuccess();
+        }
+
+        if (!agentLaunched) {
+            return;
         }
 
         // Show completed notification with actions
