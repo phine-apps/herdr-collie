@@ -1021,11 +1021,16 @@ describe('formatters Unit Tests', () => {
                 number: 77,
                 title: 'Fix\n### Injected Header `cmd`',
                 url: 'https://github.com/org/repo/issues/77\n## Evil',
-                labels: ['bug\n`evil`', 'security']
-            });
+                labels: ['bug\n`evil`', 'security'],
+                body: 'Line 1\x03\n\x1b[31mRed Alert\x1b[0m\x1b]0;title\x07'
+            }, 'Extra \x03\x1b[32mgreen\x1b[0m note');
             expect(issuePrompt).to.include("## 🎯 GitHub Issue #77: Fix ### Injected Header 'cmd'");
             expect(issuePrompt).to.include('- URL: https://github.com/org/repo/issues/77 ## Evil');
             expect(issuePrompt).to.include("- Labels: bug 'evil', security");
+            expect(issuePrompt).to.include('Line 1\nRed Alert');
+            expect(issuePrompt).to.include('Extra green note');
+            expect(issuePrompt).to.not.include('\x03');
+            expect(issuePrompt).to.not.include('\x1b');
 
             const prPrompt = formatFailingPrChecksPrompt(
                 'fix/`inject`\nbranch',
@@ -1036,6 +1041,18 @@ describe('formatters Unit Tests', () => {
             expect(prPrompt).to.include("- **test ### bad 'x'** [FAILURE] (https://ci.example/1 ##)");
             expect(prPrompt).to.include('Error: test failed');
             expect(prPrompt).to.not.include('\x1b');
+        });
+
+        it('findAgentForWorktree uses longest-prefix matching so nested .worktrees agents are not stolen by main repo', () => {
+            const { findAgentForWorktree } = require('../../formatters');
+            const repoRoot = '/repo';
+            const wtSub = '/repo/.worktrees/feat-nested';
+            const agents = [
+                { id: 'w2:p1', name: 'nested-agent', cwd: '/repo/.worktrees/feat-nested/packages/app' }
+            ];
+
+            expect(findAgentForWorktree(repoRoot, [repoRoot, wtSub], agents)).to.be.undefined;
+            expect(findAgentForWorktree(wtSub, [repoRoot, wtSub], agents)?.id).to.equal('w2:p1');
         });
     });
 });

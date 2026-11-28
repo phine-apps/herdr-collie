@@ -34,6 +34,10 @@ export interface MockVscodeState {
     warningMessageResponse?: string;
     informationMessageResponse?: string;
     inputBoxResponse?: string;
+    workspaceTrustRequestResponse?: boolean | undefined;
+    requestWorkspaceTrustCalls: any[];
+    grantWorkspaceTrustListeners: Array<() => any>;
+    configurationChangeListeners: Array<(e: { affectsConfiguration: (section: string) => boolean }) => any>;
     statusBarItems: MockStatusBarItem[];
     treeViews: Map<string, MockTreeView>;
     configurations: Map<string, any>;
@@ -42,6 +46,9 @@ export interface MockVscodeState {
 }
 
 export const mockState: MockVscodeState = {
+    requestWorkspaceTrustCalls: [],
+    grantWorkspaceTrustListeners: [],
+    configurationChangeListeners: [],
     statusBarItems: [],
     treeViews: new Map(),
     configurations: new Map(),
@@ -67,6 +74,10 @@ export function resetMockState(): void {
     mockState.warningMessageResponse = undefined;
     mockState.informationMessageResponse = undefined;
     mockState.inputBoxResponse = undefined;
+    mockState.workspaceTrustRequestResponse = undefined;
+    mockState.requestWorkspaceTrustCalls = [];
+    mockState.grantWorkspaceTrustListeners = [];
+    mockState.configurationChangeListeners = [];
     mockState.statusBarItems = [];
     mockState.treeViews = new Map();
     mockState.configurations.clear();
@@ -261,6 +272,11 @@ export const mockVscode = {
         Collapsed: 1,
         Expanded: 2
     },
+    ProgressLocation: {
+        SourceControl: 1,
+        Window: 10,
+        Notification: 15
+    },
     Position: MockPosition,
     Range: MockRange,
     CodeAction: MockCodeAction,
@@ -317,9 +333,16 @@ export const mockVscode = {
             mockState.lastWarningMessage = { message, items };
             return mockState.warningMessageResponse;
         },
+        showErrorMessage: async (message: string, ...items: any[]): Promise<string | undefined> => {
+            mockState.lastWarningMessage = { message, items };
+            return mockState.warningMessageResponse;
+        },
         showInformationMessage: async (message: string, ...items: any[]): Promise<string | undefined> => {
             mockState.lastInformationMessage = { message, items };
             return mockState.informationMessageResponse;
+        },
+        withProgress: async <R>(_options: any, task: (progress: { report: (value: any) => void }, token: any) => Promise<R>): Promise<R> => {
+            return await task({ report: () => {} }, { isCancellationRequested: false });
         },
         showInputBox: async (options?: any): Promise<string | undefined> => {
             return mockState.inputBoxResponse;
@@ -328,15 +351,24 @@ export const mockVscode = {
             return Array.isArray(items) && items.length > 0 ? items[0] : undefined;
         },
         createQuickPick: () => {
+            const hideListeners: Array<() => void> = [];
             return {
                 title: '',
                 placeholder: '',
                 items: [],
                 selectedItems: [],
-                onDidTriggerItemButton: (cb: any) => {},
-                onDidAccept: (cb: any) => {},
+                onDidTriggerItemButton: (cb: any) => ({ dispose: () => {} }),
+                onDidAccept: (cb: any) => ({ dispose: () => {} }),
+                onDidHide: (cb: () => void) => {
+                    hideListeners.push(cb);
+                    return { dispose: () => {} };
+                },
                 show: () => {},
-                hide: () => {},
+                hide: () => {
+                    for (const listener of [...hideListeners]) {
+                        listener();
+                    }
+                },
                 dispose: () => {}
             };
         },
@@ -356,6 +388,38 @@ export const mockVscode = {
     },
     workspace: {
         isTrusted: true,
+        requestWorkspaceTrust: async (options?: any): Promise<boolean | undefined> => {
+            mockState.requestWorkspaceTrustCalls.push(options);
+            if (mockState.workspaceTrustRequestResponse === true) {
+                mockVscode.workspace.isTrusted = true;
+                for (const listener of [...mockState.grantWorkspaceTrustListeners]) {
+                    listener();
+                }
+            }
+            return mockState.workspaceTrustRequestResponse;
+        },
+        onDidGrantWorkspaceTrust: (listener: () => any) => {
+            mockState.grantWorkspaceTrustListeners.push(listener);
+            return {
+                dispose: () => {
+                    const idx = mockState.grantWorkspaceTrustListeners.indexOf(listener);
+                    if (idx >= 0) {
+                        mockState.grantWorkspaceTrustListeners.splice(idx, 1);
+                    }
+                }
+            };
+        },
+        onDidChangeConfiguration: (listener: (e: { affectsConfiguration: (section: string) => boolean }) => any) => {
+            mockState.configurationChangeListeners.push(listener);
+            return {
+                dispose: () => {
+                    const idx = mockState.configurationChangeListeners.indexOf(listener);
+                    if (idx >= 0) {
+                        mockState.configurationChangeListeners.splice(idx, 1);
+                    }
+                }
+            };
+        },
         asRelativePath: (pathOrUri: any, _includeWorkspaceFolder?: boolean): string => {
             const p = typeof pathOrUri === 'string' ? pathOrUri : (pathOrUri?.fsPath || pathOrUri?.path || '');
             return path.basename(p);

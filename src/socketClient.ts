@@ -118,17 +118,49 @@ export function validateSessionName(name: string): string | null {
 }
 
 /**
+ * Sanitizes a session name for CLI arguments, stripping disallowed characters and leading hyphens.
+ */
+export function sanitizeSessionName(name?: string): string {
+    if (!name) return '';
+    return name.trim().replace(/[^a-zA-Z0-9_-]/g, '').replace(/^-+/, '');
+}
+
+/**
+ * Normalizes a configured session name using validateSessionName(), falling back when invalid.
+ */
+export function normalizeConfiguredSessionName(name?: unknown, fallback: string = 'vscode'): string {
+    if (typeof name !== 'string') return fallback;
+    const trimmed = name.trim();
+    if (!trimmed || validateSessionName(trimmed) !== null) {
+        return fallback;
+    }
+    return trimmed;
+}
+
+/**
+ * Validates that a CLI target/pane/workspace/tab ID is non-empty and safe from option injection or shell metacharacters.
+ */
+export function isSafeCliTargetId(id: unknown): id is string {
+    if (typeof id !== 'string') return false;
+    const trimmed = id.trim();
+    if (!trimmed || trimmed.startsWith('-')) return false;
+    return !/[\s\r\n\0;|&$`\\]/.test(trimmed);
+}
+
+/**
  * Resolves the socket path for a given session name.
  */
 export function getSessionSocketPath(sessionName?: string): string {
+    const envSocketPath = process.env['HERDR_SOCKET_PATH'];
+    const envSession = process.env['HERDR_SESSION'];
     if (!sessionName || sessionName === 'default') {
-        if (!sessionName && process.env['HERDR_SOCKET_PATH']) {
-            return process.env['HERDR_SOCKET_PATH'];
+        if (envSocketPath && (!sessionName || !envSession || envSession === 'default')) {
+            return envSocketPath;
         }
         return path.join(os.homedir(), '.config', 'herdr', 'herdr.sock');
     }
-    if (process.env['HERDR_SESSION'] === sessionName && process.env['HERDR_SOCKET_PATH']) {
-        return process.env['HERDR_SOCKET_PATH'];
+    if (envSession === sessionName && envSocketPath) {
+        return envSocketPath;
     }
     // Sanitize sessionName to prevent path traversal
     const safeSessionName = path.basename(sessionName).replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -176,6 +208,9 @@ export const DEFAULT_HERDR_SUBSCRIPTIONS = [
 ];
 
 export class HerdrSocketClient extends EventEmitter {
+    private static readonly MAX_INITIAL_RETRIES = 3;
+    private static readonly MAX_DISCONNECT_RETRIES = 8;
+
     private socket: net.Socket | null = null;
     private socketPath: string;
     private buffer = '';
@@ -184,17 +219,35 @@ export class HerdrSocketClient extends EventEmitter {
     private reconnectAttempts = 0;
     private isDisposed = false;
     private _isConnected = false;
+    private wasConnected = false;
+    private lastErrorCode: string | undefined;
     private activeRequestCleanups: Set<() => void> = new Set();
     private inFlightSnapshotPromise: Promise<HerdrSessionSnapshot | null> | null = null;
     private snapshotGeneration = 0;
     private lastSnapshot: { value: HerdrSessionSnapshot; timestamp: number; generation: number } | null = null;
 
-    constructor(customSocketPathOrSession?: string) {
+    /**
+     * Creates a client bound directly to an explicit Unix socket path (for testing or custom socket paths).
+     */
+    public static fromSocketPath(socketPath: string): HerdrSocketClient {
+        if (!socketPath || !socketPath.trim()) {
+            throw new Error('Invalid Herdr socket path: path cannot be empty');
+        }
+        return new HerdrSocketClient(undefined, socketPath);
+    }
+
+    constructor(sessionName?: string, directSocketPath?: string) {
         super();
-        if (customSocketPathOrSession && (customSocketPathOrSession.includes('/') || customSocketPathOrSession.includes('\\'))) {
-            this.socketPath = customSocketPathOrSession;
+        if (directSocketPath) {
+            this.socketPath = directSocketPath;
+        } else if (sessionName !== undefined) {
+            const trimmed = sessionName.trim();
+            if (trimmed.includes('/') || trimmed.includes('\\') || validateSessionName(trimmed) !== null) {
+                throw new Error(`Invalid Herdr session name: "${sessionName}"`);
+            }
+            this.socketPath = getSessionSocketPath(trimmed);
         } else {
-            this.socketPath = getSessionSocketPath(customSocketPathOrSession);
+            this.socketPath = getSessionSocketPath();
         }
 
         // Register default no-op error handler to prevent Node.js unhandled 'error' event crash
@@ -205,6 +258,19 @@ export class HerdrSocketClient extends EventEmitter {
         return this._isConnected;
     }
 
+    /**
+     * Immediately triggers a reconnection attempt if disconnected and not disposed (e.g. on window focus).
+     */
+    public retryNow(): void {
+        if (this.isDisposed || this._isConnected || this.socket) return;
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+        this.reconnectAttempts = 0;
+        this.connect();
+    }
+
     public connect(): void {
         if (this.isDisposed || this.socket) return;
 
@@ -213,7 +279,9 @@ export class HerdrSocketClient extends EventEmitter {
             
             this.socket.on('connect', () => {
                 this._isConnected = true;
+                this.wasConnected = true;
                 this.reconnectAttempts = 0;
+                this.lastErrorCode = undefined;
                 this.emit('connect');
                 // Subscribe to events automatically upon connection
                 const payload = JSON.stringify({
@@ -230,28 +298,49 @@ export class HerdrSocketClient extends EventEmitter {
 
             this.socket.on('error', (err: Error) => {
                 this._isConnected = false;
+                this.lastErrorCode = (err as NodeJS.ErrnoException)?.code;
                 this.emit('error', err);
             });
 
             this.socket.on('close', () => {
+                const hadConnected = this.wasConnected;
+                this.wasConnected = false;
                 this._isConnected = false;
                 this.socket = null;
                 this.invalidateSnapshotCache();
-                this.emit('disconnect');
-                this.scheduleReconnect();
+                if (hadConnected) {
+                    this.emit('disconnect');
+                }
+                this.scheduleReconnect(undefined, hadConnected);
             });
         } catch (e: any) {
+            const hadConnected = this.wasConnected;
+            this.wasConnected = false;
             this._isConnected = false;
             this.socket = null;
+            this.lastErrorCode = (e as NodeJS.ErrnoException)?.code;
             this.emit('error', e);
-            this.scheduleReconnect();
+            this.scheduleReconnect(undefined, hadConnected);
         }
     }
 
-    private scheduleReconnect(customDelayMs?: number): void {
+    private scheduleReconnect(customDelayMs?: number, hadConnected: boolean = this.wasConnected): void {
         if (this.isDisposed || this.reconnectTimer) return;
-        // Exponential backoff starting at 300ms, doubling up to 5000ms
-        const delayMs = customDelayMs ?? Math.min(300 * Math.pow(1.8, this.reconnectAttempts), 5000);
+
+        const isUnavailableError = !hadConnected && (this.lastErrorCode === 'ENOENT' || this.lastErrorCode === 'ECONNREFUSED');
+        const maxRetries = isUnavailableError
+            ? HerdrSocketClient.MAX_INITIAL_RETRIES
+            : HerdrSocketClient.MAX_DISCONNECT_RETRIES;
+
+        if (this.reconnectAttempts >= maxRetries) {
+            // Stop busy reconnection loops when daemon is absent; retryNow() resumes on focus/commands
+            return;
+        }
+
+        const baseDelay = isUnavailableError
+            ? Math.min(1000 * Math.pow(2, this.reconnectAttempts), 60000)
+            : Math.min(300 * Math.pow(1.8, this.reconnectAttempts), 5000);
+        const delayMs = customDelayMs ?? baseDelay;
         this.reconnectAttempts++;
         this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = null;

@@ -5,11 +5,13 @@
 import * as vscode from 'vscode';
 import * as l10n from '@vscode/l10n';
 import * as path from 'path';
+import * as os from 'os';
 import { detectLanguage, extractSnippet } from './reviewManager';
-import { formatCodeFence } from './formatters';
+import { formatCodeFence, isSameOrSubPath, safeRealPath } from './formatters';
 import { HerdrSocketClient } from './socketClient';
-import { parseSnapshotAgents, parseSnapshotWorkspaces, parseAgents } from './parsers';
+import { parseSnapshotAgents, parseSnapshotWorkspaces, parseWorkspaces, parsePanes, parseAgents } from './parsers';
 import { execHerdr } from './executors';
+import { ensureWorkspaceTrustedForAction, isWorkspaceTrusted } from './workspaceTrust';
 
 export interface MicroTaskDiagnostic {
     message: string;
@@ -119,7 +121,7 @@ export function detectTodoAtLine(lineText: string): TodoDetectionResult | null {
 export function formatDiagnosticPrompt(
     fileRelPath: string,
     line: number,
-    diagnostic: { message: string; code?: string | number | { value: string | number; target?: any }; source?: string; severity?: string | vscode.DiagnosticSeverity | number },
+    diagnostic: { message: string; code?: string | number | { value: string | number; target?: vscode.Uri }; source?: string; severity?: string | vscode.DiagnosticSeverity | number },
     codeSnippet: string
 ): string {
     const lang = detectLanguage(fileRelPath);
@@ -156,7 +158,7 @@ export function formatDiagnosticPrompt(
 
 export interface DiagnosticPromptInput {
     message: string;
-    code?: string | number | { value: string | number; target?: any };
+    code?: string | number | { value: string | number; target?: vscode.Uri };
     source?: string;
     severity?: string | vscode.DiagnosticSeverity | number;
     range?: { start?: { line?: number } };
@@ -264,15 +266,25 @@ export function formatContextTaskPrompt(
 /**
  * Sorts agents prioritizing idle agents first, followed by waiting, working, then others
  */
-export function sortAgentsForDispatch(agents: MicroTaskAgentOption[]): MicroTaskAgentOption[] {
+export function sortAgentsForDispatch(
+    agents: MicroTaskAgentOption[],
+    preferredCwd?: string
+): MicroTaskAgentOption[] {
     const priorityWeight: Record<MicroTaskAgentOption['statusType'], number> = {
         idle: 0,
         waiting: 1,
         working: 2,
         other: 3
     };
+    const resolvedPreferred = preferredCwd ? safeRealPath(preferredCwd) : undefined;
+    const isPreferred = (agent: MicroTaskAgentOption): number => {
+        if (!resolvedPreferred || !agent.cwd) return 1;
+        return isSameOrSubPath(safeRealPath(agent.cwd), resolvedPreferred) ? 0 : 1;
+    };
 
     return [...agents].sort((a, b) => {
+        const prefDiff = isPreferred(a) - isPreferred(b);
+        if (prefDiff !== 0) return prefDiff;
         const diff = (priorityWeight[a.statusType] ?? 3) - (priorityWeight[b.statusType] ?? 3);
         if (diff !== 0) return diff;
         return a.name.localeCompare(b.name);
@@ -317,33 +329,63 @@ export async function getAvailableAgents(
         }
     }
 
+    if (!isWorkspaceTrusted(vscode)) {
+        return [];
+    }
+
     return new Promise<MicroTaskAgentOption[]>((resolve) => {
-        execHerdr(['--session', sessionName, 'agent', 'list'], (err: any, stdout: any) => {
-            if (!err && stdout) {
-                const parsed = parseAgents(stdout);
-                const list: MicroTaskAgentOption[] = parsed.map(a => {
-                    let statusType: MicroTaskAgentOption['statusType'] = 'other';
-                    const st = (a.status || '').toLowerCase();
-                    if (st.includes('idle') || st.includes('ready') || st.includes('done')) {
-                        statusType = 'idle';
-                    } else if (st.includes('wait') || st.includes('input') || st.includes('confirm') || st.includes('block')) {
-                        statusType = 'waiting';
-                    } else if (st.includes('work') || st.includes('busy') || st.includes('run')) {
-                        statusType = 'working';
-                    }
-                    return {
-                        id: a.id,
-                        name: a.name || a.id,
-                        status: a.status || 'unknown',
-                        statusType,
-                        workspaceLabel: a.workspaceLabel,
-                        cwd: undefined
-                    };
-                });
-                resolve(list);
-            } else {
+        const sessionArgs = ['--session', sessionName];
+        let rawWorkspaces = '';
+        let rawPanes = '';
+        let rawAgents = '';
+        let pending = 3;
+
+        const checkDone = () => {
+            pending--;
+            if (pending > 0) return;
+
+            if (!rawAgents) {
                 resolve([]);
+                return;
             }
+            const parsedPanes = rawPanes ? parsePanes(rawPanes) : [];
+            const parsedWorkspaces = rawWorkspaces ? parseWorkspaces(rawWorkspaces, parsedPanes, os.homedir()) : [];
+            const parsed = parseAgents(rawAgents, parsedWorkspaces);
+            const list: MicroTaskAgentOption[] = parsed.map(a => {
+                let statusType: MicroTaskAgentOption['statusType'] = 'other';
+                const st = (a.status || '').toLowerCase();
+                if (st.includes('idle') || st.includes('ready') || st.includes('done')) {
+                    statusType = 'idle';
+                } else if (st.includes('wait') || st.includes('input') || st.includes('confirm') || st.includes('block')) {
+                    statusType = 'waiting';
+                } else if (st.includes('work') || st.includes('busy') || st.includes('run')) {
+                    statusType = 'working';
+                }
+                return {
+                    id: a.id,
+                    name: a.name || a.id,
+                    status: a.status || 'unknown',
+                    statusType,
+                    workspaceLabel: a.workspaceLabel,
+                    cwd: a.workspaceCwd
+                };
+            });
+            resolve(list);
+        };
+
+        execHerdr([...sessionArgs, 'workspace', 'list'], { skipAutoStart: true }, (err, stdout) => {
+            if (!err && stdout) rawWorkspaces = stdout;
+            checkDone();
+        });
+
+        execHerdr([...sessionArgs, 'pane', 'list'], { skipAutoStart: true }, (err, stdout) => {
+            if (!err && stdout) rawPanes = stdout;
+            checkDone();
+        });
+
+        execHerdr([...sessionArgs, 'agent', 'list'], { skipAutoStart: true }, (err, stdout) => {
+            if (!err && stdout) rawAgents = stdout;
+            checkDone();
         });
     });
 }
@@ -357,6 +399,9 @@ export async function sendPromptToAgent(
     options?: { socketClient?: HerdrSocketClient; sessionName?: string; cwd?: string }
 ): Promise<boolean> {
     const socket = options?.socketClient;
+    if (!agentId || agentId.startsWith('-')) {
+        return false;
+    }
     const sessionName = options?.sessionName || 'vscode';
     const cwd = options?.cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
@@ -371,10 +416,10 @@ export async function sendPromptToAgent(
 
     return new Promise<boolean>((resolve) => {
         const sessionArgs = sessionName ? ['--session', sessionName] : [];
-        execHerdr([...sessionArgs, 'agent', 'prompt', agentId, prompt], { cwd }, (err: any) => {
+        execHerdr([...sessionArgs, 'agent', 'prompt', agentId, prompt], { cwd }, (err) => {
             if (err) {
                 // If agent prompt fails with agent_not_found, try pane send-text
-                execHerdr([...sessionArgs, 'pane', 'send-text', agentId, prompt], { cwd }, (fbErr: any) => {
+                execHerdr([...sessionArgs, 'pane', 'send-text', agentId, prompt], { cwd }, (fbErr) => {
                     resolve(!fbErr);
                 });
             } else {
@@ -393,8 +438,11 @@ export async function sendPromptToAgent(
 export async function promptAndDispatchTask(
     prompt: string,
     taskTitle: string,
-    options?: { socketClient?: HerdrSocketClient; sessionName?: string; cwd?: string }
+    options?: { socketClient?: HerdrSocketClient; sessionName?: string; cwd?: string; preferredCwd?: string }
 ): Promise<boolean> {
+    if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+        return false;
+    }
     const sessionName = options?.sessionName || 'vscode';
     const rawAgents = await getAvailableAgents(options?.socketClient, sessionName);
 
@@ -410,7 +458,7 @@ export async function promptAndDispatchTask(
         return false;
     }
 
-    const sorted = sortAgentsForDispatch(rawAgents);
+    const sorted = sortAgentsForDispatch(rawAgents, options?.preferredCwd);
 
     // If exactly 1 agent is active, auto-dispatch without prompting!
     if (sorted.length === 1) {
@@ -419,7 +467,7 @@ export async function promptAndDispatchTask(
         if (success) {
             vscode.window.showInformationMessage(l10n.t("Dispatched task to '{0}'", singleAgent.name));
         } else {
-            vscode.window.showErrorMessage(l10n.t('Failed to send context: {0}', 'agent prompt failed'));
+            vscode.window.showErrorMessage(l10n.t('Failed to send context: {0}', l10n.t('agent prompt failed')));
         }
         return success;
     }
@@ -443,7 +491,7 @@ export async function promptAndDispatchTask(
         return {
             label: `${icon} ${agent.name}${statusTag}${wsInfo}`,
             description: agent.status,
-            detail: agent.cwd ? `Path: ${agent.cwd}` : undefined,
+            detail: agent.cwd ? l10n.t('Path: {0}', agent.cwd) : undefined,
             agent
         };
     });
@@ -461,7 +509,7 @@ export async function promptAndDispatchTask(
     if (success) {
         vscode.window.showInformationMessage(l10n.t("Dispatched task to '{0}'", selected.agent.name));
     } else {
-        vscode.window.showErrorMessage(l10n.t('Failed to send context: {0}', 'agent prompt failed'));
+        vscode.window.showErrorMessage(l10n.t('Failed to send context: {0}', l10n.t('agent prompt failed')));
     }
     return success;
 }
@@ -495,7 +543,6 @@ export class HerdrQuickFixProvider implements vscode.CodeActionProvider {
             `🛠️ ${l10n.t('Delegate Fix to Herdr Agent')}`,
             vscode.CodeActionKind.QuickFix
         );
-        primaryAction.isPreferred = true;
         primaryAction.diagnostics = [primaryDiag];
         primaryAction.command = {
             command: 'herdr-collie.fixDiagnosticWithAgent',
@@ -544,7 +591,7 @@ export class HerdrCodeLensProvider implements vscode.CodeLensProvider, vscode.Di
     ): vscode.CodeLens[] {
         const config = vscode.workspace.getConfiguration('herdr-collie');
         const isEnabled = config.get<boolean>('codeLens.enable', true);
-        if (!isEnabled) {
+        if (!isEnabled || _token?.isCancellationRequested) {
             return [];
         }
 
@@ -552,6 +599,9 @@ export class HerdrCodeLensProvider implements vscode.CodeLensProvider, vscode.Di
         const maxScanLines = Math.min(document.lineCount, 3000);
 
         for (let i = 0; i < maxScanLines; i++) {
+            if (_token?.isCancellationRequested) {
+                return [];
+            }
             const line = document.lineAt(i);
             const lineText = line.text;
             const prevLineText = i > 0 ? document.lineAt(i - 1).text : undefined;
@@ -612,7 +662,7 @@ export async function handleContextTaskDispatch(
         const primaryDiag = diags[0];
         const snippet = extractSnippet(doc.getText(), Math.max(1, lineNum - 5), Math.min(doc.lineCount, lineNum + 5));
         const prompt = formatDiagnosticPrompt(fileRelPath, lineNum, primaryDiag, snippet);
-        await promptAndDispatchTask(prompt, `Fix Diagnostic in ${path.basename(fileRelPath)}`, options);
+        await promptAndDispatchTask(prompt, l10n.t('Fix Diagnostic in {0}', path.basename(fileRelPath)), options);
         return;
     }
 
@@ -621,7 +671,7 @@ export async function handleContextTaskDispatch(
     if (todoMatch) {
         const snippet = extractSnippet(doc.getText(), Math.max(1, lineNum - 6), Math.min(doc.lineCount, lineNum + 8));
         const prompt = formatTodoPrompt(fileRelPath, todoMatch.type, todoMatch.text, lineNum, snippet);
-        await promptAndDispatchTask(prompt, `Complete ${todoMatch.type} in ${path.basename(fileRelPath)}`, options);
+        await promptAndDispatchTask(prompt, l10n.t('Complete {0} in {1}', todoMatch.type, path.basename(fileRelPath)), options);
         return;
     }
 
@@ -630,7 +680,7 @@ export async function handleContextTaskDispatch(
     if (testMatch) {
         const snippet = extractSnippet(doc.getText(), Math.max(1, lineNum - 2), Math.min(doc.lineCount, lineNum + 20));
         const prompt = formatTestPrompt(fileRelPath, testMatch.testName, lineNum, snippet, 'fix');
-        await promptAndDispatchTask(prompt, `Fix Test "${testMatch.testName}"`, options);
+        await promptAndDispatchTask(prompt, l10n.t('Fix Test "{0}"', testMatch.testName), options);
         return;
     }
 
@@ -641,10 +691,10 @@ export async function handleContextTaskDispatch(
         snippet = doc.getText(editor.selection);
         const s = editor.selection.start.line + 1;
         const e = editor.selection.end.line + 1;
-        targetLinesDesc = s === e ? `Line ${s}` : `Lines ${s}-${e}`;
+        targetLinesDesc = s === e ? l10n.t('Line {0}', s) : l10n.t('Lines {0}-{1}', s, e);
     } else {
         snippet = extractSnippet(doc.getText(), Math.max(1, lineNum - 8), Math.min(doc.lineCount, lineNum + 8));
-        targetLinesDesc = `Line ${lineNum}`;
+        targetLinesDesc = l10n.t('Line {0}', lineNum);
     }
 
     const actionChoices = [
@@ -679,5 +729,5 @@ export async function handleContextTaskDispatch(
     }
 
     const prompt = formatContextTaskPrompt(fileRelPath, lineNum, instruction, snippet);
-    await promptAndDispatchTask(prompt, `Dispatch Task: ${path.basename(fileRelPath)}`, options);
+    await promptAndDispatchTask(prompt, l10n.t('Dispatch Task: {0}', path.basename(fileRelPath)), options);
 }

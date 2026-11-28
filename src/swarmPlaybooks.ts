@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ParsedIntegrationInfo } from './parsers';
 import { HerdrSocketClient } from './socketClient';
+import { ensureWorkspaceTrustedForAction } from './workspaceTrust';
 import {
     AgentOptionItem,
     bootstrapWorktreeEnvironment,
@@ -21,6 +22,7 @@ import {
     getCurrentGitBranch,
     getInstalledAgentOptions,
     getRepoRoot,
+    resolveMainRepoRootFromPath,
     getWorktreeBootstrapOptions,
     listGitBranches,
     resolveWorktreePath,
@@ -406,6 +408,7 @@ async function startPlaybookRole(params: {
     startAgentFn: (options: StartAgentInPaneOptions) => Promise<StartAgentInPaneResult>;
     launched: PlaybookAgentLaunchOutcome[];
     failures: PlaybookAgentLaunchOutcome[];
+    warnings?: string[];
 }): Promise<void> {
     const {
         role,
@@ -421,7 +424,8 @@ async function startPlaybookRole(params: {
         socketClient,
         startAgentFn,
         launched,
-        failures
+        failures,
+        warnings
     } = params;
 
     try {
@@ -448,6 +452,11 @@ async function startPlaybookRole(params: {
         };
         if (res.started) {
             launched.push(outcome);
+            if (prompt.trim() && !res.prompted) {
+                warnings?.push(
+                    l10n.t("Agent '{0}' ({1}) started on '{2}', but failed to deliver the initial prompt.", agentName, role, branchName || worktreePath)
+                );
+            }
         } else {
             failures.push(outcome);
         }
@@ -568,7 +577,8 @@ export async function executeBestOfNPlaybook(options: {
                 socketClient,
                 startAgentFn: startAgent,
                 launched,
-                failures
+                failures,
+                warnings
             });
         } catch (err: any) {
             failures.push({
@@ -735,7 +745,8 @@ export async function executeImplementReviewPlaybook(options: {
         socketClient,
         startAgentFn: startAgent,
         launched,
-        failures
+        failures,
+        warnings
     });
 
     if (reviewPaneId) {
@@ -754,7 +765,8 @@ export async function executeImplementReviewPlaybook(options: {
             socketClient,
             startAgentFn: startAgent,
             launched,
-            failures
+            failures,
+            warnings
         });
     } else if (!failures.some(f => f.role === 'reviewer')) {
         failures.push({
@@ -855,6 +867,9 @@ export async function launchSwarmPlaybookWizard(
     socketClient?: HerdrSocketClient
 ): Promise<void> {
     if (!vscode) return;
+    if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+        return;
+    }
 
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
@@ -862,7 +877,16 @@ export async function launchSwarmPlaybookWizard(
         return;
     }
 
-    const repoRoot = await getRepoRoot(workspaceFolders[0].uri.fsPath);
+    const activeDocUri = vscode.window.activeTextEditor?.document?.uri;
+    let repoRoot: string | null = activeDocUri?.scheme === 'file' && activeDocUri.fsPath
+        ? await resolveMainRepoRootFromPath(path.dirname(activeDocUri.fsPath))
+        : null;
+    if (!repoRoot) {
+        for (const folder of workspaceFolders) {
+            repoRoot = await resolveMainRepoRootFromPath(folder.uri.fsPath);
+            if (repoRoot) break;
+        }
+    }
     if (!repoRoot) {
         vscode.window.showErrorMessage(l10n.t('The current workspace is not a Git repository.'));
         return;

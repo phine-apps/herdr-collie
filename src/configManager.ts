@@ -6,10 +6,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as toml from 'smol-toml';
+import { isWorkspaceTrusted } from './workspaceTrust';
+import { normalizeConfiguredSessionName } from './socketClient';
 
 let originalConfigPathCache: string | null = null;
-let watcherInstance: fs.FSWatcher | null = null;
-let debounceTimer: NodeJS.Timeout | null = null;
 
 /**
  * Returns the path to the user's original herdr config.toml.
@@ -80,7 +80,10 @@ export interface ExtensionContextLike {
 /**
  * Notifies running Herdr servers (default plus any configured/active sessions) to reload config.
  */
-export function reloadConfigForSessions(sessionNames?: string | string[]): void {
+export function reloadConfigForSessions(sessionNames?: string | string[], vscodeModule?: any): void {
+    if (!isWorkspaceTrusted(vscodeModule)) {
+        return;
+    }
     const targets = new Set<string>();
     if (Array.isArray(sessionNames)) {
         for (const s of sessionNames) {
@@ -98,67 +101,86 @@ export function reloadConfigForSessions(sessionNames?: string | string[]): void 
 
     try {
         const { execHerdr } = require('./executors');
-        execHerdr(['server', 'reload-config'], () => {});
+        execHerdr(['server', 'reload-config'], { skipAutoStart: true }, () => {});
         for (const session of targets) {
             if (session !== 'default') {
-                execHerdr(['--session', session, 'server', 'reload-config'], () => {});
+                execHerdr(['--session', session, 'server', 'reload-config'], { skipAutoStart: true }, () => {});
             }
         }
     } catch (e) {}
 }
 
+let syncQueue: Promise<unknown> = Promise.resolve();
+
+function enqueueSyncTask<T>(task: () => Promise<T>): Promise<T> {
+    const run = syncQueue.then(task, task);
+    syncQueue = run.catch(() => undefined);
+    return run;
+}
+
 /**
- * Synchronizes the embedded herdr config and sets the HERDR_CONFIG_PATH environment variable.
+ * Synchronizes the embedded herdr config asynchronously and sets the HERDR_CONFIG_PATH environment variable.
  */
 export function syncHerdrConfig(
     context: ExtensionContextLike,
     hideSidebar: boolean = true,
-    sessionNames?: string | string[]
-): string | undefined {
-    if (!hideSidebar) {
-        if (context.environmentVariableCollection) {
-            context.environmentVariableCollection.delete('HERDR_CONFIG_PATH');
+    sessionNames?: string | string[],
+    vscodeModule?: any
+): Promise<string | undefined> {
+    return enqueueSyncTask(async () => {
+        if (!isWorkspaceTrusted(vscodeModule)) {
+            return undefined;
         }
-        if (process.env['HERDR_CONFIG_PATH']?.includes('herdr_config_embedded.toml')) {
-            delete process.env['HERDR_CONFIG_PATH'];
-        }
-        return undefined;
-    }
 
-    const origPath = getOriginalConfigPath();
-    let originalContent = '';
-    if (fs.existsSync(origPath)) {
+        if (!hideSidebar) {
+            if (context.environmentVariableCollection) {
+                context.environmentVariableCollection.delete('HERDR_CONFIG_PATH');
+            }
+            if (process.env['HERDR_CONFIG_PATH']?.includes('herdr_config_embedded.toml')) {
+                delete process.env['HERDR_CONFIG_PATH'];
+            }
+            reloadConfigForSessions(sessionNames, vscodeModule);
+            return undefined;
+        }
+
+        const origPath = getOriginalConfigPath();
+        let originalContent = '';
         try {
-            originalContent = fs.readFileSync(origPath, 'utf8');
+            originalContent = await fs.promises.readFile(origPath, 'utf8');
+        } catch (e: any) {
+            if (e?.code !== 'ENOENT') {
+                console.error('[herdr-collie] Failed to read original config.toml:', e);
+            }
+        }
+
+        const newContent = generateEmbeddedConfigContent(originalContent, true);
+        const storageDir = context.globalStorageUri.fsPath;
+
+        try {
+            await fs.promises.mkdir(storageDir, { recursive: true });
+            const embeddedPath = path.join(storageDir, 'herdr_config_embedded.toml');
+            await fs.promises.writeFile(embeddedPath, newContent, 'utf8');
+
+            if (context.environmentVariableCollection) {
+                context.environmentVariableCollection.replace('HERDR_CONFIG_PATH', embeddedPath);
+            }
+            process.env['HERDR_CONFIG_PATH'] = embeddedPath;
+
+            // Notify running servers to reload config
+            reloadConfigForSessions(sessionNames, vscodeModule);
+
+            return embeddedPath;
         } catch (e) {
-            console.error('[herdr-collie] Failed to read original config.toml:', e);
+            console.error('[herdr-collie] Failed to write embedded config.toml:', e);
+            return undefined;
         }
-    }
+    });
+}
 
-    const newContent = generateEmbeddedConfigContent(originalContent, true);
-    const storageDir = context.globalStorageUri.fsPath;
-
-    try {
-        if (!fs.existsSync(storageDir)) {
-            fs.mkdirSync(storageDir, { recursive: true });
-        }
-        const embeddedPath = path.join(storageDir, 'herdr_config_embedded.toml');
-        fs.writeFileSync(embeddedPath, newContent, 'utf8');
-
-        if (context.environmentVariableCollection) {
-            context.environmentVariableCollection.replace('HERDR_CONFIG_PATH', embeddedPath);
-        }
-        process.env['HERDR_CONFIG_PATH'] = embeddedPath;
-
-        // Notify running servers to reload config
-        reloadConfigForSessions(sessionNames);
-
-        return embeddedPath;
-    } catch (e) {
-
-        console.error('[herdr-collie] Failed to write embedded config.toml:', e);
-        return undefined;
-    }
+export interface ConfigManagerHandle {
+    dispose(): void;
+    ready: Promise<string | undefined>;
+    whenIdle(): Promise<void>;
 }
 
 /**
@@ -168,7 +190,7 @@ export function setupConfigManager(
     context: any,
     vscodeModule?: any,
     getSessionNames?: () => string | string[]
-): { dispose(): void } {
+): ConfigManagerHandle {
     let vscode = vscodeModule;
     if (!vscode) {
         try {
@@ -176,6 +198,14 @@ export function setupConfigManager(
         } catch (e) {
             // In unit tests without vscode runtime
         }
+    }
+
+    if (!isWorkspaceTrusted(vscode)) {
+        return {
+            ready: Promise.resolve(undefined),
+            whenIdle: () => Promise.resolve(),
+            dispose: () => {}
+        };
     }
 
     const getHideSidebarSetting = () => {
@@ -190,9 +220,9 @@ export function setupConfigManager(
         const sessions = new Set<string>();
         if (vscode && vscode.workspace) {
             const config = vscode.workspace.getConfiguration('herdr-collie');
-            const configured = config.get('sessionName', 'vscode');
-            if (typeof configured === 'string' && configured.trim()) {
-                sessions.add(configured.trim());
+            const configured = normalizeConfiguredSessionName(config.get('sessionName', 'vscode'), '');
+            if (configured) {
+                sessions.add(configured);
             }
         }
         if (getSessionNames) {
@@ -210,45 +240,79 @@ export function setupConfigManager(
         return sessions.size > 0 ? Array.from(sessions) : ['vscode'];
     };
 
-    // Initial sync
-    syncHerdrConfig(context, getHideSidebarSetting(), getTargetSessions());
+    let disposed = false;
+    let watcherInstance: fs.FSWatcher | null = null;
+    let debounceTimer: NodeJS.Timeout | null = null;
+    let lastSyncPromise: Promise<string | undefined> = Promise.resolve(undefined);
+    const triggerSync = (): Promise<string | undefined> => {
+        if (disposed || !isWorkspaceTrusted(vscode)) {
+            return Promise.resolve(undefined);
+        }
+        lastSyncPromise = syncHerdrConfig(context, getHideSidebarSetting(), getTargetSessions(), vscode);
+        return lastSyncPromise;
+    };
+
+    // Non-blocking initial sync
+    const initialSyncPromise = triggerSync();
 
     // Watch original config.toml
     const origPath = getOriginalConfigPath();
     const configDir = path.dirname(origPath);
 
     function handleFileChange() {
+        if (disposed) return;
         if (debounceTimer) {
             clearTimeout(debounceTimer);
         }
         debounceTimer = setTimeout(() => {
-            syncHerdrConfig(context, getHideSidebarSetting(), getTargetSessions());
+            debounceTimer = null;
+            void triggerSync();
         }, 200);
     }
 
-    try {
-        if (fs.existsSync(configDir)) {
-            watcherInstance = fs.watch(configDir, (eventType, filename) => {
+    const watcherReady = fs.promises.access(configDir)
+        .then(() => {
+            if (disposed) return;
+            const watcher = fs.watch(configDir, (eventType, filename) => {
                 if (!filename || filename === path.basename(origPath)) {
                     handleFileChange();
                 }
             });
-        }
-    } catch (e) {
-        console.warn('[herdr-collie] Could not watch config directory:', e);
-    }
+            watcher.on('error', (err) => {
+                console.warn('[herdr-collie] Config directory watcher error:', err);
+                if (watcherInstance === watcher) {
+                    watcherInstance = null;
+                }
+                try {
+                    watcher.close();
+                } catch (e) {}
+            });
+            watcherInstance = watcher;
+        })
+        .catch((e: any) => {
+            if (e?.code !== 'ENOENT') {
+                console.warn('[herdr-collie] Could not watch config directory:', e);
+            }
+        });
+
+    const ready = Promise.all([initialSyncPromise, watcherReady]).then(([embeddedPath]) => embeddedPath);
 
     let configChangeSub: { dispose(): void } | null = null;
     if (vscode && vscode.workspace && vscode.workspace.onDidChangeConfiguration) {
         configChangeSub = vscode.workspace.onDidChangeConfiguration((e: any) => {
             if (e.affectsConfiguration('herdr-collie.hideHerdrSidebar') || e.affectsConfiguration('herdr-collie.sessionName')) {
-                syncHerdrConfig(context, getHideSidebarSetting(), getTargetSessions());
+                void triggerSync();
             }
         });
     }
 
-    const disposable = {
+    const disposable: ConfigManagerHandle = {
+        ready,
+        whenIdle: async () => {
+            await lastSyncPromise;
+        },
         dispose: () => {
+            disposed = true;
             if (watcherInstance) {
                 try {
                     watcherInstance.close();

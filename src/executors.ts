@@ -6,16 +6,32 @@ import * as cp from 'child_process';
 import * as net from 'net';
 import * as path from 'path';
 import { getSessionSocketPath } from './socketClient';
+import { isWorkspaceTrusted } from './workspaceTrust';
 
 export { getSessionSocketPath };
 
 
 const activeServerStartPromises = new Map<string, Promise<boolean>>();
+let preServerStartHook: (() => Promise<void>) | null = null;
+
+/**
+ * Registers an optional hook awaited before auto-starting a Herdr session server
+ * (used by extension activation to ensure HERDR_CONFIG_PATH sync completes first).
+ */
+export function setPreServerStartHook(hook: (() => Promise<void>) | null): void {
+    preServerStartHook = hook;
+}
 
 /**
  * Checks if the session server daemon is running, and spawns it in the background if not.
  */
 export async function ensureSessionServerRunning(sessionName: string = 'default'): Promise<boolean> {
+    if (!isWorkspaceTrusted()) {
+        return false;
+    }
+    if (preServerStartHook) {
+        await preServerStartHook().catch(() => undefined);
+    }
     if (activeServerStartPromises.has(sessionName)) {
         return await activeServerStartPromises.get(sessionName)!;
     }
@@ -102,15 +118,37 @@ export async function ensureSessionServerRunning(sessionName: string = 'default'
     }
 }
 
+export type ExecHerdrOptions = cp.ExecFileOptionsWithStringEncoding & {
+    _isRetry?: boolean;
+    skipAutoStart?: boolean;
+};
+export type ExecHerdrCallback = (
+    error: cp.ExecFileException | null,
+    stdout: string,
+    stderr: string
+) => void;
+
+/**
+ * Formats an unknown thrown value into a human-readable error message.
+ */
+export function getErrorMessage(err: unknown): string {
+    if (err instanceof Error) {
+        return err.message;
+    }
+    return String(err);
+}
+
 // -----------------------------------------------------------------------------
 // Utility: Run herdr CLI without inheriting nested environment variables
 // -----------------------------------------------------------------------------
+export function execHerdr(args: string[], callback?: ExecHerdrCallback): void;
+export function execHerdr(args: string[], options: ExecHerdrOptions | undefined, callback?: ExecHerdrCallback): void;
 export function execHerdr(
-    args: string[], 
-    optionsOrCallback?: any, 
-    callback?: any
-) {
-    const env = Object.assign({}, process.env);
+    args: string[],
+    optionsOrCallback?: ExecHerdrOptions | ExecHerdrCallback,
+    callback?: ExecHerdrCallback
+): void {
+    const env: NodeJS.ProcessEnv = Object.assign({}, process.env);
     // Remove existing Herdr environment variables to avoid nesting limits
     delete env['HERDR_WORKSPACE'];
     delete env['HERDR_PANE_ID'];
@@ -120,9 +158,9 @@ export function execHerdr(
     if (process.env['HERDR_CONFIG_PATH']) {
         env['HERDR_CONFIG_PATH'] = process.env['HERDR_CONFIG_PATH'];
     }
-    
-    let options: any = { env };
-    let cb = callback;
+
+    let options: ExecHerdrOptions = { env };
+    let cb: ExecHerdrCallback | undefined = callback;
 
     if (typeof optionsOrCallback === 'function') {
         cb = optionsOrCallback;
@@ -131,8 +169,8 @@ export function execHerdr(
     }
 
     if (cb) {
-        cp.execFile('herdr', args, options, async (error: any, stdout: string, stderr: string) => {
-            if (error && !options._isRetry && (
+        cp.execFile('herdr', args, options, async (error: cp.ExecFileException | null, stdout: string, stderr: string) => {
+            if (error && !options._isRetry && !options.skipAutoStart && (
                 (error.message && error.message.includes('server_not_running')) ||
                 (stderr && stderr.includes('server_not_running')) ||
                 (stdout && stdout.includes('server_not_running'))
@@ -156,32 +194,44 @@ export function execHerdr(
 }
 
 
+export const GIT_CMD_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+export const GIT_CMD_TIMEOUT_MS = 60_000;
+
 // -----------------------------------------------------------------------------
 // Utility: Run Git CLI commands safely with arguments array
 // -----------------------------------------------------------------------------
 export async function runGitCmd(args: string[], cwd: string): Promise<string> {
     return new Promise((resolve, reject) => {
-        cp.execFile('git', args, { cwd }, (error: any, stdout: any, stderr: any) => {
-            if (error) {
-                // Check if git is missing
-                if (error.code === 127 || error.code === 'ENOENT' || (error.message && error.message.includes('not found'))) {
-                    reject(new Error('Git CLI is not installed or not in PATH. Please install Git to use this feature.'));
-                } else if (args[0] === 'diff' && (error.code === 1 || error.code === undefined)) {
-                    // Git diff can return exit code 1 if differences exist
-                    resolve(stdout || '');
-                } else {
-                    const stderrTrimmed = (stderr && stderr.trim()) || '';
-                    const stdoutTrimmed = (stdout && stdout.trim()) || '';
-                    let errMsg = stderrTrimmed || stdoutTrimmed || error.message || 'Git command failed';
-                    if (stderrTrimmed && stdoutTrimmed && (args[0] === 'merge' || /^warning:/i.test(stderrTrimmed))) {
-                        errMsg = `${stderrTrimmed}\n${stdoutTrimmed}`;
+        cp.execFile(
+            'git',
+            args,
+            { cwd, maxBuffer: GIT_CMD_MAX_BUFFER_BYTES, timeout: GIT_CMD_TIMEOUT_MS },
+            (error: cp.ExecFileException | null, stdout: string, stderr: string) => {
+                if (error) {
+                    // Check if git is missing
+                    if (error.code === 127 || error.code === 'ENOENT' || (error.message && error.message.includes('not found'))) {
+                        reject(new Error('Git CLI is not installed or not in PATH. Please install Git to use this feature.'));
+                    } else if ((error as any).code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+                        reject(new Error('Git command output exceeded the 10 MiB buffer limit.'));
+                    } else if (error.killed && error.signal) {
+                        reject(new Error('Git command timed out.'));
+                    } else if (args[0] === 'diff' && (error.code === 1 || error.code === undefined)) {
+                        // Git diff can return exit code 1 if differences exist
+                        resolve(stdout || '');
+                    } else {
+                        const stderrTrimmed = (stderr && stderr.trim()) || '';
+                        const stdoutTrimmed = (stdout && stdout.trim()) || '';
+                        let errMsg = stderrTrimmed || stdoutTrimmed || error.message || 'Git command failed';
+                        if (stderrTrimmed && stdoutTrimmed && (args[0] === 'merge' || /^warning:/i.test(stderrTrimmed))) {
+                            errMsg = `${stderrTrimmed}\n${stdoutTrimmed}`;
+                        }
+                        reject(new Error(errMsg));
                     }
-                    reject(new Error(errMsg));
+                    return;
                 }
-                return;
+                resolve(stdout || '');
             }
-            resolve(stdout || '');
-        });
+        );
     });
 }
 

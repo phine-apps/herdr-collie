@@ -20,6 +20,7 @@ import {
     resolveWorktreeMergeBase,
     getWorktreeChangedFiles,
     createReviewCheckpoint,
+    createReviewCheckpointWithDetails,
     rollbackReviewCheckpoint,
     listReviewCheckpoints
 } from '../../reviewManager';
@@ -426,5 +427,94 @@ describe('Integrated Review & Diff-to-Prompt Integration Tests (P3)', function()
             await runGitCmd(['worktree', 'remove', '--force', '--', wtDir], tempRepoDir).catch(() => {});
             fs.rmSync(wtDir, { recursive: true, force: true });
         }
+    });
+
+    it('returns descriptive error reason from createReviewCheckpointWithDetails when repository is invalid or has no commits', async () => {
+        const nonRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collie-no-git-'));
+        const emptyRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collie-empty-git-'));
+        try {
+            const nonRepoResult = await createReviewCheckpointWithDetails(nonRepoDir);
+            expect(nonRepoResult.checkpoint).to.be.null;
+            expect(nonRepoResult.error).to.be.a('string').and.not.empty;
+
+            await runGitCmd(['init'], emptyRepoDir);
+            const emptyRepoResult = await createReviewCheckpointWithDetails(emptyRepoDir);
+            expect(emptyRepoResult.checkpoint).to.be.null;
+            expect(emptyRepoResult.error).to.be.a('string').and.not.empty;
+        } finally {
+            fs.rmSync(nonRepoDir, { recursive: true, force: true });
+            fs.rmSync(emptyRepoDir, { recursive: true, force: true });
+        }
+    });
+
+    it('removes newly staged files on rollbackReviewCheckpoint while preserving protected .env files and generates unique diff temp paths', async () => {
+        fs.writeFileSync(path.join(tempRepoDir, '.env'), 'SECRET=keep-me\n', 'utf8');
+        const cp = await createReviewCheckpoint(tempRepoDir, 'before-staged-new-file');
+        expect(cp).to.not.be.null;
+
+        const stagedNewFile = path.join(tempRepoDir, 'new-agent-module.ts');
+        fs.writeFileSync(stagedNewFile, 'export const leaked = true;\n', 'utf8');
+        await runGitCmd(['add', 'new-agent-module.ts'], tempRepoDir);
+
+        const rolledBack = await rollbackReviewCheckpoint(tempRepoDir, cp!.hash);
+        expect(rolledBack).to.be.true;
+        expect(fs.existsSync(stagedNewFile)).to.be.false;
+        expect(fs.existsSync(path.join(tempRepoDir, '.env'))).to.be.true;
+        const statusOut = await runGitCmd(['status', '--porcelain'], tempRepoDir);
+        expect(statusOut).to.not.include('new-agent-module.ts');
+
+        // prepareOriginalFileForDiff called twice in the same tick must yield unique paths
+        const p1 = await prepareOriginalFileForDiff(tempRepoDir, 'auth.ts');
+        const p2 = await prepareOriginalFileForDiff(tempRepoDir, 'auth.ts');
+        expect(p1).to.not.equal(p2);
+    });
+
+    it('scopes review checkpoints to their originating worktree and prevents cross-worktree rollback', async () => {
+        const wtPath = path.join(path.dirname(tempRepoDir), `${path.basename(tempRepoDir)}-cp-scope-wt`);
+        try {
+            await runGitCmd(['worktree', 'add', '-b', 'feat/cp-scope', wtPath, 'main'], tempRepoDir);
+            const wtCp = await createReviewCheckpoint(wtPath, 'wt-only');
+            expect(wtCp).to.not.be.null;
+
+            // Main repo listReviewCheckpoints must exclude worktree-scoped checkpoint
+            const mainList = await listReviewCheckpoints(tempRepoDir);
+            expect(mainList.some(c => c.id === wtCp!.id)).to.be.false;
+
+            // Originating worktree still lists its own checkpoint
+            const wtList = await listReviewCheckpoints(wtPath);
+            expect(wtList.some(c => c.id === wtCp!.id)).to.be.true;
+
+            // Direct cross-worktree rollback attempt against main repo must be rejected
+            const crossOk = await rollbackReviewCheckpoint(tempRepoDir, `refs/herdr/checkpoints/${wtCp!.id}`);
+            expect(crossOk).to.be.false;
+        } finally {
+            await runGitCmd(['worktree', 'remove', '--force', wtPath], tempRepoDir).catch(() => {});
+        }
+    });
+
+    it('preserves unstaged vs staged index state when rolling back to a dirty checkpoint', async () => {
+        const authFile = path.join(tempRepoDir, 'auth.ts');
+        fs.writeFileSync(authFile, 'export const state = "committed";\n', 'utf8');
+        await runGitCmd(['add', 'auth.ts'], tempRepoDir);
+        await runGitCmd(['commit', '-m', 'set committed state'], tempRepoDir);
+
+        // Leave auth.ts modified ONLY in working tree (unstaged ` M`)
+        fs.writeFileSync(authFile, 'export const state = "unstaged-dirty";\n', 'utf8');
+        const cpDirty = await createReviewCheckpoint(tempRepoDir, 'dirty-unstaged');
+        expect(cpDirty).to.not.be.null;
+
+        // Further mutate and even stage wrong changes
+        fs.writeFileSync(authFile, 'export const state = "bad-staged";\n', 'utf8');
+        await runGitCmd(['add', 'auth.ts'], tempRepoDir);
+
+        const ok = await rollbackReviewCheckpoint(tempRepoDir, `refs/herdr/checkpoints/${cpDirty!.id}`);
+        expect(ok).to.be.true;
+        expect(fs.readFileSync(authFile, 'utf8')).to.equal('export const state = "unstaged-dirty";\n');
+
+        // Staged index must remain clean (auth.ts must NOT become staged `M `)
+        const stagedOut = await runGitCmd(['diff', '--cached', '--name-only'], tempRepoDir);
+        expect(stagedOut.trim()).to.equal('');
+        const statusOut = await runGitCmd(['status', '--porcelain'], tempRepoDir);
+        expect(statusOut).to.include(' M auth.ts');
     });
 });

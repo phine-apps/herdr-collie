@@ -12,6 +12,38 @@ import { HerdrSocketClient } from '../../socketClient';
 import { AgentHUD } from '../../agentHUD';
 import { mockState, resetMockState, mockVscode } from '../helpers/mockVscode';
 
+function getTestSocketDir(): string {
+    return process.env['HERDR_TEST_SOCKET_DIR'] || os.tmpdir();
+}
+
+function assertUnixSocketSupported(sockDir: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const probePath = path.join(sockDir, `herdr-hud-probe-${Date.now()}-${Math.random().toString(36).slice(2)}.sock`);
+        const probeServer = net.createServer((s) => s.destroy());
+        const cleanup = () => {
+            try { probeServer.close(); } catch {}
+            try { if (fs.existsSync(probePath)) fs.unlinkSync(probePath); } catch {}
+        };
+        probeServer.once('error', (err: NodeJS.ErrnoException) => {
+            cleanup();
+            reject(new Error(`Unix domain socket unavailable in test environment (${err.code || err.message}). Run outside sandbox or set HERDR_TEST_SOCKET_DIR.`));
+        });
+        probeServer.listen(probePath, () => {
+            const client = net.createConnection(probePath);
+            client.once('connect', () => {
+                client.destroy();
+                cleanup();
+                resolve();
+            });
+            client.once('error', (err: NodeJS.ErrnoException) => {
+                client.destroy();
+                cleanup();
+                reject(new Error(`Unix domain socket connection blocked in test environment (${err.code || err.message}). Run outside sandbox or set HERDR_TEST_SOCKET_DIR.`));
+            });
+        });
+    });
+}
+
 describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05, H-09, A-01)', function() {
     this.timeout(10000);
 
@@ -24,7 +56,7 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
     const createdHuds: AgentHUD[] = [];
 
     const createClient = (sockPath: string): HerdrSocketClient => {
-        const client = new HerdrSocketClient(sockPath);
+        const client = HerdrSocketClient.fromSocketPath(sockPath);
         client.on('error', () => {});
         createdClients.push(client);
         return client;
@@ -36,6 +68,10 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
         return hud;
     };
 
+    before(async () => {
+        await assertUnixSocketSupported(getTestSocketDir());
+    });
+
     beforeEach((done) => {
         resetMockState();
         receivedCommands = [];
@@ -45,7 +81,7 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
             { id: 'agent-2', name: 'Agy-Worker', status: 'idle' }
         ];
 
-        tempSockPath = path.join(os.tmpdir(), `collie-hud-test-${Date.now()}-${Math.random().toString(36).substring(7)}.sock`);
+        tempSockPath = path.join(getTestSocketDir(), `collie-hud-test-${Date.now()}-${Math.random().toString(36).substring(7)}.sock`);
 
         mockServer = net.createServer((socket) => {
             activeSockets.add(socket);
@@ -66,7 +102,7 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
                                     result: {
                                         snapshot: {
                                             workspaces: [
-                                                { workspace_id: 'ws-1', label: 'Primary', focused: true }
+                                                { workspace_id: 'ws-1', label: 'Primary', cwd: '/workspace/project', focused: true }
                                             ],
                                             agents: currentMockAgents
                                         }
@@ -81,6 +117,7 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
             });
         });
 
+        mockServer.once('error', (err) => done(err));
         mockServer.listen(tempSockPath, () => done());
     });
 
@@ -448,8 +485,8 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
 
         // Transition agent-1 from running -> done
         currentMockAgents = [
-            { id: 'agent-1', name: 'Claude-Worker', status: 'done' },
-            { id: 'agent-2', name: 'Agy-Worker', status: 'idle' }
+            { id: 'agent-1', name: 'Claude-Worker', status: 'done', workspace_id: 'ws-1' },
+            { id: 'agent-2', name: 'Agy-Worker', status: 'idle', workspace_id: 'ws-1' }
         ];
 
         await hud.refresh();
@@ -488,7 +525,7 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
         ];
 
         // 1st completion: working -> done (should trigger Auto-Verify 1/2)
-        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'done' }];
+        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'done', workspace_id: 'ws-1' }];
         await hud.refresh();
         await new Promise((resolve) => setTimeout(resolve, 80));
 
@@ -498,9 +535,9 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
         expect(promptCalls[0].params.prompt).to.include('[Auto-Verify Loop 1/2]');
 
         // Agent resumes working, then finishes 2nd time with error still present (should trigger Auto-Verify 2/2)
-        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'running' }];
+        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'running', workspace_id: 'ws-1' }];
         await hud.refresh();
-        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'done' }];
+        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'done', workspace_id: 'ws-1' }];
         await hud.refresh();
         await new Promise((resolve) => setTimeout(resolve, 80));
 
@@ -511,9 +548,9 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
 
         // Agent resumes working, then finishes 3rd time with error STILL present -> circuit breaker trips!
         mockState.warningMessageResponse = 'Dismiss';
-        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'running' }];
+        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'running', workspace_id: 'ws-1' }];
         await hud.refresh();
-        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'done' }];
+        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'done', workspace_id: 'ws-1' }];
         await hud.refresh();
         await new Promise((resolve) => setTimeout(resolve, 80));
 

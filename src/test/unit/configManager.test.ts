@@ -108,12 +108,12 @@ sidebar_collapsed_mode = "compact"
             } catch (e) {}
         });
 
-        it('should generate embedded config and set environment variable when original file exists', () => {
+        it('should generate embedded config and set environment variable when original file exists', async () => {
             const originalConfigFile = path.join(tempConfigDir, 'config.toml');
             fs.writeFileSync(originalConfigFile, '[ui]\naccent = "magenta"\n', 'utf8');
             setOriginalConfigPathForTesting(originalConfigFile);
 
-            const embeddedPath = syncHerdrConfig(mockContext, true);
+            const embeddedPath = await syncHerdrConfig(mockContext, true);
             expect(embeddedPath).to.be.a('string');
             expect(fs.existsSync(embeddedPath!)).to.be.true;
 
@@ -127,11 +127,11 @@ sidebar_collapsed_mode = "compact"
             expect(process.env['HERDR_CONFIG_PATH']).to.equal(embeddedPath);
         });
 
-        it('should generate embedded config even when original config file does not exist', () => {
+        it('should generate embedded config even when original config file does not exist', async () => {
             const originalConfigFile = path.join(tempConfigDir, 'non_existent_config.toml');
             setOriginalConfigPathForTesting(originalConfigFile);
 
-            const embeddedPath = syncHerdrConfig(mockContext, true);
+            const embeddedPath = await syncHerdrConfig(mockContext, true);
             expect(embeddedPath).to.be.a('string');
             expect(fs.existsSync(embeddedPath!)).to.be.true;
 
@@ -141,48 +141,50 @@ sidebar_collapsed_mode = "compact"
             expect(parsed.ui.sidebar_collapsed_mode).to.equal('hidden');
         });
 
-        it('should delete environment variable when hideSidebar is false', () => {
+        it('should delete environment variable when hideSidebar is false', async () => {
             const originalConfigFile = path.join(tempConfigDir, 'config.toml');
             fs.writeFileSync(originalConfigFile, '[ui]\naccent = "cyan"\n', 'utf8');
             setOriginalConfigPathForTesting(originalConfigFile);
 
             // First enable it
-            syncHerdrConfig(mockContext, true);
+            await syncHerdrConfig(mockContext, true);
             expect(envVars.get('HERDR_CONFIG_PATH')).to.be.a('string');
 
             // Then disable it
-            const result = syncHerdrConfig(mockContext, false);
+            const result = await syncHerdrConfig(mockContext, false);
             expect(result).to.be.undefined;
             expect(envVars.has('HERDR_CONFIG_PATH')).to.be.false;
             expect(process.env['HERDR_CONFIG_PATH']).to.be.undefined;
         });
 
-        it('should watch and synchronize file changes on original config file', (done) => {
+        it('should watch and synchronize file changes on original config file', async () => {
             const originalConfigFile = path.join(tempConfigDir, 'config.toml');
             fs.writeFileSync(originalConfigFile, '[ui]\naccent = "cyan"\n', 'utf8');
             setOriginalConfigPathForTesting(originalConfigFile);
 
             const disposable = setupConfigManager(mockContext);
+            await disposable.ready;
 
-            // Update original config
-            setTimeout(() => {
+            try {
+                // Update original config
+                await new Promise(resolve => setTimeout(resolve, 50));
                 fs.writeFileSync(originalConfigFile, '[ui]\naccent = "yellow"\n', 'utf8');
 
-                setTimeout(() => {
-                    const embeddedPath = path.join(tempStorageDir, 'herdr_config_embedded.toml');
-                    const content = fs.readFileSync(embeddedPath, 'utf8');
-                    const parsed: any = toml.parse(content);
-                    expect(parsed.ui.accent).to.equal('yellow');
-                    expect(parsed.ui.sidebar_start_collapsed).to.equal(true);
-                    expect(parsed.ui.sidebar_collapsed_mode).to.equal('hidden');
+                await new Promise(resolve => setTimeout(resolve, 350));
+                await disposable.whenIdle();
 
-                    disposable.dispose();
-                    done();
-                }, 350);
-            }, 50);
+                const embeddedPath = path.join(tempStorageDir, 'herdr_config_embedded.toml');
+                const content = fs.readFileSync(embeddedPath, 'utf8');
+                const parsed: any = toml.parse(content);
+                expect(parsed.ui.accent).to.equal('yellow');
+                expect(parsed.ui.sidebar_start_collapsed).to.equal(true);
+                expect(parsed.ui.sidebar_collapsed_mode).to.equal('hidden');
+            } finally {
+                disposable.dispose();
+            }
         });
 
-        it('should notify configured and active custom sessions instead of hardcoding vscode on config reload', () => {
+        it('should notify configured and active custom sessions instead of hardcoding vscode on config reload', async () => {
             const executors = require('../../executors');
             const originalExecHerdr = executors.execHerdr;
             const recordedCalls: string[][] = [];
@@ -214,6 +216,7 @@ sidebar_collapsed_mode = "compact"
                 };
 
                 const disposable = setupConfigManager(mockContext, mockVscode, () => 'sidebar-extra');
+                await disposable.ready;
                 expect(recordedCalls).to.deep.include(['server', 'reload-config']);
                 expect(recordedCalls).to.deep.include(['--session', 'custom-team', 'server', 'reload-config']);
                 expect(recordedCalls).to.deep.include(['--session', 'sidebar-extra', 'server', 'reload-config']);
@@ -222,6 +225,12 @@ sidebar_collapsed_mode = "compact"
                 recordedCalls.length = 0;
                 configuredSession = 'renamed-session';
                 configChangeListener?.({ affectsConfiguration: (section: string) => section === 'herdr-collie.sessionName' });
+                await disposable.whenIdle();
+                expect(recordedCalls).to.deep.include(['--session', 'renamed-session', 'server', 'reload-config']);
+
+                // Disabling hideSidebar must also notify running sessions so TUI sidebar restores live
+                recordedCalls.length = 0;
+                await syncHerdrConfig(mockContext, false, 'renamed-session', mockVscode);
                 expect(recordedCalls).to.deep.include(['--session', 'renamed-session', 'server', 'reload-config']);
 
                 disposable.dispose();
@@ -230,12 +239,29 @@ sidebar_collapsed_mode = "compact"
             }
         });
 
+        it('should serialize concurrent syncHerdrConfig calls without losing the latest state', async () => {
+            const originalConfigFile = path.join(tempConfigDir, 'config.toml');
+            fs.writeFileSync(originalConfigFile, '[ui]\naccent = "first"\n', 'utf8');
+            setOriginalConfigPathForTesting(originalConfigFile);
+
+            const firstSync = syncHerdrConfig(mockContext, true);
+            fs.writeFileSync(originalConfigFile, '[ui]\naccent = "second"\n', 'utf8');
+            const secondSync = syncHerdrConfig(mockContext, true);
+
+            const [, embeddedPath] = await Promise.all([firstSync, secondSync]);
+            const content = fs.readFileSync(embeddedPath!, 'utf8');
+            const parsed: any = toml.parse(content);
+            expect(parsed.ui.accent).to.equal('second');
+        });
+
         it('reloadConfigForSessions falls back to vscode when omitted and skips duplicate --session default', () => {
             const executors = require('../../executors');
             const originalExecHerdr = executors.execHerdr;
             const recordedCalls: string[][] = [];
-            executors.execHerdr = (args: string[]) => {
+            const recordedOptions: any[] = [];
+            executors.execHerdr = (args: string[], optionsOrCb?: any) => {
                 recordedCalls.push(args);
+                recordedOptions.push(typeof optionsOrCb === 'object' ? optionsOrCb : undefined);
             };
 
             try {
@@ -243,6 +269,10 @@ sidebar_collapsed_mode = "compact"
                 expect(recordedCalls).to.deep.equal([
                     ['server', 'reload-config'],
                     ['--session', 'vscode', 'server', 'reload-config']
+                ]);
+                expect(recordedOptions).to.deep.equal([
+                    { skipAutoStart: true },
+                    { skipAutoStart: true }
                 ]);
 
                 recordedCalls.length = 0;
@@ -253,6 +283,62 @@ sidebar_collapsed_mode = "compact"
                 ]);
             } finally {
                 executors.execHerdr = originalExecHerdr;
+            }
+        });
+
+        it('keeps watcher state isolated per setupConfigManager handle and handles watcher errors safely', async () => {
+            const { EventEmitter } = require('events');
+            const fsModule = require('fs');
+            const originalWatch = fsModule.watch;
+            const watchers: Array<{ targetDir: string; emitter: any; closed: boolean }> = [];
+
+            fsModule.watch = (targetDir: string) => {
+                const emitter: any = new EventEmitter();
+                const entry = { targetDir, emitter, closed: false };
+                emitter.close = () => {
+                    entry.closed = true;
+                };
+                watchers.push(entry);
+                return emitter;
+            };
+
+            const dir1 = fs.mkdtempSync(path.join(os.tmpdir(), 'collie-watch-1-'));
+            const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'collie-watch-2-'));
+
+            try {
+                const cfg1 = path.join(dir1, 'config.toml');
+                const cfg2 = path.join(dir2, 'config.toml');
+                fs.writeFileSync(cfg1, '[ui]\naccent = "cyan"\n', 'utf8');
+                fs.writeFileSync(cfg2, '[ui]\naccent = "green"\n', 'utf8');
+
+                setOriginalConfigPathForTesting(cfg1);
+                const handle1 = setupConfigManager(mockContext);
+                await handle1.ready;
+
+                setOriginalConfigPathForTesting(cfg2);
+                const handle2 = setupConfigManager(mockContext);
+                await handle2.ready;
+
+                expect(watchers).to.have.lengthOf(2);
+                const w1 = watchers.find(w => w.targetDir === dir1)!;
+                const w2 = watchers.find(w => w.targetDir === dir2)!;
+                expect(w1).to.exist;
+                expect(w2).to.exist;
+
+                // Disposing handle1 should only close watcher 1, leaving watcher 2 intact
+                handle1.dispose();
+                expect(w1.closed).to.be.true;
+                expect(w2.closed).to.be.false;
+
+                // Watcher error event must not throw unhandled error and should close watcher 2 cleanly
+                w2.emitter.emit('error', new Error('ENOENT: dir removed'));
+                expect(w2.closed).to.be.true;
+
+                handle2.dispose();
+            } finally {
+                fsModule.watch = originalWatch;
+                fs.rmSync(dir1, { recursive: true, force: true });
+                fs.rmSync(dir2, { recursive: true, force: true });
             }
         });
     });

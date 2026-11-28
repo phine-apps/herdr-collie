@@ -15,7 +15,8 @@ import {
     getCurrentGitBranch,
     listGitWorktrees
 } from './worktreeManager';
-import { isSameOrSubPath } from './formatters';
+import { findAgentForWorktree, isSameOrSubPath } from './formatters';
+import { ensureWorkspaceTrustedForAction, isWorkspaceTrusted } from './workspaceTrust';
 
 export interface WorktreeTouchEntry {
     worktreePath: string;
@@ -223,10 +224,11 @@ export async function scanWorktreeFileConflicts(
     const mainWt = activeWorktrees.find(w => w.isMain || safeRealPath(w.worktree) === realRepoRoot) || activeWorktrees[0];
     const mainBranch = mainWt?.branch || await getCurrentGitBranch(repoRoot).catch(() => undefined);
 
+    const allWorktreePaths = activeWorktrees.map(w => w.worktree);
     const perWorktreeResults = await Promise.all(
         activeWorktrees.map(async (wt): Promise<PerWorktreeFileInput> => {
             const realWtPath = safeRealPath(wt.worktree);
-            const matchedAgent = activeAgents.find(a => a.cwd && isSameOrSubPath(safeRealPath(a.cwd), realWtPath));
+            const matchedAgent = findAgentForWorktree(wt.worktree, allWorktreePaths, activeAgents);
             const isMainWt = Boolean(wt.isMain || realWtPath === realRepoRoot);
             const branchName = wt.branch || path.basename(wt.worktree);
 
@@ -299,12 +301,14 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
 
     private readonly statusBarItem: vscode.StatusBarItem;
     private latestResult: ConflictScanResult | null = null;
+    private resolvedWorktreeRoots: string[] = [];
     private conflictsByRelPath = new Map<string, FileConflictCluster>();
     private scanTimer: NodeJS.Timeout | null = null;
     private inFlightScan: Promise<ConflictScanResult | null> | null = null;
     private lastScanCompletedAt = 0;
     private knownHighConflictFiles = new Set<string>();
     private lastAlertAt = 0;
+    private isDisposed = false;
 
     constructor(private readonly callbacks: ConflictRadarCallbacks) {
         this.statusBarItem = vscode.window.createStatusBarItem(
@@ -328,6 +332,25 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
                 })
             );
         }
+
+        if (vscode.workspace && typeof (vscode.workspace as any).onDidChangeConfiguration === 'function') {
+            this.disposables.push(
+                vscode.workspace.onDidChangeConfiguration((e) => {
+                    if (this.isDisposed) return;
+                    if (e.affectsConfiguration('herdr-collie.worktree.conflictRadar')) {
+                        if (!this.isEnabled()) {
+                            if (this.scanTimer) {
+                                clearTimeout(this.scanTimer);
+                                this.scanTimer = null;
+                            }
+                            this.clearVisualState();
+                        } else {
+                            this.scheduleScan(100);
+                        }
+                    }
+                })
+            );
+        }
     }
 
     public isEnabled(): boolean {
@@ -340,16 +363,13 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
     }
 
     public getConflictForFile(uriOrPath: vscode.Uri | string): FileConflictCluster | undefined {
-        if (!this.latestResult || this.conflictsByRelPath.size === 0) return undefined;
+        if (this.isDisposed || !this.latestResult || this.conflictsByRelPath.size === 0) return undefined;
         const targetPath = typeof uriOrPath === 'string' ? uriOrPath : uriOrPath.fsPath;
         if (!targetPath) return undefined;
 
         const resolvedTarget = safeRealPath(targetPath);
-        const roots = [this.latestResult.repoRoot, ...this.latestResult.worktreePaths];
-        for (const root of roots) {
-            if (!root) continue;
-            const resolvedRoot = safeRealPath(root);
-            if (!isSameOrSubPath(resolvedTarget, resolvedRoot)) continue;
+        for (const resolvedRoot of this.resolvedWorktreeRoots) {
+            if (!resolvedRoot || !isSameOrSubPath(resolvedTarget, resolvedRoot)) continue;
             const rel = normalizeRepoRelativePath(path.relative(resolvedRoot, resolvedTarget));
             const match = this.conflictsByRelPath.get(rel);
             if (match) return match;
@@ -358,7 +378,7 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
     }
 
     public provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
-        if (!this.isEnabled() || !uri || uri.scheme !== 'file') {
+        if (this.isDisposed || !this.isEnabled() || !uri || uri.scheme !== 'file') {
             return undefined;
         }
         const cluster = this.getConflictForFile(uri);
@@ -382,7 +402,10 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
     }
 
     public scheduleScan(delayMs = 600): void {
-        if (!this.isEnabled()) {
+        if (this.isDisposed) {
+            return;
+        }
+        if (!this.isEnabled() || !isWorkspaceTrusted(vscode)) {
             this.clearVisualState();
             return;
         }
@@ -391,12 +414,17 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
         }
         this.scanTimer = setTimeout(() => {
             this.scanTimer = null;
-            void this.scanNow(false);
+            if (!this.isDisposed) {
+                void this.scanNow(false);
+            }
         }, delayMs);
     }
 
     public async scanNow(force = true): Promise<ConflictScanResult | null> {
-        if (!this.isEnabled()) {
+        if (this.isDisposed) {
+            return null;
+        }
+        if (!this.isEnabled() || !isWorkspaceTrusted(vscode)) {
             this.clearVisualState();
             return null;
         }
@@ -413,12 +441,18 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
         const task = (async () => {
             try {
                 const repoRoot = await this.callbacks.getRepoRoot();
+                if (this.isDisposed) {
+                    return null;
+                }
                 if (!repoRoot) {
                     this.clearVisualState();
                     return null;
                 }
                 const agents = this.callbacks.getActiveAgents();
                 const result = await scanWorktreeFileConflicts(repoRoot, agents);
+                if (this.isDisposed) {
+                    return null;
+                }
                 this.applyScanResult(result, !force);
                 return result;
             } catch {
@@ -434,7 +468,13 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
     }
 
     private applyScanResult(result: ConflictScanResult, notifyNewHighConflict: boolean): void {
+        if (this.isDisposed) {
+            return;
+        }
         this.latestResult = result;
+        this.resolvedWorktreeRoots = Array.from(
+            new Set([result.repoRoot, ...result.worktreePaths].filter(Boolean).map(root => safeRealPath(root)))
+        );
         this.conflictsByRelPath.clear();
         for (const c of result.conflicts) {
             this.conflictsByRelPath.set(normalizeRepoRelativePath(c.filePath), c);
@@ -469,10 +509,10 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
 
         const highCount = result.conflicts.filter(c => c.severity === 'high').length;
         if (highCount > 0) {
-            this.statusBarItem.text = `$(warning) Overlap: ${count}`;
+            this.statusBarItem.text = `$(warning) ${l10n.t('Overlap: {0}', count)}`;
             this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
         } else {
-            this.statusBarItem.text = `$(git-compare) Overlap: ${count}`;
+            this.statusBarItem.text = `$(git-compare) ${l10n.t('Overlap: {0}', count)}`;
             this.statusBarItem.backgroundColor = undefined;
         }
 
@@ -487,27 +527,40 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
     private clearVisualState(): void {
         const hadData = Boolean(this.latestResult && this.latestResult.conflicts.length > 0);
         this.latestResult = null;
+        this.resolvedWorktreeRoots = [];
         this.conflictsByRelPath.clear();
         this.knownHighConflictFiles.clear();
         this.statusBarItem.hide();
-        if (hadData) {
+        if (hadData && !this.isDisposed) {
             this._onDidChangeFileDecorations.fire(undefined);
         }
     }
 
     private async showNewOverlapAlert(cluster: FileConflictCluster, totalCount: number): Promise<void> {
+        if (this.isDisposed) {
+            return;
+        }
         const branches = cluster.touches.map(t => t.branchName).join(', ');
         const inspectBtn = l10n.t('Inspect Overlaps');
         const choice = await vscode.window.showWarningMessage(
             l10n.t("Parallel edit detected on '{0}' ({1}) — {2} overlapping file(s).", cluster.filePath, branches, String(totalCount)),
             inspectBtn
         );
-        if (choice === inspectBtn) {
+        if (!this.isDisposed && choice === inspectBtn) {
             await this.showConflictRadarWizard();
         }
     }
 
     public async showConflictRadarWizard(): Promise<void> {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+            return;
+        }
+        if (!this.isEnabled()) {
+            vscode.window.showInformationMessage(
+                l10n.t("Parallel Worktree Conflict Radar is currently disabled in settings ('herdr-collie.worktree.conflictRadar').")
+            );
+            return;
+        }
         const result = await this.scanNow(true);
         if (!result || result.worktreeCount < 2) {
             vscode.window.showInformationMessage(l10n.t('Need at least 2 Git worktrees to scan for parallel edit overlaps.'));
@@ -522,9 +575,9 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
         const pickedCluster = await vscode.window.showQuickPick(
             result.conflicts.map(c => ({
                 label: `${c.severity === 'high' ? '$(warning)' : '$(git-compare)'} ${c.filePath}`,
-                description: `${c.touches.length} worktrees (${c.severity.toUpperCase()})`,
+                description: l10n.t('{0} worktrees ({1})', c.touches.length, c.severity.toUpperCase()),
                 detail: c.touches
-                    .map(t => `${t.branchName}${t.dirty ? ' [uncommitted]' : ''}${t.agentName ? ` • ${t.agentName}` : ''}`)
+                    .map(t => `${t.branchName}${t.dirty ? l10n.t(' [uncommitted]') : ''}${t.agentName ? ` • ${t.agentName}` : ''}`)
                     .join('  ⚔  '),
                 cluster: c
             })),
@@ -600,7 +653,7 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
         const picked = await vscode.window.showQuickPick(
             cluster.touches.map(t => ({
                 label: `$(git-branch) ${t.branchName}`,
-                description: `${t.dirty ? 'uncommitted' : 'committed'}${t.agentName ? ` | Agent: ${t.agentName}` : ''}`,
+                description: `${t.dirty ? l10n.t('uncommitted') : l10n.t('committed')}${t.agentName ? l10n.t(' | Agent: {0}', t.agentName) : ''}`,
                 detail: t.worktreePath,
                 touch: t
             })),
@@ -640,6 +693,11 @@ export class WorktreeConflictRadar implements vscode.FileDecorationProvider, vsc
     }
 
     public dispose(): void {
+        this.isDisposed = true;
+        this.latestResult = null;
+        this.resolvedWorktreeRoots = [];
+        this.conflictsByRelPath.clear();
+        this.knownHighConflictFiles.clear();
         if (this.scanTimer) {
             clearTimeout(this.scanTimer);
             this.scanTimer = null;

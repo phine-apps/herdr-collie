@@ -1,7 +1,7 @@
 # Herdr Collie
 
 [![Visual Studio Marketplace Version](https://img.shields.io/visual-studio-marketplace/v/phine-apps.herdr-collie?color=blue&label=VS%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=phine-apps.herdr-collie)
-[![VS Code Engine](https://img.shields.io/badge/vscode-%5E1.90.0-informational.svg)](https://code.visualstudio.com/)
+[![VS Code Engine](https://img.shields.io/badge/vscode-%5E1.93.0-informational.svg)](https://code.visualstudio.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![L10n: English | 日本語 | 简体中文](https://img.shields.io/badge/i18n-EN%20%7C%20JA%20%7C%20ZH-success.svg)](package.nls.json)
 
@@ -179,7 +179,7 @@ Herdr Collie provides conflict-free 2-stroke chord shortcuts prefixed by `Ctrl +
 ## ⚙️ Requirements & Configuration
 
 - **Requirements**:
-  - Visual Studio Code 1.90.0 or higher
+  - Visual Studio Code 1.93.0 or higher
   - Herdr CLI available in your system `PATH`
   - Git CLI installed (for Git Worktree and SCM integration)
   - GitHub CLI (`gh`, optional — enables creating worktrees from GitHub Issues, creating PRs, and sending failing PR checks to agents)

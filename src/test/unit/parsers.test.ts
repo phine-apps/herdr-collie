@@ -9,6 +9,7 @@ import {
     parsePanes,
     parseSnapshotWorkspaces, 
     parseSnapshotAgents, 
+    parseSnapshotPanes,
     parseSnapshotTabs,
     parseTabs,
     parseSessions,
@@ -620,6 +621,80 @@ detached
                 state: 'outdated',
                 available: false
             });
+        });
+    });
+
+    describe('Empty string fallback & numeric zero handling', () => {
+        it('falls back past empty string fields in parseAgents, parsePanes, parseWorkspaces, and parseTabs', () => {
+            const workspaces = parseWorkspaces(JSON.stringify({
+                workspaces: [
+                    { workspace_id: '', name: 'ws-name', number: 0 }
+                ]
+            }));
+            expect(workspaces).to.have.lengthOf(1);
+            expect(workspaces[0].id).to.equal('ws-name');
+            expect(workspaces[0].label).to.equal('Workspace 0');
+
+            const panes = parsePanes(JSON.stringify({
+                panes: [
+                    { pane_id: '', id: 'p-1', name: '', foreground_cwd: '', cwd: '/repo/app' }
+                ]
+            }));
+            expect(panes).to.have.lengthOf(1);
+            expect(panes[0].id).to.equal('p-1');
+            expect(panes[0].cwd).to.equal('/repo/app');
+
+            const agents = parseAgents(JSON.stringify({
+                agents: [
+                    { pane_id: '', id: 'w1:p2', name: '', agent: 'claude', agent_status: '', status: '' },
+                    { pane_id: 'w1:p3', name: '', agent: '', agent_status: 'working' }
+                ]
+            }));
+            expect(agents).to.have.lengthOf(2);
+            expect(agents[0].id).to.equal('w1:p2');
+            expect(agents[0].name).to.equal('claude');
+            expect(agents[0].status).to.equal('idle');
+            expect(agents[1].name).to.equal('w1:p3');
+
+            const tabs = parseTabs(JSON.stringify({
+                tabs: [{ tab_id: '', id: 't-0', label: '', number: 0 }]
+            }));
+            expect(tabs).to.have.lengthOf(1);
+            expect(tabs[0].id).to.equal('t-0');
+            expect(tabs[0].label).to.equal('0');
+        });
+
+        it('falls back past empty string fields in snapshot parsers and parseIntegrationListResult', () => {
+            const snapshot = {
+                workspaces: [{ workspace_id: '', name: '', id: 'w-snap', number: 0 }],
+                panes: [{ pane_id: 'p-snap', name: '', workspace_id: 'w-snap', foreground_cwd: '', cwd: '/repo/wt' }],
+                agents: [{ pane_id: '', id: 'p-snap', name: '', agent: 'codex', agent_status: '', status: '' }]
+            };
+
+            const ws = parseSnapshotWorkspaces(snapshot);
+            expect(ws).to.have.lengthOf(1);
+            expect(ws[0].id).to.equal('w-snap');
+            expect(ws[0].label).to.equal('wt');
+
+            const panes = parseSnapshotPanes(snapshot);
+            expect(panes).to.have.lengthOf(1);
+            expect(panes[0].name).to.equal('p-snap');
+            expect(panes[0].cwd).to.equal('/repo/wt');
+
+            const agents = parseSnapshotAgents(snapshot, ws);
+            expect(agents).to.have.lengthOf(1);
+            expect(agents[0].id).to.equal('p-snap');
+            expect(agents[0].name).to.equal('codex');
+            expect(agents[0].status).to.equal('idle');
+            expect(agents[0].workspaceCwd).to.equal('/repo/wt');
+
+            const integrations = parseIntegrationListResult([
+                { target: 'claude', label: '', command: '', state: '', available: true }
+            ]);
+            expect(integrations).to.have.lengthOf(1);
+            expect(integrations[0].label).to.equal('claude');
+            expect(integrations[0].command).to.equal('claude');
+            expect(integrations[0].state).to.equal('not_installed');
         });
     });
 });

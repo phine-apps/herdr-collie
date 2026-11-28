@@ -7,7 +7,8 @@ import * as l10n from '@vscode/l10n';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as cp from 'child_process';
-import { execHerdr, isCommandAvailable, runGitCmd } from './executors';
+import { execHerdr, getErrorMessage, isCommandAvailable, runGitCmd } from './executors';
+import { ensureWorkspaceTrustedForAction } from './workspaceTrust';
 import {
     parseGitWorktrees,
     GitWorktreeInfo,
@@ -131,7 +132,7 @@ export async function fetchIntegrationStatuses(socketClient?: HerdrSocketClient)
     }
 
     return await new Promise<ParsedIntegrationInfo[]>((resolve) => {
-        execHerdr(['integration', 'status'], (err: any, stdout: string) => {
+        execHerdr(['integration', 'status'], (err, stdout) => {
             if (!err && stdout) {
                 resolve(parseIntegrationStatus(stdout));
             } else {
@@ -159,7 +160,7 @@ export async function installHerdrIntegration(target: string, socketClient?: Her
     }
 
     return await new Promise<boolean>((resolve) => {
-        execHerdr(['integration', 'install', cliTarget], (err: any) => {
+        execHerdr(['integration', 'install', cliTarget], (err) => {
             resolve(!err);
         });
     });
@@ -183,7 +184,7 @@ export async function uninstallHerdrIntegration(target: string, socketClient?: H
     }
 
     return await new Promise<boolean>((resolve) => {
-        execHerdr(['integration', 'uninstall', cliTarget], (err: any) => {
+        execHerdr(['integration', 'uninstall', cliTarget], (err) => {
             resolve(!err);
         });
     });
@@ -249,9 +250,11 @@ export function quoteForShell(str: string): string {
  * Builds the full agent launch command line string, appending the quoted prompt if provided
  */
 export function buildAgentLaunchCommand(agentCmd: string, prompt?: string): string {
-    const trimmedCmd = agentCmd.trim();
-    // Normalize newlines in prompt to spaces to prevent terminal shell splitting / breakout
-    const normalizedPrompt = prompt ? prompt.replace(/[\r\n]+/g, ' ').trim() : undefined;
+    const trimmedCmd = stripTerminalControlSequences(agentCmd).replace(/[\r\n\t]+/g, ' ').trim();
+    // Strip terminal control sequences and normalize newlines/tabs to spaces to prevent live PTY injection/breakout
+    const normalizedPrompt = prompt
+        ? stripTerminalControlSequences(prompt).replace(/[\r\n\t]+/g, ' ').trim()
+        : undefined;
 
     if (!trimmedCmd) {
         return '';
@@ -272,7 +275,21 @@ export function validateBranchName(val: string): string | null {
     const trimmed = val.trim();
     if (trimmed.startsWith('-')) return l10n.t('Branch name cannot start with a hyphen (-)');
     if (/\s/.test(trimmed)) return l10n.t('Branch name cannot contain spaces');
-    if (/[\0~^:?*\[\\]|\.\.|\/\/|@\{/.test(trimmed)) return l10n.t('Branch name contains invalid Git ref characters');
+    if (
+        /[\0~^:?*\[\\]|\.\.|\/\/|@\{/.test(trimmed) ||
+        trimmed === '.' ||
+        trimmed === '@' ||
+        trimmed.startsWith('/') ||
+        trimmed.endsWith('/') ||
+        trimmed.endsWith('.') ||
+        trimmed.endsWith('.lock')
+    ) {
+        return l10n.t('Branch name contains invalid Git ref characters');
+    }
+    const slug = sanitizeBranchSlug(trimmed);
+    if (!slug || slug === '.' || slug === '..') {
+        return l10n.t('Branch name contains invalid Git ref characters');
+    }
     return null;
 }
 
@@ -294,6 +311,29 @@ export async function getRepoRoot(cwd: string): Promise<string | null> {
     } catch {
         return null;
     }
+}
+
+/**
+ * Resolves the primary (main) repository root from either the main repo or a linked worktree path.
+ */
+export async function resolveMainRepoRootFromPath(targetPath?: string): Promise<string | null> {
+    if (!targetPath) {
+        return null;
+    }
+    const topLevel = await getRepoRoot(targetPath);
+    if (!topLevel) {
+        return null;
+    }
+    try {
+        const worktrees = await listGitWorktrees(topLevel);
+        const mainWt = worktrees.find(w => w.isMain);
+        if (mainWt?.worktree) {
+            return mainWt.worktree;
+        }
+    } catch {
+        // Fall back to rev-parse toplevel
+    }
+    return topLevel;
 }
 
 /**
@@ -479,9 +519,9 @@ export async function bootstrapWorktreeEnvironment(
                 skippedFiles.push(normalizedRel);
                 continue;
             }
-        } catch (err: any) {
+        } catch (err: unknown) {
             skippedFiles.push(normalizedRel);
-            warnings.push(l10n.t('Failed to copy {0}: {1}', normalizedRel, err?.message || String(err)));
+            warnings.push(l10n.t('Failed to copy {0}: {1}', normalizedRel, getErrorMessage(err)));
             continue;
         }
 
@@ -530,9 +570,9 @@ export async function bootstrapWorktreeEnvironment(
             }
             fs.copyFileSync(realSrc, destCandidate);
             copiedFiles.push(normalizedRel);
-        } catch (err: any) {
+        } catch (err: unknown) {
             skippedFiles.push(normalizedRel);
-            warnings.push(l10n.t('Failed to copy {0}: {1}', normalizedRel, err?.message || String(err)));
+            warnings.push(l10n.t('Failed to copy {0}: {1}', normalizedRel, getErrorMessage(err)));
         }
     }
 
@@ -575,7 +615,7 @@ export async function bootstrapWorktreeEnvironment(
             shellBin,
             shellArgs,
             { cwd: worktreePath, env, timeout: timeoutMs, maxBuffer: 5 * 1024 * 1024 },
-            (error: any, stdout: string, stderr: string) => {
+            (error, stdout, stderr) => {
                 if (error) {
                     const rawDetail = (stderr && stderr.trim()) || (stdout && stdout.trim()) || error.message || String(error);
                     const compact = rawDetail.replace(/[\r\n]+/g, ' ').trim().slice(0, 240);
@@ -686,6 +726,19 @@ export async function verifyWorktreeMerge(
             // Ignore worktree status inspection failure
         }
     }
+    if (fs.existsSync(repoRoot) && (!resolvedWtPath || path.resolve(repoRoot) !== path.resolve(resolvedWtPath))) {
+        try {
+            const rootStatusOut = await runGitCmd(['status', '--porcelain', '--untracked-files=no'], repoRoot);
+            const rootStatusLines = rootStatusOut.split(/\r?\n/).filter(Boolean);
+            for (const line of rootStatusLines) {
+                if (line.length >= 3) {
+                    uncommittedFiles.push(`[${targetBranch}] ${line.substring(3).trim()}`);
+                }
+            }
+        } catch {
+            // Ignore main repo status inspection failure
+        }
+    }
 
     let hasConflicts = false;
     let conflictingFiles: string[] = [];
@@ -693,8 +746,8 @@ export async function verifyWorktreeMerge(
 
     try {
         await runGitCmd(['merge-tree', '--write-tree', 'HEAD', branchName], repoRoot);
-    } catch (err: any) {
-        const msg = String(err?.message || err || '');
+    } catch (err: unknown) {
+        const msg = getErrorMessage(err);
         if (/CONFLICT|Merge conflict/i.test(msg)) {
             hasConflicts = true;
             conflictingFiles = parseMergeConflictFiles(msg);
@@ -1003,6 +1056,9 @@ export function resolveWorktreePath(
 ): string {
     const repoBasename = path.basename(repoRoot);
     const slug = sanitizeBranchSlug(branchName);
+    if (!slug || slug === '.' || slug === '..') {
+        throw new Error(l10n.t('Branch name contains invalid Git ref characters'));
+    }
 
     if (locationPreference === '.worktrees') {
         return path.join(repoRoot, '.worktrees', slug);
@@ -1111,6 +1167,17 @@ export interface StartAgentInPaneResult {
     prompted: boolean;
 }
 
+function classifyAgentStartError(err: unknown): 'timeout' | 'already_exists' | 'other' {
+    const msg = getErrorMessage(err);
+    if (/timed?\s*out|timeout|ETIMEDOUT/i.test(msg)) {
+        return 'timeout';
+    }
+    if (/already[\s_-]*(exists|running|started)|pane[\s_-]*busy/i.test(msg)) {
+        return 'already_exists';
+    }
+    return 'other';
+}
+
 /**
  * Starts an interactive agent in an existing Herdr pane.
  * Uses native `agent.start` + `agent.prompt` when `agentKind` is known, falling back
@@ -1122,6 +1189,7 @@ export async function startAgentInPane(options: StartAgentInPaneOptions): Promis
 
     if (agentKind) {
         let nativeStarted = false;
+        let skipDuplicateRetry = false;
 
         if (socketClient && socketClient.isConnected) {
             try {
@@ -1132,17 +1200,31 @@ export async function startAgentInPane(options: StartAgentInPaneOptions): Promis
                     timeoutMs: 30000
                 });
                 nativeStarted = true;
-            } catch {
+            } catch (err) {
                 nativeStarted = false;
+                const kind = classifyAgentStartError(err);
+                if (kind === 'timeout' || kind === 'already_exists') {
+                    skipDuplicateRetry = true;
+                }
             }
         }
 
-        if (!nativeStarted) {
+        if (!nativeStarted && !skipDuplicateRetry) {
             nativeStarted = await new Promise<boolean>((resolve) => {
                 execHerdr(
                     ['--session', sessionName, 'agent', 'start', agentName, '--kind', agentKind, '--pane', paneId, '--timeout', '30000'],
                     { cwd },
-                    (err: any) => resolve(!err)
+                    (err, stdout, stderr) => {
+                        if (err) {
+                            const errKind = classifyAgentStartError(stderr || stdout || err);
+                            if (errKind === 'timeout' || errKind === 'already_exists') {
+                                skipDuplicateRetry = true;
+                            }
+                            resolve(false);
+                            return;
+                        }
+                        resolve(true);
+                    }
                 );
             });
         }
@@ -1163,12 +1245,16 @@ export async function startAgentInPane(options: StartAgentInPaneOptions): Promis
                         execHerdr(
                             ['--session', sessionName, 'agent', 'prompt', agentName, trimmedPrompt],
                             { cwd },
-                            (err: any) => resolve(!err)
+                            (err) => resolve(!err)
                         );
                     });
                 }
             }
             return { method: 'native', started: true, prompted };
+        }
+
+        if (skipDuplicateRetry) {
+            return { method: 'native', started: false, prompted: false };
         }
     }
 
@@ -1188,7 +1274,7 @@ export async function startAgentInPane(options: StartAgentInPaneOptions): Promis
     }
 
     const fallbackOk = await new Promise<boolean>((resolve) => {
-        execHerdr(['--session', sessionName, 'pane', 'send-text', paneId, `${launchCmd}\n`], { cwd }, (err: any) => {
+        execHerdr(['--session', sessionName, 'pane', 'send-text', paneId, `${launchCmd}\n`], { cwd }, (err) => {
             resolve(!err);
         });
     });
@@ -1242,11 +1328,15 @@ export async function createHerdrWorkspace(options: CreateHerdrWorkspaceOptions)
     let tabId = '';
     let rootPaneId = '';
 
-    const extractIds = (raw: any) => {
-        const res = raw?.result || raw;
-        if (res?.workspace?.workspace_id) workspaceId = String(res.workspace.workspace_id);
-        if (res?.tab?.tab_id) tabId = String(res.tab.tab_id);
-        if (res?.root_pane?.pane_id) rootPaneId = String(res.root_pane.pane_id);
+    const isRecord = (v: unknown): v is Record<string, unknown> =>
+        typeof v === 'object' && v !== null && !Array.isArray(v);
+
+    const extractIds = (raw: unknown) => {
+        if (!isRecord(raw)) return;
+        const res = isRecord(raw.result) ? raw.result : raw;
+        if (isRecord(res.workspace) && res.workspace.workspace_id) workspaceId = String(res.workspace.workspace_id);
+        if (isRecord(res.tab) && res.tab.tab_id) tabId = String(res.tab.tab_id);
+        if (isRecord(res.root_pane) && res.root_pane.pane_id) rootPaneId = String(res.root_pane.pane_id);
     };
 
     if (socketClient && socketClient.isConnected) {
@@ -1266,7 +1356,7 @@ export async function createHerdrWorkspace(options: CreateHerdrWorkspaceOptions)
         createArgs.push(focus ? '--focus' : '--no-focus');
 
         await new Promise<void>((resolve, reject) => {
-            execHerdr(createArgs, (err: any, stdout: string) => {
+            execHerdr(createArgs, (err, stdout) => {
                 if (err) {
                     reject(err);
                     return;
@@ -1283,10 +1373,10 @@ export async function createHerdrWorkspace(options: CreateHerdrWorkspaceOptions)
         try {
             const [rawWorkspaces, rawPanes] = await Promise.all([
                 new Promise<string>((resolve) => {
-                    execHerdr(['--session', sessionName, 'workspace', 'list'], (_err: any, stdout: string) => resolve(stdout || ''));
+                    execHerdr(['--session', sessionName, 'workspace', 'list'], (_err, stdout) => resolve(stdout || ''));
                 }),
                 new Promise<string>((resolve) => {
-                    execHerdr(['--session', sessionName, 'pane', 'list'], (_err: any, stdout: string) => resolve(stdout || ''));
+                    execHerdr(['--session', sessionName, 'pane', 'list'], (_err, stdout) => resolve(stdout || ''));
                 })
             ]);
 
@@ -1336,10 +1426,14 @@ export interface SplitHerdrPaneOptions {
 export async function splitHerdrPane(options: SplitHerdrPaneOptions): Promise<string> {
     const { sessionName, direction, targetPaneId, workspaceId, cwd, ratio, focus = false, socketClient } = options;
 
-    const extractPaneId = (raw: any): string => {
-        const res = raw?.result || raw;
-        if (res?.pane?.pane_id) return String(res.pane.pane_id);
-        if (res?.pane_id) return String(res.pane_id);
+    const isRecord = (v: unknown): v is Record<string, unknown> =>
+        typeof v === 'object' && v !== null && !Array.isArray(v);
+
+    const extractPaneId = (raw: unknown): string => {
+        if (!isRecord(raw)) return '';
+        const res = isRecord(raw.result) ? raw.result : raw;
+        if (isRecord(res.pane) && res.pane.pane_id) return String(res.pane.pane_id);
+        if (res.pane_id) return String(res.pane_id);
         return '';
     };
 
@@ -1375,7 +1469,7 @@ export async function splitHerdrPane(options: SplitHerdrPaneOptions): Promise<st
     args.push(focus ? '--focus' : '--no-focus');
 
     return await new Promise<string>((resolve, reject) => {
-        execHerdr(args, { cwd }, (err: any, stdout: string) => {
+        execHerdr(args, { cwd }, (err, stdout) => {
             if (err) {
                 reject(err);
                 return;
@@ -1395,6 +1489,9 @@ export async function splitHerdrPane(options: SplitHerdrPaneOptions): Promise<st
  */
 export async function manageIntegrationsWizard(socketClient?: HerdrSocketClient): Promise<void> {
     if (!vscode) return;
+    if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+        return;
+    }
 
     const integrations = await vscode.window.withProgress(
         {
@@ -1451,7 +1548,7 @@ export async function manageIntegrationsWizard(socketClient?: HerdrSocketClient)
         const detailParts = [info.details, info.path].filter(Boolean);
         items.push({
             label: `${icon} ${info.cliTarget}`,
-            description: stateLabel + (info.experimental ? ' (experimental)' : ''),
+            description: stateLabel + (info.experimental ? l10n.t(' (experimental)') : ''),
             detail: detailParts.join(' — ') || undefined,
             action: 'toggle',
             integration: info
@@ -1571,6 +1668,23 @@ export function formatCreatePullRequestPrompt(
 }
 
 /**
+ * Normalizes a candidate Git base reference into a remote/PR branch name suitable for `gh pr create --base`.
+ * Strips `refs/remotes/<remote>/` and `origin/` prefixes, and rejects detached `HEAD`.
+ */
+export function normalizePrBaseBranch(rawBase?: string): string {
+    if (!rawBase) return '';
+    const stripped = rawBase
+        .trim()
+        .replace(/^refs\/remotes\/[^/]+\//, '')
+        .replace(/^origin\//, '')
+        .trim();
+    if (!stripped || stripped === 'HEAD') {
+        return '';
+    }
+    return stripped;
+}
+
+/**
  * Pushes a worktree branch to origin and creates a Pull Request using GitHub CLI (`gh`).
  */
 export async function pushAndCreatePullRequestWithGh(
@@ -1584,14 +1698,18 @@ export async function pushAndCreatePullRequestWithGh(
     if (branchErr) {
         throw new Error(branchErr);
     }
-    const baseErr = validateBranchName(baseBranch);
+    const cleanBaseBranch = normalizePrBaseBranch(baseBranch);
+    if (!cleanBaseBranch) {
+        throw new Error(l10n.t('Failed to resolve a valid PR base branch (current repo is detached HEAD).'));
+    }
+    const baseErr = validateBranchName(cleanBaseBranch);
     if (baseErr) {
         throw new Error(baseErr);
     }
 
     await runGitCmd(['push', '-u', 'origin', branchName], worktreePath);
 
-    const ghArgs = ['pr', 'create', '--base', baseBranch, '--head', branchName, '--title', title];
+    const ghArgs = ['pr', 'create', '--base', cleanBaseBranch, '--head', branchName, '--title', title];
     if (body && body.trim()) {
         ghArgs.push('--body', body.trim());
     } else {
@@ -1599,7 +1717,7 @@ export async function pushAndCreatePullRequestWithGh(
     }
 
     return await new Promise<string>((resolve, reject) => {
-        cp.execFile('gh', ghArgs, { cwd: worktreePath }, (error: any, stdout: string, stderr: string) => {
+        cp.execFile('gh', ghArgs, { cwd: worktreePath }, (error, stdout, stderr) => {
             if (error) {
                 const msg = (stderr && stderr.trim()) || (stdout && stdout.trim()) || error.message || 'gh pr create failed';
                 reject(new Error(msg));
@@ -1629,7 +1747,13 @@ export function parseGitHubIssuesJson(rawJson: string): GitHubIssueSummary[] {
             }
             const labels = Array.isArray(item.labels)
                 ? item.labels
-                    .map((l: any) => (typeof l === 'string' ? l : (l && typeof l.name === 'string' ? l.name : '')))
+                    .map((l: unknown) => {
+                        if (typeof l === 'string') return l;
+                        if (typeof l === 'object' && l !== null && 'name' in l && typeof (l as { name?: unknown }).name === 'string') {
+                            return (l as { name: string }).name;
+                        }
+                        return '';
+                    })
                     .filter(Boolean)
                 : [];
             issues.push({
@@ -1672,7 +1796,7 @@ export async function fetchOpenGitHubIssues(repoRoot: string, limit: number = 25
             'gh',
             ['issue', 'list', '--state', 'open', '--limit', String(safeLimit), '--json', 'number,title,body,labels,url'],
             { cwd: repoRoot, timeout: 8000, maxBuffer: 5 * 1024 * 1024 },
-            (error: any, stdout: string) => {
+            (error, stdout) => {
                 if (error || !stdout) {
                     resolve([]);
                     return;
@@ -1747,7 +1871,7 @@ export async function fetchFailingPrChecksWithLogs(
                 'gh',
                 ['pr', 'checks', branchName, '--json', jsonFields],
                 { cwd: worktreePath, timeout: 8000, maxBuffer: 5 * 1024 * 1024 },
-                (error: any, stdout: string, stderr: string) => {
+                (error, stdout, stderr) => {
                     // `gh pr checks` may exit non-zero when checks are failing even if JSON stdout is valid
                     if (stdout && stdout.trim().startsWith('[')) {
                         resolve({ checks: parseFailingPrChecksJson(stdout) });
@@ -1789,7 +1913,7 @@ export async function fetchFailingPrChecksWithLogs(
             'gh',
             ['run', 'view', firstRunId, '--log-failed'],
             { cwd: worktreePath, timeout: 8000, maxBuffer: 5 * 1024 * 1024 },
-            (error: any, stdout: string) => {
+            (error, stdout) => {
                 if (error || !stdout || !stdout.trim()) {
                     resolve(undefined);
                     return;
@@ -1815,17 +1939,22 @@ export async function launchWorktreeAgentWizard(
     onSuccess?: () => void,
     socketClient?: HerdrSocketClient
 ): Promise<void> {
+    if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+        return;
+    }
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
         vscode.window.showErrorMessage(l10n.t('Please open a folder inside a Git repository first.'));
         return;
     }
 
-    const activeDocPath = vscode.window.activeTextEditor?.document?.uri?.fsPath;
-    let repoRoot: string | null = activeDocPath ? await getRepoRoot(path.dirname(activeDocPath)) : null;
+    const activeDocUri = vscode.window.activeTextEditor?.document?.uri;
+    let repoRoot: string | null = activeDocUri?.scheme === 'file' && activeDocUri.fsPath
+        ? await resolveMainRepoRootFromPath(path.dirname(activeDocUri.fsPath))
+        : null;
     if (!repoRoot) {
         for (const folder of workspaceFolders) {
-            repoRoot = await getRepoRoot(folder.uri.fsPath);
+            repoRoot = await resolveMainRepoRootFromPath(folder.uri.fsPath);
             if (repoRoot) break;
         }
     }
@@ -1892,7 +2021,7 @@ export async function launchWorktreeAgentWizard(
         }
     }
 
-    const branchName = await vscode.window.showInputBox({
+    const rawBranchName = await vscode.window.showInputBox({
         title: l10n.t('Herdr Swarm: Branch Name'),
         prompt: l10n.t('Enter a branch name for the new agent worktree'),
         placeHolder: l10n.t('e.g. feat/user-auth, fix/issue-42'),
@@ -1900,6 +2029,8 @@ export async function launchWorktreeAgentWizard(
         validateInput: validateBranchName
     });
 
+    if (!rawBranchName) return;
+    const branchName = rawBranchName.trim();
     if (!branchName) return;
 
     // 2. Base branch selection
@@ -1927,7 +2058,15 @@ export async function launchWorktreeAgentWizard(
     const defaultAgent = config.get<string>('defaultAgentCommand', 'claude');
 
     const integrations = await fetchIntegrationStatuses(socketClient).catch(() => [] as ParsedIntegrationInfo[]);
-    const agentOptions = await getInstalledAgentOptions(socketClient, integrations);
+    const rawAgentOptions = await getInstalledAgentOptions(socketClient, integrations);
+    const normalizedDefault = (defaultAgent || '').trim().toLowerCase();
+    const agentOptions = [...rawAgentOptions].sort((a, b) => {
+        const aMatches = a.cmd && normalizedDefault && (a.cmd === defaultAgent || a.cmd.toLowerCase() === normalizedDefault);
+        const bMatches = b.cmd && normalizedDefault && (b.cmd === defaultAgent || b.cmd.toLowerCase() === normalizedDefault);
+        if (aMatches && !bMatches) return -1;
+        if (!aMatches && bMatches) return 1;
+        return 0;
+    });
 
     let chosenAgentCmd = defaultAgent;
     let chosenAgentKind: string | undefined;
@@ -1942,10 +2081,11 @@ export async function launchWorktreeAgentWizard(
         const customCmd = await vscode.window.showInputBox({
             title: l10n.t('Custom Agent Command'),
             prompt: l10n.t('Enter command to run inside the worktree workspace'),
+            value: defaultAgent && defaultAgent !== 'CUSTOM' ? defaultAgent : undefined,
             placeHolder: l10n.t('e.g. claude --dangerously-skip-permissions')
         });
-        if (!customCmd) return;
-        chosenAgentCmd = customCmd;
+        if (!customCmd || !customCmd.trim()) return;
+        chosenAgentCmd = customCmd.trim();
     } else {
         chosenAgentCmd = selectedAgent.cmd;
         chosenAgentKind = selectedAgent.agentKind;
@@ -1971,6 +2111,7 @@ export async function launchWorktreeAgentWizard(
             prompt: l10n.t('Enter initial instructions or task description for the agent'),
             placeHolder: l10n.t('e.g. Implement OAuth2 Google login flow and write unit tests')
         });
+        if (prompt === undefined) return;
     }
 
     // 5. Worktree Location resolution
@@ -1994,8 +2135,8 @@ export async function launchWorktreeAgentWizard(
         progress.report({ message: l10n.t('Creating Git Worktree...') });
         try {
             await createWorktree(repoRoot, branchName, worktreePath, selectedBase.branchName);
-        } catch (err: any) {
-            vscode.window.showErrorMessage(l10n.t('Failed to create Git Worktree: {0}', err.message || err));
+        } catch (err: unknown) {
+            vscode.window.showErrorMessage(l10n.t('Failed to create Git Worktree: {0}', getErrorMessage(err)));
             return;
         }
 
@@ -2025,17 +2166,19 @@ export async function launchWorktreeAgentWizard(
             });
             targetWorkspaceId = wsResult.workspaceId;
             targetPaneId = wsResult.rootPaneId;
-        } catch (err: any) {
-            vscode.window.showErrorMessage(l10n.t('Failed to create Herdr Workspace: {0}', err.message || err));
+        } catch (err: unknown) {
+            vscode.window.showErrorMessage(l10n.t('Failed to create Herdr Workspace: {0}', getErrorMessage(err)));
             return;
         }
 
         // Spawn agent if agent command specified
+        let agentLaunched = !chosenAgentCmd;
+        let promptDeliveryFailed = false;
         if (chosenAgentCmd) {
             progress.report({ message: l10n.t('Starting Agent ({0})...', chosenAgentCmd) });
             if (targetPaneId) {
                 const agentName = sanitizeAgentName(branchName, existingAgentNames);
-                await startAgentInPane({
+                const startRes = await startAgentInPane({
                     sessionName,
                     paneId: targetPaneId,
                     agentName,
@@ -2045,6 +2188,14 @@ export async function launchWorktreeAgentWizard(
                     cwd: worktreePath,
                     socketClient
                 });
+                agentLaunched = startRes.started;
+                if (!startRes.started) {
+                    vscode.window.showWarningMessage(
+                        l10n.t("Workspace '{0}' was created, but failed to launch agent ({1}). You can attach the terminal to start it manually.", branchName, chosenAgentCmd)
+                    );
+                } else if (prompt && prompt.trim() && !startRes.prompted) {
+                    promptDeliveryFailed = true;
+                }
             } else {
                 vscode.window.showWarningMessage(l10n.t("Workspace '{0}' was created, but initial pane could not be determined. Please start the agent manually in the terminal.", branchName));
             }
@@ -2054,14 +2205,24 @@ export async function launchWorktreeAgentWizard(
             onSuccess();
         }
 
+        if (!agentLaunched) {
+            return;
+        }
+
         // Show completed notification with actions
         const openWindowBtn = l10n.t('Open in VS Code Window');
         const attachTerminalBtn = l10n.t('Attach Terminal');
-        const action = await vscode.window.showInformationMessage(
-            l10n.t("🚀 Agent launched in worktree '{0}' ({1})", branchName, worktreePath),
-            openWindowBtn,
-            attachTerminalBtn
-        );
+        const action = promptDeliveryFailed
+            ? await vscode.window.showWarningMessage(
+                l10n.t("Agent launched in worktree '{0}', but failed to deliver the initial prompt. Please inspect the terminal or resend it.", branchName),
+                openWindowBtn,
+                attachTerminalBtn
+            )
+            : await vscode.window.showInformationMessage(
+                l10n.t("🚀 Agent launched in worktree '{0}' ({1})", branchName, worktreePath),
+                openWindowBtn,
+                attachTerminalBtn
+            );
 
         if (action === openWindowBtn) {
             vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(worktreePath), { forceNewWindow: true });

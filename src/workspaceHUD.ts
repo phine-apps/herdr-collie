@@ -16,6 +16,7 @@ import {
 } from './parsers';
 import { execHerdr } from './executors';
 import { formatWorkspaceDisplay, WorkspaceDisplayInfo } from './formatters';
+import { isWorkspaceTrusted } from './workspaceTrust';
 
 export class WorkspaceHUD implements vscode.Disposable {
     private statusBarItem: vscode.StatusBarItem;
@@ -24,6 +25,7 @@ export class WorkspaceHUD implements vscode.Disposable {
     private connectListener?: () => void;
     private eventListener?: () => void;
     private disconnectListener?: () => void;
+    private errorListener?: () => void;
     private eventRefreshTimer: NodeJS.Timeout | null = null;
 
     constructor(
@@ -45,11 +47,14 @@ export class WorkspaceHUD implements vscode.Disposable {
         this.setupSocketEvents(this.socketClient);
     }
 
-    public updateSocketClient(newSocketClient: HerdrSocketClient): void {
+    public updateSocketClient(newSocketClient: HerdrSocketClient, options?: { refresh?: boolean }): void {
+        this.refreshSequence++;
         this.cleanupSocketEvents();
         this.socketClient = newSocketClient;
         this.setupSocketEvents(this.socketClient);
-        this.refresh();
+        if (options?.refresh !== false) {
+            this.refresh();
+        }
     }
 
     private scheduleEventRefresh(delayMs: number = 30): void {
@@ -74,10 +79,12 @@ export class WorkspaceHUD implements vscode.Disposable {
             this.updateHUDText(undefined);
         };
 
+        this.errorListener = () => {};
+
         client.on('connect', this.connectListener);
         client.on('event', this.eventListener);
         client.on('disconnect', this.disconnectListener);
-        client.on('error', () => {});
+        client.on('error', this.errorListener);
     }
 
     private cleanupSocketEvents(): void {
@@ -85,7 +92,7 @@ export class WorkspaceHUD implements vscode.Disposable {
             clearTimeout(this.eventRefreshTimer);
             this.eventRefreshTimer = null;
         }
-        if (this.socketClient && typeof (this.socketClient as any).off === 'function') {
+        if (this.socketClient && typeof this.socketClient.off === 'function') {
             if (this.connectListener) {
                 this.socketClient.off('connect', this.connectListener);
                 this.connectListener = undefined;
@@ -97,6 +104,10 @@ export class WorkspaceHUD implements vscode.Disposable {
             if (this.disconnectListener) {
                 this.socketClient.off('disconnect', this.disconnectListener);
                 this.disconnectListener = undefined;
+            }
+            if (this.errorListener) {
+                this.socketClient.off('error', this.errorListener);
+                this.errorListener = undefined;
             }
         }
     }
@@ -122,6 +133,10 @@ export class WorkspaceHUD implements vscode.Disposable {
 
         // Fallback to CLI if empty or socket not connected
         if (workspaces.length === 0 && !this.socketClient.isConnected) {
+            if (!isWorkspaceTrusted(vscode)) {
+                this.updateHUDText(undefined);
+                return;
+            }
             workspaces = await new Promise<ParsedWorkspace[]>((resolve) => {
                 const session = this.getSessionName();
                 const sessionArgs = ['--session', session];
@@ -137,12 +152,12 @@ export class WorkspaceHUD implements vscode.Disposable {
                     }
                 };
 
-                execHerdr([...sessionArgs, 'workspace', 'list'], (err: any, stdout: any) => {
+                execHerdr([...sessionArgs, 'workspace', 'list'], { skipAutoStart: true }, (err, stdout) => {
                     if (!err && stdout) rawWorkspaces = stdout;
                     checkDone();
                 });
 
-                execHerdr([...sessionArgs, 'pane', 'list'], (err: any, stdout: any) => {
+                execHerdr([...sessionArgs, 'pane', 'list'], { skipAutoStart: true }, (err, stdout) => {
                     if (!err && stdout) rawPanes = stdout;
                     checkDone();
                 });
@@ -183,12 +198,14 @@ export class WorkspaceHUD implements vscode.Disposable {
         if (!displayInfo) {
             this.statusBarItem.text = `$(window) Herdr`;
             this.statusBarItem.tooltip = l10n.t("Herdr Collie: No workspace active\nClick to select workspace");
+            (this.statusBarItem as any).accessibilityInformation = { label: l10n.t('Herdr Workspace: None active') };
             return;
         }
 
         const icon = displayInfo.isWorktree ? '$(git-branch)' : (displayInfo.isCurrentWindow ? '$(folder-active)' : '$(window)');
         const label = displayInfo.branchName || displayInfo.displayLabel || displayInfo.label;
         this.statusBarItem.text = `${icon} ${label}`;
+        (this.statusBarItem as any).accessibilityInformation = { label: l10n.t('Herdr Workspace: {0}', label) };
 
         // Build rich markdown tooltip (do not enable isTrusted to prevent command URI injection)
         const md = new vscode.MarkdownString();

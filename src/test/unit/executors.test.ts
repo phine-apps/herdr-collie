@@ -4,7 +4,7 @@
  */
 import { expect } from 'chai';
 import cp = require('child_process');
-import { execHerdr, runGitCmd, getSessionSocketPath, ensureSessionServerRunning, isCommandAvailable, isProcessDescendantRunning } from '../../executors';
+import { execHerdr, runGitCmd, getSessionSocketPath, ensureSessionServerRunning, setPreServerStartHook, isCommandAvailable, isProcessDescendantRunning } from '../../executors';
 
 describe('executors Unit Tests', () => {
     let originalExecFile: any;
@@ -91,6 +91,28 @@ describe('executors Unit Tests', () => {
                 done();
             });
         });
+
+        it('should not auto-start server or retry on server_not_running when skipAutoStart is true', (done) => {
+            const origSpawn = cp.spawn;
+            let spawnCalled = false;
+            (cp as any).spawn = () => {
+                spawnCalled = true;
+                return {} as any;
+            };
+            mockError = { code: 1, message: 'server_not_running' };
+            mockStderr = 'server_not_running';
+
+            execHerdr(['server', 'reload-config'], { skipAutoStart: true }, (err: any) => {
+                try {
+                    expect(err).to.not.be.null;
+                    expect(recordedCalls).to.have.lengthOf(1);
+                    expect(spawnCalled).to.be.false;
+                    done();
+                } finally {
+                    (cp as any).spawn = origSpawn;
+                }
+            });
+        });
     });
 
     describe('runGitCmd', () => {
@@ -128,6 +150,21 @@ describe('executors Unit Tests', () => {
                 expect.fail('Should have rejected non-diff command');
             } catch (err: any) {
                 expect(err.message).to.include('fatal: merge conflict');
+            }
+        });
+
+        it('sets 10 MiB maxBuffer + timeout on cp.execFile and maps ERR_CHILD_PROCESS_STDIO_MAXBUFFER cleanly', async () => {
+            mockStdout = 'ok\n';
+            await runGitCmd(['diff', 'HEAD'], '/repo');
+            expect(recordedCalls[0].options.maxBuffer).to.equal(10 * 1024 * 1024);
+            expect(recordedCalls[0].options.timeout).to.equal(60_000);
+
+            mockError = { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', message: 'stdout maxBuffer length exceeded' };
+            try {
+                await runGitCmd(['diff', 'HEAD'], '/repo');
+                expect.fail('Should have rejected maxBuffer overflow');
+            } catch (err: any) {
+                expect(err.message).to.include('10 MiB buffer limit');
             }
         });
     });
@@ -257,6 +294,35 @@ describe('executors Unit Tests', () => {
             ].join('\n');
             const result = await isProcessDescendantRunning(100, 'herdr');
             expect(result).to.be.false;
+        });
+
+        it('awaits preServerStartHook before checking or starting session server in ensureSessionServerRunning', async () => {
+            const net = require('net');
+            const origCreateConn = net.createConnection;
+            const events: string[] = [];
+
+            net.createConnection = () => {
+                const { EventEmitter } = require('events');
+                const sock: any = new EventEmitter();
+                sock.destroy = () => {};
+                events.push('socket:connect');
+                process.nextTick(() => sock.emit('connect'));
+                return sock;
+            };
+
+            setPreServerStartHook(async () => {
+                await new Promise(r => setTimeout(r, 20));
+                events.push('hook:ready');
+            });
+
+            try {
+                const ok = await ensureSessionServerRunning(`hook-test-${Date.now()}`);
+                expect(ok).to.be.true;
+                expect(events).to.deep.equal(['hook:ready', 'socket:connect']);
+            } finally {
+                setPreServerStartHook(null);
+                net.createConnection = origCreateConn;
+            }
         });
     });
 });

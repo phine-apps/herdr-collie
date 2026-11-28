@@ -166,12 +166,14 @@ describe('WorkspaceHUD Unit Tests', () => {
         expect(registeredListeners['connect']).to.have.lengthOf(1);
         expect(registeredListeners['event']).to.have.lengthOf(1);
         expect(registeredListeners['disconnect']).to.have.lengthOf(1);
+        expect(registeredListeners['error']).to.have.lengthOf(1);
 
-        // Update socket client
-        hud.updateSocketClient(client2 as unknown as HerdrSocketClient);
+        // Update socket client with refresh: false
+        hud.updateSocketClient(client2 as unknown as HerdrSocketClient, { refresh: false });
         expect(removedListeners['connect']).to.have.lengthOf(1);
         expect(removedListeners['event']).to.have.lengthOf(1);
         expect(removedListeners['disconnect']).to.have.lengthOf(1);
+        expect(removedListeners['error']).to.have.lengthOf(1);
 
         // Dispose
         hud.dispose();

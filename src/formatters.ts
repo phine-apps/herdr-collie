@@ -1,4 +1,5 @@
 import * as path from 'path';
+import * as fs from 'fs';
 import * as l10n from '@vscode/l10n';
 import { ParsedAgent, ParsedWorkspace, GitWorktreeInfo } from './parsers';
 
@@ -302,6 +303,52 @@ export function isSameOrSubPath(candidatePath?: string, basePath?: string): bool
     return candidateNorm.startsWith(prefix);
 }
 
+export function safeRealPath(targetPath: string): string {
+    try {
+        return fs.realpathSync(targetPath);
+    } catch {
+        return path.resolve(targetPath);
+    }
+}
+
+/**
+ * Resolves the agent matching `worktreePath` using deepest (longest-prefix) worktree matching
+ * so agents running in nested `.worktrees/<slug>` directories are not attributed to the parent main repo.
+ */
+export function findAgentForWorktree<T extends { cwd?: string }>(
+    worktreePath: string,
+    allWorktreePaths: string[],
+    agents: readonly T[]
+): T | undefined {
+    const targetNorm = normalizePathForComparison(safeRealPath(worktreePath));
+    if (!targetNorm) {
+        return undefined;
+    }
+
+    const resolvedRoots = Array.from(
+        new Set(allWorktreePaths.filter(Boolean).map(p => safeRealPath(p)))
+    );
+    if (!resolvedRoots.some(r => normalizePathForComparison(r) === targetNorm)) {
+        resolvedRoots.push(safeRealPath(worktreePath));
+    }
+
+    return agents.find(agent => {
+        if (!agent.cwd) return false;
+        const agentRealCwd = safeRealPath(agent.cwd);
+        let bestRootNorm = '';
+        let bestLen = -1;
+        for (const root of resolvedRoots) {
+            if (!isSameOrSubPath(agentRealCwd, root)) continue;
+            const rootNorm = normalizePathForComparison(root);
+            if (rootNorm.length > bestLen) {
+                bestLen = rootNorm.length;
+                bestRootNorm = rootNorm;
+            }
+        }
+        return bestLen >= 0 && bestRootNorm === targetNorm;
+    });
+}
+
 /**
  * Finds an existing Herdr workspace matching the current VS Code project directory.
  * Prefers normalized cwd equality (preserving matches across workspace renames while
@@ -399,26 +446,26 @@ export function formatWorkspaceDisplay(
 
     // Build rich tooltip
     const tooltipLines: string[] = [
-        `Workspace: ${ws.label}${isFocused ? ' (Active in Herdr)' : ''}`
+        l10n.t('Workspace: {0}', `${ws.label}${isFocused ? l10n.t(' (Active in Herdr)') : ''}`)
     ];
     if (ws.cwd) {
-        tooltipLines.push(`Path: ${ws.cwd}`);
+        tooltipLines.push(l10n.t('Path: {0}', ws.cwd));
     }
     if (branchName) {
-        tooltipLines.push(`Branch: ${branchName}${isWorktree ? ' (Git Worktree)' : ''}`);
+        tooltipLines.push(l10n.t('Branch: {0}', `${branchName}${isWorktree ? l10n.t(' (Git Worktree)') : ''}`));
     }
     if (isCurrentWindow) {
-        tooltipLines.push(`VS Code Window: Matches current open folder`);
+        tooltipLines.push(l10n.t('VS Code Window: Matches current open folder'));
     }
-    tooltipLines.push(`Workspace ID: ${ws.id}`);
+    tooltipLines.push(l10n.t('Workspace ID: {0}', ws.id));
 
     if (wsAgents.length > 0) {
-        tooltipLines.push(`\nActive Agents (${wsAgents.length}):`);
+        tooltipLines.push(`\n${l10n.t('Active Agents ({0}):', wsAgents.length)}`);
         for (const a of wsAgents) {
             tooltipLines.push(`- ${a.statusIcon} ${a.name} (${a.status})`);
         }
     } else {
-        tooltipLines.push(`\nActive Agents: (None)`);
+        tooltipLines.push(`\n${l10n.t('Active Agents: (None)')}`);
     }
 
     const tooltip = tooltipLines.join('\n');
@@ -526,20 +573,20 @@ export function formatAgentDisplay(
     }
 
     const tooltipLines: string[] = [
-        `Agent: ${agentName}`,
-        `Workspace: ${agent.workspaceLabel || (agent.workspaceId ? `Workspace ${agent.workspaceId}` : 'Unknown')}`
+        l10n.t('Agent: {0}', agentName),
+        l10n.t('Workspace: {0}', agent.workspaceLabel || (agent.workspaceId ? l10n.t('Workspace {0}', agent.workspaceId) : l10n.t('Unknown')))
     ];
     if (branchName) {
-        tooltipLines.push(`Branch: ${branchName}`);
+        tooltipLines.push(l10n.t('Branch: {0}', branchName));
     }
     if (agent.workspaceCwd) {
-        tooltipLines.push(`Path: ${agent.workspaceCwd}`);
+        tooltipLines.push(l10n.t('Path: {0}', agent.workspaceCwd));
     }
-    tooltipLines.push(`Pane ID: ${agent.id}`);
+    tooltipLines.push(l10n.t('Pane ID: {0}', agent.id));
     const statusWithDuration = durationText ? `${agent.status} (${durationText})` : agent.status;
-    tooltipLines.push(`Status: ${statusWithDuration}${agent.isBlocked ? '\n⚠️ Waiting for user confirmation' : ''}`);
+    tooltipLines.push(`${l10n.t('Status: {0}', statusWithDuration)}${agent.isBlocked ? `\n${l10n.t('⚠️ Waiting for user confirmation')}` : ''}`);
     if (agent.latestOutput) {
-        tooltipLines.push(`Latest Output: ${agent.latestOutput}`);
+        tooltipLines.push(l10n.t('Latest Output: {0}', agent.latestOutput));
     }
 
     const tooltip = tooltipLines.join('\n');
@@ -685,7 +732,7 @@ export function formatGitHubIssueTaskPrompt(
         }
     }
 
-    const rawBody = (issue.body || '').trim();
+    const rawBody = stripTerminalControlSequences(issue.body || '');
     if (rawBody) {
         const bodySnippet = rawBody.length > MAX_ISSUE_BODY_CHARS
             ? `${rawBody.slice(0, MAX_ISSUE_BODY_CHARS)}\n... [truncated]`
@@ -695,10 +742,11 @@ export function formatGitHubIssueTaskPrompt(
         lines.push(formatCodeFence(bodySnippet, 'markdown'));
     }
 
-    if (additionalInstruction && additionalInstruction.trim()) {
+    const cleanAdditional = stripTerminalControlSequences(additionalInstruction || '');
+    if (cleanAdditional) {
         lines.push('');
         lines.push('### Additional Instructions');
-        lines.push(additionalInstruction.trim());
+        lines.push(cleanAdditional);
     }
 
     lines.push('');

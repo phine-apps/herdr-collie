@@ -5,6 +5,7 @@
 import * as vscode from 'vscode';
 import * as l10n from '@vscode/l10n';
 import { formatTerminalOutput, stripTerminalControlSequences } from './formatters';
+import { ensureWorkspaceTrustedForAction, isWorkspaceTrusted } from './workspaceTrust';
 
 export { stripTerminalControlSequences };
 
@@ -148,24 +149,23 @@ export class TerminalShellMonitor implements vscode.Disposable {
         this.failedStatusBarItem.hide();
         this.disposables.push(this.failedStatusBarItem);
 
-        const winAny = vscode.window as any;
-        if (typeof winAny.onDidStartTerminalShellExecution === 'function') {
+        if (typeof vscode.window.onDidStartTerminalShellExecution === 'function') {
             this.disposables.push(
-                winAny.onDidStartTerminalShellExecution((event: TerminalShellExecutionStartEventLike) => {
+                vscode.window.onDidStartTerminalShellExecution((event) => {
                     this.handleExecutionStart(event);
                 })
             );
         }
-        if (typeof winAny.onDidEndTerminalShellExecution === 'function') {
+        if (typeof vscode.window.onDidEndTerminalShellExecution === 'function') {
             this.disposables.push(
-                winAny.onDidEndTerminalShellExecution((event: TerminalShellExecutionEndEventLike) => {
+                vscode.window.onDidEndTerminalShellExecution((event) => {
                     void this.handleExecutionEnd(event);
                 })
             );
         }
-        if (typeof winAny.onDidCloseTerminal === 'function') {
+        if (typeof vscode.window.onDidCloseTerminal === 'function') {
             this.disposables.push(
-                winAny.onDidCloseTerminal((terminal: vscode.Terminal) => {
+                vscode.window.onDidCloseTerminal((terminal) => {
                     if (this.currentFailedRecord && this.currentFailedRecord.terminalName === terminal.name) {
                         this.latestByTerminal.delete(terminal);
                     }
@@ -175,8 +175,7 @@ export class TerminalShellMonitor implements vscode.Disposable {
     }
 
     public get isShellIntegrationSupported(): boolean {
-        const winAny = vscode.window as any;
-        return typeof winAny.onDidEndTerminalShellExecution === 'function';
+        return typeof vscode.window.onDidEndTerminalShellExecution === 'function';
     }
 
     public handleExecutionStart(event: TerminalShellExecutionStartEventLike): void {
@@ -285,6 +284,9 @@ export class TerminalShellMonitor implements vscode.Disposable {
     }
 
     private async handleFailedExecution(record: TerminalExecutionRecord): Promise<void> {
+        if (!isWorkspaceTrusted(vscode)) {
+            return;
+        }
         const mode = this.getFailureActionMode();
         if (mode === 'off') return;
 
@@ -292,7 +294,7 @@ export class TerminalShellMonitor implements vscode.Disposable {
         const shortCmd = record.commandLine.length > 28
             ? `${record.commandLine.slice(0, 25)}...`
             : record.commandLine;
-        this.failedStatusBarItem.text = `$(warning) Fix: ${shortCmd} (exit ${record.exitCode})`;
+        this.failedStatusBarItem.text = `$(warning) ${l10n.t('Fix: {0} (exit {1})', shortCmd, String(record.exitCode ?? '?'))}`;
         this.failedStatusBarItem.tooltip = l10n.t(
             "Command '{0}' failed with exit code {1}. Click to fix with a Herdr agent.",
             record.commandLine,
@@ -351,6 +353,9 @@ export class TerminalShellMonitor implements vscode.Disposable {
     }
 
     public async sendExecutionRecord(record: TerminalExecutionRecord, stageOnly = false): Promise<boolean> {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+            return false;
+        }
         const prompt = formatFailedCommandPrompt(record);
         if (!prompt) return false;
 
@@ -374,6 +379,9 @@ export class TerminalShellMonitor implements vscode.Disposable {
     }
 
     public async fixFailedExecutionWizard(): Promise<void> {
+        if (!(await ensureWorkspaceTrustedForAction(vscode))) {
+            return;
+        }
         const failedHistory = this.getRecentExecutions(true);
         const targetList = failedHistory.length > 0 ? failedHistory : this.getRecentExecutions(false);
 
@@ -394,7 +402,7 @@ export class TerminalShellMonitor implements vscode.Disposable {
         const picked = await vscode.window.showQuickPick(
             targetList.map(rec => ({
                 label: `${rec.failed ? '$(error)' : '$(terminal)'} ${rec.commandLine || rec.terminalName}`,
-                description: `exit ${rec.exitCode ?? '?'} | ${rec.terminalName}`,
+                description: l10n.t('exit {0} | {1}', String(rec.exitCode ?? '?'), rec.terminalName),
                 detail: rec.cwd,
                 record: rec
             })),
