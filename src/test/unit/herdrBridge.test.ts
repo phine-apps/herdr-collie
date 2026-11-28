@@ -6,7 +6,7 @@ import '../helpers/mockVscode'; // Must be first to install global mock
 import { expect } from 'chai';
 import cp = require('child_process');
 import { mockState, mockVscode, resetMockState } from '../helpers/mockVscode';
-import { createTerminalBridge, createSessionSwitchCoordinator, fetchRunningSessions, getSessionName, sendPromptToHerdr } from '../../herdrBridge';
+import { createTerminalBridge, createSessionSwitchCoordinator, fetchRunningSessions, getSessionName, isHerdrTerminalName, sendPromptToHerdr } from '../../herdrBridge';
 import { HerdrSocketClient } from '../../socketClient';
 
 describe('herdrBridge Unit Tests', () => {
@@ -441,6 +441,157 @@ describe('herdrBridge Unit Tests', () => {
         } finally {
             cp.spawn = origSpawn;
             (mockVscode.window as any).showQuickPick = origShowQuickPick;
+        }
+    });
+
+    it('tracks herdr-collie.inHerdrTerminal context key cleanly across active terminal changes, trust mode, async races, and manifest menus', async () => {
+        const fs = require('fs');
+        const path = require('path');
+        const pkgPath = path.resolve(__dirname, '../../../package.json');
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        expect(pkg.contributes.menus['terminal/context']).to.deep.equal([
+            {
+                command: 'herdr-collie.sendTerminalOutput',
+                when: '!herdr-collie.inHerdrTerminal',
+                group: 'herdr@1'
+            },
+            {
+                command: 'herdr-collie.fixLastFailedCommand',
+                when: '!herdr-collie.inHerdrTerminal',
+                group: 'herdr@2'
+            }
+        ]);
+
+        expect(isHerdrTerminalName('Herdr')).to.be.true;
+        expect(isHerdrTerminalName('Herdr (vscode)', 'vscode')).to.be.true;
+        expect(isHerdrTerminalName('Herdr Workspace (vscode): app', 'vscode')).to.be.true;
+        expect(isHerdrTerminalName('Herdr Agent: claude')).to.be.true;
+        expect(isHerdrTerminalName('zsh')).to.be.false;
+
+        const origActiveDescriptor = Object.getOwnPropertyDescriptor(mockVscode.window, 'activeTerminal');
+        const origOnDidChangeActive = (mockVscode.window as any).onDidChangeActiveTerminal;
+        const origOnDidStartShell = (mockVscode.window as any).onDidStartTerminalShellExecution;
+        const origOnDidEndShell = (mockVscode.window as any).onDidEndTerminalShellExecution;
+
+        let activeTerminal: any = undefined;
+        let changeActiveListener: ((t: any) => void) | undefined;
+        let closeListener: ((t: any) => void) | undefined;
+        let startShellListener: ((e: any) => void) | undefined;
+        let endShellListener: ((e: any) => void) | undefined;
+
+        Object.defineProperty(mockVscode.window, 'activeTerminal', {
+            configurable: true,
+            get: () => activeTerminal
+        });
+        (mockVscode.window as any).onDidOpenTerminal = () => ({ dispose: () => {} });
+        (mockVscode.window as any).onDidCloseTerminal = (cb: (t: any) => void) => {
+            closeListener = cb;
+            return { dispose: () => {} };
+        };
+        (mockVscode.window as any).onDidChangeActiveTerminal = (cb: (t: any) => void) => {
+            changeActiveListener = cb;
+            return { dispose: () => {} };
+        };
+        (mockVscode.window as any).onDidStartTerminalShellExecution = (cb: (e: any) => void) => {
+            startShellListener = cb;
+            return { dispose: () => {} };
+        };
+        (mockVscode.window as any).onDidEndTerminalShellExecution = (cb: (e: any) => void) => {
+            endShellListener = cb;
+            return { dispose: () => {} };
+        };
+
+        let resolveSlowCheck!: (v: boolean) => void;
+        let checkCalls = 0;
+        const shellSlow: any = { name: 'zsh', exitStatus: undefined };
+        const shellPlain: any = { name: 'bash', exitStatus: undefined };
+        const herdrByName: any = { name: 'Herdr (vscode)', exitStatus: undefined };
+
+        const bridge = createTerminalBridge(() => {}, {
+            ensureServerRunning: async () => true,
+            isHerdrRunning: (t) => {
+                checkCalls++;
+                if (t === shellSlow) {
+                    return new Promise<boolean>((resolve) => { resolveSlowCheck = resolve; });
+                }
+                return Promise.resolve(false);
+            }
+        });
+
+        const fakeContext: any = { subscriptions: [] };
+        const lastInHerdrValue = () => {
+            const calls = mockState.executedCommands.filter(
+                c => c.command === 'setContext' && c.args[0] === 'herdr-collie.inHerdrTerminal'
+            );
+            return calls.length > 0 ? calls[calls.length - 1].args[1] : undefined;
+        };
+
+        try {
+            // Initial activation with known Herdr terminal -> true without process probe
+            activeTerminal = herdrByName;
+            bridge.registerListeners(fakeContext, () => 'vscode');
+            expect(lastInHerdrValue()).to.equal(true);
+            expect(checkCalls).to.equal(0);
+
+            // Switch to slow plain terminal, then immediately switch to bash before slow promise resolves
+            activeTerminal = shellSlow;
+            changeActiveListener?.(shellSlow);
+            expect(lastInHerdrValue()).to.equal(false);
+            expect(checkCalls).to.equal(1);
+
+            activeTerminal = shellPlain;
+            changeActiveListener?.(shellPlain);
+            expect(lastInHerdrValue()).to.equal(false);
+
+            // Resolve stale slow check as true -> must be ignored because activeTerminal changed
+            resolveSlowCheck(true);
+            await new Promise(resolve => setTimeout(resolve, 10));
+            expect(lastInHerdrValue()).to.equal(false);
+
+            // Manual `herdr` shell execution on active plain terminal flips true, then resets on end
+            startShellListener?.({ terminal: shellPlain, execution: { commandLine: { value: 'herdr --session vscode' } } });
+            expect(lastInHerdrValue()).to.equal(true);
+            endShellListener?.({ terminal: shellPlain });
+            await new Promise(resolve => setTimeout(resolve, 10));
+            expect(lastInHerdrValue()).to.equal(false);
+
+            // Restricted Mode must skip process inspection on plain shells
+            const beforeUntrustedCalls = checkCalls;
+            mockVscode.workspace.isTrusted = false;
+            activeTerminal = shellPlain;
+            changeActiveListener?.(shellPlain);
+            expect(checkCalls).to.equal(beforeUntrustedCalls);
+            expect(lastInHerdrValue()).to.equal(false);
+
+            // Closing active terminal resets to next activeTerminal state
+            activeTerminal = herdrByName;
+            closeListener?.(shellPlain);
+            expect(lastInHerdrValue()).to.equal(true);
+        } finally {
+            bridge.dispose();
+            for (const sub of fakeContext.subscriptions) {
+                try { sub.dispose?.(); } catch {}
+            }
+            if (origActiveDescriptor) {
+                Object.defineProperty(mockVscode.window, 'activeTerminal', origActiveDescriptor);
+            } else {
+                delete (mockVscode.window as any).activeTerminal;
+            }
+            if (origOnDidChangeActive !== undefined) {
+                (mockVscode.window as any).onDidChangeActiveTerminal = origOnDidChangeActive;
+            } else {
+                delete (mockVscode.window as any).onDidChangeActiveTerminal;
+            }
+            if (origOnDidStartShell !== undefined) {
+                (mockVscode.window as any).onDidStartTerminalShellExecution = origOnDidStartShell;
+            } else {
+                delete (mockVscode.window as any).onDidStartTerminalShellExecution;
+            }
+            if (origOnDidEndShell !== undefined) {
+                (mockVscode.window as any).onDidEndTerminalShellExecution = origOnDidEndShell;
+            } else {
+                delete (mockVscode.window as any).onDidEndTerminalShellExecution;
+            }
         }
     });
 });

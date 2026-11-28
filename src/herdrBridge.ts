@@ -107,6 +107,25 @@ export function fetchRunningSessions(extraConnectedSession?: string): Promise<st
     });
 }
 
+export function isHerdrTerminalName(terminalName: string, sessionName?: string): boolean {
+    if (!terminalName) {
+        return false;
+    }
+    const sessionLabel = sessionName ? ` (${sessionName})` : '';
+    const baseTerminalName = `Herdr${sessionLabel}`;
+    return (
+        terminalName === baseTerminalName ||
+        terminalName === 'Herdr' ||
+        terminalName === 'Herdr (default)' ||
+        terminalName === 'Herdr (vscode)' ||
+        terminalName.startsWith('Herdr (') ||
+        terminalName.startsWith('Herdr Workspace:') ||
+        terminalName.startsWith('Herdr Workspace (') ||
+        terminalName.startsWith('Herdr Agent:') ||
+        terminalName.startsWith('Herdr Agent (')
+    );
+}
+
 export interface TerminalBridge extends vscode.Disposable {
     restoreTerminalIfNeeded(sessionName: string, specificTerminal?: vscode.Terminal): Promise<void>;
     openOrAttachTerminal(
@@ -117,6 +136,7 @@ export interface TerminalBridge extends vscode.Disposable {
         targetWorkspaceId?: string,
         targetTabId?: string
     ): Promise<void>;
+    updateHerdrTerminalContext(terminal?: vscode.Terminal): void;
     registerListeners(context: vscode.ExtensionContext, getActiveSession: () => string): void;
 }
 
@@ -157,6 +177,7 @@ export function createSessionSwitchCoordinator(): SessionSwitchCoordinator {
 
 export interface TerminalBridgeDeps {
     ensureServerRunning?: (sessionName?: string) => Promise<boolean>;
+    isHerdrRunning?: (terminal: vscode.Terminal) => Promise<boolean>;
 }
 
 export function createTerminalBridge(
@@ -164,11 +185,13 @@ export function createTerminalBridge(
     deps?: TerminalBridgeDeps
 ): TerminalBridge {
     const ensureServerRunning = deps?.ensureServerRunning ?? ensureSessionServerRunning;
+    const checkHerdrRunning = deps?.isHerdrRunning ?? isHerdrRunningInTerminal;
     const extensionManagedTerminals = new Set<vscode.Terminal>();
     const pendingTimers = new Set<NodeJS.Timeout>();
     const pendingRestoreTimers = new Map<vscode.Terminal, Set<NodeJS.Timeout>>();
     const inFlightAttachBySession = new Map<string, Promise<void>>();
     const latestAttachSeqBySession = new Map<string, number>();
+    let activeTerminalContextSeq = 0;
     let creatingTerminal = false;
     let disposed = false;
 
@@ -208,8 +231,37 @@ export function createTerminalBridge(
         pendingRestoreTimers.delete(terminal);
     };
 
+    function updateHerdrTerminalContext(terminal: vscode.Terminal | undefined = vscode.window.activeTerminal): void {
+        if (disposed) {
+            return;
+        }
+        const seq = ++activeTerminalContextSeq;
+        const isKnownHerdr = Boolean(
+            terminal && (
+                extensionManagedTerminals.has(terminal) ||
+                isHerdrTerminalName(terminal.name)
+            )
+        );
+        Promise.resolve(
+            vscode.commands.executeCommand('setContext', 'herdr-collie.inHerdrTerminal', isKnownHerdr)
+        ).catch(() => {});
+
+        if (!terminal || isKnownHerdr || terminal.exitStatus !== undefined || !isWorkspaceTrusted(vscode)) {
+            return;
+        }
+
+        checkHerdrRunning(terminal).then((running) => {
+            if (!disposed && seq === activeTerminalContextSeq && vscode.window.activeTerminal === terminal && running) {
+                Promise.resolve(
+                    vscode.commands.executeCommand('setContext', 'herdr-collie.inHerdrTerminal', true)
+                ).catch(() => {});
+            }
+        }).catch(() => {});
+    }
+
     function dispose(): void {
         disposed = true;
+        activeTerminalContextSeq++;
         for (const timer of pendingTimers) {
             clearTimeout(timer);
         }
@@ -230,26 +282,13 @@ export function createTerminalBridge(
         const sessionLabel = sessionName ? ` (${sessionName})` : '';
         const baseTerminalName = `Herdr${sessionLabel}`;
 
-        const isMatchingName = (tName: string) => {
-            if (tName === baseTerminalName || tName === 'Herdr' || tName === 'Herdr (default)' || tName === 'Herdr (vscode)') {
-                return true;
-            }
-            if (tName.startsWith(`Herdr Workspace${sessionLabel}:`) || tName.startsWith(`Herdr Agent${sessionLabel}:`)) {
-                return true;
-            }
-            if (tName.startsWith('Herdr Workspace:') || tName.startsWith('Herdr Agent:')) {
-                return true;
-            }
-            return tName.startsWith('Herdr (');
-        };
-
-        const terminal = specificTerminal || vscode.window.terminals.find(t => isMatchingName(t.name));
+        const terminal = specificTerminal || vscode.window.terminals.find(t => isHerdrTerminalName(t.name, sessionName));
 
         if (!terminal || terminal.exitStatus !== undefined) {
             return;
         }
 
-        if (!isMatchingName(terminal.name)) {
+        if (!isHerdrTerminalName(terminal.name, sessionName)) {
             return;
         }
 
@@ -464,6 +503,9 @@ export function createTerminalBridge(
         }
         terminal.show();
         terminal.sendText(command);
+        if (vscode.window.activeTerminal === terminal) {
+            updateHerdrTerminalContext(terminal);
+        }
 
         const targetType = isAgent ? l10n.t('Agent') : l10n.t('Workspace');
         const label = displayLabel || target || normalizedSession || 'Herdr';
@@ -475,23 +517,73 @@ export function createTerminalBridge(
         const onDidOpenTerminalDisposable = vscode.window.onDidOpenTerminal((terminal) => {
             if (creatingTerminal) {
                 extensionManagedTerminals.add(terminal);
+                if (vscode.window.activeTerminal === terminal) {
+                    updateHerdrTerminalContext(terminal);
+                }
                 return;
             }
             const currentSession = getActiveSession();
             restoreTerminalIfNeeded(currentSession, terminal).catch(() => {});
+            if (vscode.window.activeTerminal === terminal) {
+                updateHerdrTerminalContext(terminal);
+            }
         });
 
         const onDidCloseTerminalDisposable = vscode.window.onDidCloseTerminal((terminal) => {
             cancelPendingRestoreTimers(terminal);
             extensionManagedTerminals.delete(terminal);
+            updateHerdrTerminalContext(vscode.window.activeTerminal);
         });
 
         context.subscriptions.push(onDidOpenTerminalDisposable, onDidCloseTerminalDisposable, { dispose });
+
+        if (typeof vscode.window.onDidChangeActiveTerminal === 'function') {
+            context.subscriptions.push(
+                vscode.window.onDidChangeActiveTerminal((terminal) => {
+                    updateHerdrTerminalContext(terminal);
+                })
+            );
+        }
+
+        const windowWithShellEvents = vscode.window as unknown as {
+            onDidStartTerminalShellExecution?: (listener: (e: { terminal: vscode.Terminal; execution?: { commandLine?: { value?: string } } }) => any) => vscode.Disposable;
+            onDidEndTerminalShellExecution?: (listener: (e: { terminal: vscode.Terminal }) => any) => vscode.Disposable;
+        };
+
+        if (typeof windowWithShellEvents.onDidStartTerminalShellExecution === 'function') {
+            context.subscriptions.push(
+                windowWithShellEvents.onDidStartTerminalShellExecution((e) => {
+                    if (disposed || !e?.terminal || e.terminal !== vscode.window.activeTerminal) {
+                        return;
+                    }
+                    const cmdLine = (e.execution?.commandLine?.value || '').trim();
+                    if (/^(?:herdr|[^\s]*\/herdr)(?:\s|$)/.test(cmdLine)) {
+                        activeTerminalContextSeq++;
+                        Promise.resolve(
+                            vscode.commands.executeCommand('setContext', 'herdr-collie.inHerdrTerminal', true)
+                        ).catch(() => {});
+                    }
+                })
+            );
+        }
+
+        if (typeof windowWithShellEvents.onDidEndTerminalShellExecution === 'function') {
+            context.subscriptions.push(
+                windowWithShellEvents.onDidEndTerminalShellExecution((e) => {
+                    if (e?.terminal === vscode.window.activeTerminal) {
+                        updateHerdrTerminalContext(e.terminal);
+                    }
+                })
+            );
+        }
+
+        updateHerdrTerminalContext(vscode.window.activeTerminal);
     }
 
     return {
         restoreTerminalIfNeeded,
         openOrAttachTerminal,
+        updateHerdrTerminalContext,
         registerListeners,
         dispose
     };

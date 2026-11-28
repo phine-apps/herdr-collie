@@ -681,10 +681,12 @@
       "terminal/context": [
         {
           "command": "herdr-collie.sendTerminalOutput",
+          "when": "!herdr-collie.inHerdrTerminal",
           "group": "herdr@1"
         },
         {
           "command": "herdr-collie.fixLastFailedCommand",
+          "when": "!herdr-collie.inHerdrTerminal",
           "group": "herdr@2"
         }
       ]
