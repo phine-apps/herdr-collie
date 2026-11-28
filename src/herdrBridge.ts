@@ -52,7 +52,7 @@ export function fetchActiveSessions(extraSession?: string): Promise<string[]> {
         return Promise.resolve(fallback);
     }
     return new Promise((resolve) => {
-        execHerdr(['session', 'list', '--json'], (err, stdout) => {
+        execHerdr(['session', 'list', '--json'], { skipAutoStart: true }, (err, stdout) => {
             if (!err && stdout) {
                 const sessions = parseSessions(stdout);
                 if (sessions.length > 0) {
@@ -75,6 +75,34 @@ export function fetchActiveSessions(extraSession?: string): Promise<string[]> {
                 fallback.push(extraSession);
             }
             resolve(fallback);
+        });
+    });
+}
+
+/**
+ * Discovers only actively running Herdr sessions without triggering daemon auto-start.
+ */
+export function fetchRunningSessions(extraConnectedSession?: string): Promise<string[]> {
+    if (!isWorkspaceTrusted(vscode)) {
+        return Promise.resolve([]);
+    }
+    return new Promise((resolve) => {
+        execHerdr(['session', 'list', '--json'], { skipAutoStart: true }, (err, stdout) => {
+            if (!err && stdout) {
+                const sessions = parseSessions(stdout);
+                if (sessions.length > 0) {
+                    const runningNames = sessions.filter(s => s.running).map(s => s.name);
+                    if (extraConnectedSession && !runningNames.includes(extraConnectedSession)) {
+                        const explicit = sessions.find(s => s.name === extraConnectedSession);
+                        if (!explicit || explicit.running) {
+                            runningNames.push(extraConnectedSession);
+                        }
+                    }
+                    resolve(runningNames);
+                    return;
+                }
+            }
+            resolve(extraConnectedSession ? [extraConnectedSession] : []);
         });
     });
 }
@@ -138,22 +166,46 @@ export function createTerminalBridge(
     const ensureServerRunning = deps?.ensureServerRunning ?? ensureSessionServerRunning;
     const extensionManagedTerminals = new Set<vscode.Terminal>();
     const pendingTimers = new Set<NodeJS.Timeout>();
+    const pendingRestoreTimers = new Map<vscode.Terminal, Set<NodeJS.Timeout>>();
     const inFlightAttachBySession = new Map<string, Promise<void>>();
+    const latestAttachSeqBySession = new Map<string, number>();
     let creatingTerminal = false;
     let disposed = false;
 
-    const scheduleTrackedTimeout = (fn: () => void, delayMs: number): NodeJS.Timeout | undefined => {
+    const scheduleTrackedTimeout = (fn: () => void, delayMs: number, restoreTerminal?: vscode.Terminal): NodeJS.Timeout | undefined => {
         if (disposed) {
             return undefined;
         }
         const timer = setTimeout(() => {
             pendingTimers.delete(timer);
+            if (restoreTerminal) {
+                pendingRestoreTimers.get(restoreTerminal)?.delete(timer);
+            }
             if (!disposed) {
                 fn();
             }
         }, delayMs);
         pendingTimers.add(timer);
+        if (restoreTerminal) {
+            let set = pendingRestoreTimers.get(restoreTerminal);
+            if (!set) {
+                set = new Set<NodeJS.Timeout>();
+                pendingRestoreTimers.set(restoreTerminal, set);
+            }
+            set.add(timer);
+        }
         return timer;
+    };
+
+    const cancelPendingRestoreTimers = (terminal: vscode.Terminal): void => {
+        const timers = pendingRestoreTimers.get(terminal);
+        if (!timers) return;
+        for (const timer of timers) {
+            clearTimeout(timer);
+            pendingTimers.delete(timer);
+        }
+        timers.clear();
+        pendingRestoreTimers.delete(terminal);
     };
 
     function dispose(): void {
@@ -162,6 +214,7 @@ export function createTerminalBridge(
             clearTimeout(timer);
         }
         pendingTimers.clear();
+        pendingRestoreTimers.clear();
         extensionManagedTerminals.clear();
     }
 
@@ -254,9 +307,9 @@ export function createTerminalBridge(
                                 terminal.sendText(command);
                             }
                         }
-                    }, 1200);
+                    }, 1200, terminal);
                 }
-            }, 600);
+            }, 600, terminal);
         }
     }
 
@@ -277,20 +330,32 @@ export function createTerminalBridge(
         if (targetTabId && !isSafeCliTargetId(targetTabId)) {
             return;
         }
-        const normalizedSession = sanitizeSessionName(targetSession) || 'default';
-        const existingInFlight = inFlightAttachBySession.get(normalizedSession);
-        if (existingInFlight) {
-            return await existingInFlight;
+        if (targetWorkspaceId && !isSafeCliTargetId(targetWorkspaceId)) {
+            return;
         }
+        const normalizedSession = sanitizeSessionName(targetSession) || 'default';
+        const seq = (latestAttachSeqBySession.get(normalizedSession) || 0) + 1;
+        latestAttachSeqBySession.set(normalizedSession, seq);
 
-        const runPromise = openOrAttachTerminalInternal(
-            target,
-            isAgent,
-            displayLabel,
-            normalizedSession,
-            targetWorkspaceId,
-            targetTabId
-        ).finally(() => {
+        const prevInFlight = inFlightAttachBySession.get(normalizedSession);
+        const runPromise = (async () => {
+            if (prevInFlight) {
+                try {
+                    await prevInFlight;
+                } catch {}
+            }
+            if (disposed || latestAttachSeqBySession.get(normalizedSession) !== seq) {
+                return;
+            }
+            await openOrAttachTerminalInternal(
+                target,
+                isAgent,
+                displayLabel,
+                normalizedSession,
+                targetWorkspaceId,
+                targetTabId
+            );
+        })().finally(() => {
             if (inFlightAttachBySession.get(normalizedSession) === runPromise) {
                 inFlightAttachBySession.delete(normalizedSession);
             }
@@ -355,10 +420,13 @@ export function createTerminalBridge(
             } else {
                 const isRunning = await isHerdrRunningInTerminal(existingTerminal);
                 if (isRunning) {
+                    cancelPendingRestoreTimers(existingTerminal);
                     existingTerminal.show();
                     onAttached();
                     return;
                 }
+                // Cancel any pending restore timer before manually sending the launch command to avoid double launch
+                cancelPendingRestoreTimers(existingTerminal);
                 // Terminal shell is alive but Herdr is not running (e.g. restored terminal on VS Code restart)
                 await ensureServerRunning(normalizedSession);
                 existingTerminal.show();
@@ -414,6 +482,7 @@ export function createTerminalBridge(
         });
 
         const onDidCloseTerminalDisposable = vscode.window.onDidCloseTerminal((terminal) => {
+            cancelPendingRestoreTimers(terminal);
             extensionManagedTerminals.delete(terminal);
         });
 
@@ -442,7 +511,7 @@ export async function sendPromptToHerdr(params: {
 
     const { activeSidebarSession, socketClient, richText, successMsg, quickPickTitle, options } = params;
     const defaultSession = activeSidebarSession;
-    const sessions = await fetchActiveSessions(defaultSession);
+    const sessions = await fetchRunningSessions(socketClient.isConnected ? defaultSession : undefined);
     const preferredCwd = options?.preferredCwd;
     const preferredAgentId = options?.preferredAgentId;
     const currentCwd = preferredCwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -469,23 +538,26 @@ export async function sendPromptToHerdr(params: {
 
         if (!loadedFromSnapshot) {
             const sessionArgs = ['--session', sessionName];
-            [workspaces, panes, agents] = await Promise.all([
-                new Promise<ReturnType<typeof parseWorkspaces>>((resolve) => {
-                    execHerdr([...sessionArgs, 'workspace', 'list'], (error, stdout) => {
-                        resolve(!error && stdout ? parseWorkspaces(stdout) : []);
+            const [rawWorkspaces, rawPanes, rawAgents] = await Promise.all([
+                new Promise<string>((resolve) => {
+                    execHerdr([...sessionArgs, 'workspace', 'list'], { skipAutoStart: true }, (error, stdout) => {
+                        resolve(!error && stdout ? stdout : '');
                     });
                 }),
-                new Promise<ReturnType<typeof parsePanes>>((resolve) => {
-                    execHerdr([...sessionArgs, 'pane', 'list'], (error, stdout) => {
-                        resolve(!error && stdout ? parsePanes(stdout) : []);
+                new Promise<string>((resolve) => {
+                    execHerdr([...sessionArgs, 'pane', 'list'], { skipAutoStart: true }, (error, stdout) => {
+                        resolve(!error && stdout ? stdout : '');
                     });
                 }),
-                new Promise<ReturnType<typeof parseAgents>>((resolve) => {
-                    execHerdr([...sessionArgs, 'agent', 'list'], (error, stdout) => {
-                        resolve(!error && stdout ? parseAgents(stdout) : []);
+                new Promise<string>((resolve) => {
+                    execHerdr([...sessionArgs, 'agent', 'list'], { skipAutoStart: true }, (error, stdout) => {
+                        resolve(!error && stdout ? stdout : '');
                     });
                 })
             ]);
+            panes = rawPanes ? parsePanes(rawPanes) : [];
+            workspaces = rawWorkspaces ? parseWorkspaces(rawWorkspaces, panes, os.homedir()) : [];
+            agents = rawAgents ? parseAgents(rawAgents, workspaces) : [];
         }
 
         const workspaceCwdById = new Map<string, string>();
@@ -508,7 +580,7 @@ export async function sendPromptToHerdr(params: {
                 (isMatchedCwd ? 2 : 0) +
                 (isCurrentSession ? 1 : 0);
             const item: TargetQuickPickItem = {
-                label: `[${sessionName}] $(terminal) Pane: ${p.name || p.id}`,
+                label: `[${sessionName}] $(terminal) ${l10n.t('Pane: {0}', p.name || p.id)}`,
                 description: `${l10n.t('Session: {0}', sessionName)}${p.command ? ` | ${p.command}` : ''}${tag}`,
                 targetId: p.id,
                 sessionName,
@@ -538,7 +610,7 @@ export async function sendPromptToHerdr(params: {
                 (isMatchedCwd ? 2 : 0) +
                 (isCurrentSession ? 1 : 0);
             const item: TargetQuickPickItem = {
-                label: `[${sessionName}] $(hubot) Agent: ${a.name || a.id}`,
+                label: `[${sessionName}] $(hubot) ${l10n.t('Agent: {0}', a.name || a.id)}`,
                 description: `${l10n.t('Session: {0} | Status: {1}', sessionName, a.status)}${tag}`,
                 targetId: a.id,
                 sessionName,

@@ -152,12 +152,12 @@ export class WorkspaceHUD implements vscode.Disposable {
                     }
                 };
 
-                execHerdr([...sessionArgs, 'workspace', 'list'], (err, stdout) => {
+                execHerdr([...sessionArgs, 'workspace', 'list'], { skipAutoStart: true }, (err, stdout) => {
                     if (!err && stdout) rawWorkspaces = stdout;
                     checkDone();
                 });
 
-                execHerdr([...sessionArgs, 'pane', 'list'], (err, stdout) => {
+                execHerdr([...sessionArgs, 'pane', 'list'], { skipAutoStart: true }, (err, stdout) => {
                     if (!err && stdout) rawPanes = stdout;
                     checkDone();
                 });

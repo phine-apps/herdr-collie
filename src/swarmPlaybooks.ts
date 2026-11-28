@@ -408,6 +408,7 @@ async function startPlaybookRole(params: {
     startAgentFn: (options: StartAgentInPaneOptions) => Promise<StartAgentInPaneResult>;
     launched: PlaybookAgentLaunchOutcome[];
     failures: PlaybookAgentLaunchOutcome[];
+    warnings?: string[];
 }): Promise<void> {
     const {
         role,
@@ -423,7 +424,8 @@ async function startPlaybookRole(params: {
         socketClient,
         startAgentFn,
         launched,
-        failures
+        failures,
+        warnings
     } = params;
 
     try {
@@ -450,6 +452,11 @@ async function startPlaybookRole(params: {
         };
         if (res.started) {
             launched.push(outcome);
+            if (prompt.trim() && !res.prompted) {
+                warnings?.push(
+                    l10n.t("Agent '{0}' ({1}) started on '{2}', but failed to deliver the initial prompt.", agentName, role, branchName || worktreePath)
+                );
+            }
         } else {
             failures.push(outcome);
         }
@@ -570,7 +577,8 @@ export async function executeBestOfNPlaybook(options: {
                 socketClient,
                 startAgentFn: startAgent,
                 launched,
-                failures
+                failures,
+                warnings
             });
         } catch (err: any) {
             failures.push({
@@ -737,7 +745,8 @@ export async function executeImplementReviewPlaybook(options: {
         socketClient,
         startAgentFn: startAgent,
         launched,
-        failures
+        failures,
+        warnings
     });
 
     if (reviewPaneId) {
@@ -756,7 +765,8 @@ export async function executeImplementReviewPlaybook(options: {
             socketClient,
             startAgentFn: startAgent,
             launched,
-            failures
+            failures,
+            warnings
         });
     } else if (!failures.some(f => f.role === 'reviewer')) {
         failures.push({

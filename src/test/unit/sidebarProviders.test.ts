@@ -4,8 +4,10 @@
  */
 import '../helpers/mockVscode'; // Must be first to install global mock
 import { expect } from 'chai';
+import cp = require('child_process');
 import { resetMockState } from '../helpers/mockVscode';
 import { HerdrWorkspaceProvider } from '../../sidebarProviders';
+import { WorkspaceHUD } from '../../workspaceHUD';
 import { HerdrSocketClient } from '../../socketClient';
 
 describe('sidebarProviders Unit Tests', () => {
@@ -50,6 +52,51 @@ describe('sidebarProviders Unit Tests', () => {
         } finally {
             wsProvider.dispose();
             agentProvider.dispose();
+        }
+    });
+
+    it('passes skipAutoStart on passive CLI fallback refreshes when socket is disconnected', async () => {
+        const origExecFile = cp.execFile;
+        const origSpawn = cp.spawn;
+        const execCalls: string[][] = [];
+        let spawnCalls = 0;
+
+        (cp as any).execFile = (_file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+            execCalls.push(args);
+            const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+            callback?.(new Error('server_not_running'), '', 'error: server_not_running');
+            return {} as any;
+        };
+        (cp as any).spawn = () => {
+            spawnCalls++;
+            return { unref: () => {}, on: () => {} } as any;
+        };
+
+        const disconnectedSocket = {
+            on: () => {},
+            off: () => {},
+            isConnected: false,
+            getSnapshot: async () => null
+        } as unknown as HerdrSocketClient;
+
+        const wsProvider = new HerdrWorkspaceProvider('workspaces', disconnectedSocket, () => 'vscode');
+        const agentProvider = new HerdrWorkspaceProvider('agents', disconnectedSocket, () => 'vscode');
+        const wsHud = new WorkspaceHUD(disconnectedSocket, () => 'vscode', async () => []);
+
+        try {
+            await wsProvider.getChildren();
+            await agentProvider.getChildren();
+            await wsHud.refresh();
+
+            expect(execCalls.some(a => a.includes('workspace') && a.includes('list'))).to.be.true;
+            expect(execCalls.some(a => a.includes('agent') && a.includes('list'))).to.be.true;
+            expect(spawnCalls).to.equal(0);
+        } finally {
+            (cp as any).execFile = origExecFile;
+            (cp as any).spawn = origSpawn;
+            wsProvider.dispose();
+            agentProvider.dispose();
+            wsHud.dispose();
         }
     });
 });

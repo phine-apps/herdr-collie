@@ -102,7 +102,7 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
                                     result: {
                                         snapshot: {
                                             workspaces: [
-                                                { workspace_id: 'ws-1', label: 'Primary', focused: true }
+                                                { workspace_id: 'ws-1', label: 'Primary', cwd: '/workspace/project', focused: true }
                                             ],
                                             agents: currentMockAgents
                                         }
@@ -485,8 +485,8 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
 
         // Transition agent-1 from running -> done
         currentMockAgents = [
-            { id: 'agent-1', name: 'Claude-Worker', status: 'done' },
-            { id: 'agent-2', name: 'Agy-Worker', status: 'idle' }
+            { id: 'agent-1', name: 'Claude-Worker', status: 'done', workspace_id: 'ws-1' },
+            { id: 'agent-2', name: 'Agy-Worker', status: 'idle', workspace_id: 'ws-1' }
         ];
 
         await hud.refresh();
@@ -525,7 +525,7 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
         ];
 
         // 1st completion: working -> done (should trigger Auto-Verify 1/2)
-        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'done' }];
+        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'done', workspace_id: 'ws-1' }];
         await hud.refresh();
         await new Promise((resolve) => setTimeout(resolve, 80));
 
@@ -535,9 +535,9 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
         expect(promptCalls[0].params.prompt).to.include('[Auto-Verify Loop 1/2]');
 
         // Agent resumes working, then finishes 2nd time with error still present (should trigger Auto-Verify 2/2)
-        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'running' }];
+        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'running', workspace_id: 'ws-1' }];
         await hud.refresh();
-        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'done' }];
+        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'done', workspace_id: 'ws-1' }];
         await hud.refresh();
         await new Promise((resolve) => setTimeout(resolve, 80));
 
@@ -548,9 +548,9 @@ describe('Agent Attention HUD & Real-time Socket Integration Tests (H-01 ~ H-05,
 
         // Agent resumes working, then finishes 3rd time with error STILL present -> circuit breaker trips!
         mockState.warningMessageResponse = 'Dismiss';
-        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'running' }];
+        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'running', workspace_id: 'ws-1' }];
         await hud.refresh();
-        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'done' }];
+        currentMockAgents = [{ id: 'agent-1', name: 'Claude-Worker', status: 'done', workspace_id: 'ws-1' }];
         await hud.refresh();
         await new Promise((resolve) => setTimeout(resolve, 80));
 

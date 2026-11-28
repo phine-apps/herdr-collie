@@ -152,6 +152,21 @@ describe('executors Unit Tests', () => {
                 expect(err.message).to.include('fatal: merge conflict');
             }
         });
+
+        it('sets 10 MiB maxBuffer + timeout on cp.execFile and maps ERR_CHILD_PROCESS_STDIO_MAXBUFFER cleanly', async () => {
+            mockStdout = 'ok\n';
+            await runGitCmd(['diff', 'HEAD'], '/repo');
+            expect(recordedCalls[0].options.maxBuffer).to.equal(10 * 1024 * 1024);
+            expect(recordedCalls[0].options.timeout).to.equal(60_000);
+
+            mockError = { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', message: 'stdout maxBuffer length exceeded' };
+            try {
+                await runGitCmd(['diff', 'HEAD'], '/repo');
+                expect.fail('Should have rejected maxBuffer overflow');
+            } catch (err: any) {
+                expect(err.message).to.include('10 MiB buffer limit');
+            }
+        });
     });
 
     describe('getSessionSocketPath', () => {

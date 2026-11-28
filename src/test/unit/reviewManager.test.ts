@@ -308,6 +308,16 @@ describe('reviewManager Unit Tests', () => {
             });
         });
 
+        it('prioritizes Deleted status for AD, MD, and DD composite porcelain entries', () => {
+            const sample = [
+                'AD src/staged-then-deleted.ts',
+                'MD src/modified-then-deleted.ts',
+                'DD src/both-deleted.ts'
+            ].join('\n');
+            const parsed = parseGitStatusPorcelain(sample, '/repo');
+            expect(parsed.map(p => p.status)).to.deep.equal(['D', 'D', 'D']);
+        });
+
         it('returns empty array on empty or whitespace status output', () => {
             expect(parseGitStatusPorcelain('', '/repo')).to.deep.equal([]);
             expect(parseGitStatusPorcelain('   \n  ', '/repo')).to.deep.equal([]);

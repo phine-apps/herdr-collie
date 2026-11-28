@@ -310,6 +310,16 @@ describe('microTaskManager Unit Tests', () => {
             const sorted = sortAgentsForDispatch(agents);
             expect(sorted.map(a => a.id)).to.deep.equal(['4', '2', '3', '1', '5']);
         });
+
+        it('prioritizes agents matching preferredCwd ahead of unrelated idle agents', () => {
+            const agents: MicroTaskAgentOption[] = [
+                { id: '1', name: 'other-idle', status: 'idle', statusType: 'idle', cwd: '/repo' },
+                { id: '2', name: 'target-working', status: 'running', statusType: 'working', cwd: '/repo/.worktrees/feat-a/sub' }
+            ];
+
+            const sorted = sortAgentsForDispatch(agents, '/repo/.worktrees/feat-a');
+            expect(sorted.map(a => a.id)).to.deep.equal(['2', '1']);
+        });
     });
 
     describe('HerdrQuickFixProvider', () => {
@@ -338,7 +348,7 @@ describe('microTaskManager Unit Tests', () => {
 
             expect(actions.length).to.equal(1);
             expect(actions[0].title).to.include('Delegate Fix to Herdr Agent');
-            expect(actions[0].isPreferred).to.be.true;
+            expect(actions[0].isPreferred).to.not.be.true;
             expect(actions[0].command?.command).to.equal('herdr-collie.fixDiagnosticWithAgent');
             expect(actions[0].command?.arguments?.[1]).to.equal(diag);
         });

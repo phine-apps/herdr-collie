@@ -5,10 +5,11 @@
 import * as vscode from 'vscode';
 import * as l10n from '@vscode/l10n';
 import * as path from 'path';
+import * as os from 'os';
 import { detectLanguage, extractSnippet } from './reviewManager';
-import { formatCodeFence } from './formatters';
+import { formatCodeFence, isSameOrSubPath, safeRealPath } from './formatters';
 import { HerdrSocketClient } from './socketClient';
-import { parseSnapshotAgents, parseSnapshotWorkspaces, parseAgents } from './parsers';
+import { parseSnapshotAgents, parseSnapshotWorkspaces, parseWorkspaces, parsePanes, parseAgents } from './parsers';
 import { execHerdr } from './executors';
 import { ensureWorkspaceTrustedForAction, isWorkspaceTrusted } from './workspaceTrust';
 
@@ -265,15 +266,25 @@ export function formatContextTaskPrompt(
 /**
  * Sorts agents prioritizing idle agents first, followed by waiting, working, then others
  */
-export function sortAgentsForDispatch(agents: MicroTaskAgentOption[]): MicroTaskAgentOption[] {
+export function sortAgentsForDispatch(
+    agents: MicroTaskAgentOption[],
+    preferredCwd?: string
+): MicroTaskAgentOption[] {
     const priorityWeight: Record<MicroTaskAgentOption['statusType'], number> = {
         idle: 0,
         waiting: 1,
         working: 2,
         other: 3
     };
+    const resolvedPreferred = preferredCwd ? safeRealPath(preferredCwd) : undefined;
+    const isPreferred = (agent: MicroTaskAgentOption): number => {
+        if (!resolvedPreferred || !agent.cwd) return 1;
+        return isSameOrSubPath(safeRealPath(agent.cwd), resolvedPreferred) ? 0 : 1;
+    };
 
     return [...agents].sort((a, b) => {
+        const prefDiff = isPreferred(a) - isPreferred(b);
+        if (prefDiff !== 0) return prefDiff;
         const diff = (priorityWeight[a.statusType] ?? 3) - (priorityWeight[b.statusType] ?? 3);
         if (diff !== 0) return diff;
         return a.name.localeCompare(b.name);
@@ -323,32 +334,58 @@ export async function getAvailableAgents(
     }
 
     return new Promise<MicroTaskAgentOption[]>((resolve) => {
-        execHerdr(['--session', sessionName, 'agent', 'list'], (err, stdout) => {
-            if (!err && stdout) {
-                const parsed = parseAgents(stdout);
-                const list: MicroTaskAgentOption[] = parsed.map(a => {
-                    let statusType: MicroTaskAgentOption['statusType'] = 'other';
-                    const st = (a.status || '').toLowerCase();
-                    if (st.includes('idle') || st.includes('ready') || st.includes('done')) {
-                        statusType = 'idle';
-                    } else if (st.includes('wait') || st.includes('input') || st.includes('confirm') || st.includes('block')) {
-                        statusType = 'waiting';
-                    } else if (st.includes('work') || st.includes('busy') || st.includes('run')) {
-                        statusType = 'working';
-                    }
-                    return {
-                        id: a.id,
-                        name: a.name || a.id,
-                        status: a.status || 'unknown',
-                        statusType,
-                        workspaceLabel: a.workspaceLabel,
-                        cwd: undefined
-                    };
-                });
-                resolve(list);
-            } else {
+        const sessionArgs = ['--session', sessionName];
+        let rawWorkspaces = '';
+        let rawPanes = '';
+        let rawAgents = '';
+        let pending = 3;
+
+        const checkDone = () => {
+            pending--;
+            if (pending > 0) return;
+
+            if (!rawAgents) {
                 resolve([]);
+                return;
             }
+            const parsedPanes = rawPanes ? parsePanes(rawPanes) : [];
+            const parsedWorkspaces = rawWorkspaces ? parseWorkspaces(rawWorkspaces, parsedPanes, os.homedir()) : [];
+            const parsed = parseAgents(rawAgents, parsedWorkspaces);
+            const list: MicroTaskAgentOption[] = parsed.map(a => {
+                let statusType: MicroTaskAgentOption['statusType'] = 'other';
+                const st = (a.status || '').toLowerCase();
+                if (st.includes('idle') || st.includes('ready') || st.includes('done')) {
+                    statusType = 'idle';
+                } else if (st.includes('wait') || st.includes('input') || st.includes('confirm') || st.includes('block')) {
+                    statusType = 'waiting';
+                } else if (st.includes('work') || st.includes('busy') || st.includes('run')) {
+                    statusType = 'working';
+                }
+                return {
+                    id: a.id,
+                    name: a.name || a.id,
+                    status: a.status || 'unknown',
+                    statusType,
+                    workspaceLabel: a.workspaceLabel,
+                    cwd: a.workspaceCwd
+                };
+            });
+            resolve(list);
+        };
+
+        execHerdr([...sessionArgs, 'workspace', 'list'], { skipAutoStart: true }, (err, stdout) => {
+            if (!err && stdout) rawWorkspaces = stdout;
+            checkDone();
+        });
+
+        execHerdr([...sessionArgs, 'pane', 'list'], { skipAutoStart: true }, (err, stdout) => {
+            if (!err && stdout) rawPanes = stdout;
+            checkDone();
+        });
+
+        execHerdr([...sessionArgs, 'agent', 'list'], { skipAutoStart: true }, (err, stdout) => {
+            if (!err && stdout) rawAgents = stdout;
+            checkDone();
         });
     });
 }
@@ -401,7 +438,7 @@ export async function sendPromptToAgent(
 export async function promptAndDispatchTask(
     prompt: string,
     taskTitle: string,
-    options?: { socketClient?: HerdrSocketClient; sessionName?: string; cwd?: string }
+    options?: { socketClient?: HerdrSocketClient; sessionName?: string; cwd?: string; preferredCwd?: string }
 ): Promise<boolean> {
     if (!(await ensureWorkspaceTrustedForAction(vscode))) {
         return false;
@@ -421,7 +458,7 @@ export async function promptAndDispatchTask(
         return false;
     }
 
-    const sorted = sortAgentsForDispatch(rawAgents);
+    const sorted = sortAgentsForDispatch(rawAgents, options?.preferredCwd);
 
     // If exactly 1 agent is active, auto-dispatch without prompting!
     if (sorted.length === 1) {
@@ -506,7 +543,6 @@ export class HerdrQuickFixProvider implements vscode.CodeActionProvider {
             `🛠️ ${l10n.t('Delegate Fix to Herdr Agent')}`,
             vscode.CodeActionKind.QuickFix
         );
-        primaryAction.isPreferred = true;
         primaryAction.diagnostics = [primaryDiag];
         primaryAction.command = {
             command: 'herdr-collie.fixDiagnosticWithAgent',

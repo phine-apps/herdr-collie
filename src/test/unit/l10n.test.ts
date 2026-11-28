@@ -91,6 +91,31 @@ describe('Localization (l10n) Unit Tests', () => {
             const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
             expect(pkg.l10n).to.equal('./l10n');
         });
+
+        it('should ensure all command:<id> links in package.nls*.json exist in package.json contributes.commands', () => {
+            const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+            const declaredCommands = new Set<string>(
+                (pkg.contributes?.commands || []).map((c: any) => c.command)
+            );
+            const nlsBundles = [
+                { name: 'package.nls.json', data: nlsEn },
+                { name: 'package.nls.ja.json', data: nlsJa },
+                { name: 'package.nls.zh-cn.json', data: nlsZh }
+            ];
+            for (const { name, data } of nlsBundles) {
+                for (const [key, value] of Object.entries(data)) {
+                    if (typeof value !== 'string') continue;
+                    const matches = value.matchAll(/\(command:([a-zA-Z0-9_.-]+)\)/g);
+                    for (const match of matches) {
+                        const commandId = match[1];
+                        expect(
+                            declaredCommands.has(commandId),
+                            `Command link "command:${commandId}" in ${name}["${key}"] must exist in package.json contributes.commands`
+                        ).to.be.true;
+                    }
+                }
+            }
+        });
     });
 
     describe('Runtime Localization Bundle Parity (bundle.l10n.*.json)', () => {
@@ -182,6 +207,39 @@ describe('Localization (l10n) Unit Tests', () => {
                 missingKeys,
                 `Missing keys in l10n/bundle.l10n.json: ${missingKeys.map(m => `${m.file}: ${m.key}`).join(', ')}`
             ).to.be.empty;
+        });
+
+        it('should not leave unused keys in l10n/bundle.l10n.json', () => {
+            const srcDir = path.join(projectRoot, 'src');
+            const collectTsFiles = (dir: string): string[] => {
+                const results: string[] = [];
+                for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                    const fullPath = path.join(dir, entry.name);
+                    if (entry.isDirectory()) {
+                        if (entry.name === 'test') continue;
+                        results.push(...collectTsFiles(fullPath));
+                    } else if (entry.isFile() && entry.name.endsWith('.ts')) {
+                        results.push(fullPath);
+                    }
+                }
+                return results;
+            };
+            const usedKeys = new Set<string>();
+            for (const filePath of collectTsFiles(srcDir)) {
+                const content = fs.readFileSync(filePath, 'utf8');
+                const re = /l10n\.t\(\s*(['"])((?:\\.|(?!\1).)*)\1/gs;
+                let match: RegExpExecArray | null;
+                while ((match = re.exec(content)) !== null) {
+                    usedKeys.add(
+                        match[2]
+                            .replace(/\\n/g, '\n')
+                            .replace(/\\"/g, '"')
+                            .replace(/\\'/g, "'")
+                    );
+                }
+            }
+            const unusedKeys = Object.keys(bundleEn).filter(k => !usedKeys.has(k));
+            expect(unusedKeys, `Unused keys in bundle.l10n.json: ${unusedKeys.join(', ')}`).to.be.empty;
         });
     });
 

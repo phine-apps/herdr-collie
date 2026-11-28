@@ -187,7 +187,7 @@ export function registerReviewCommands(context: vscode.ExtensionContext, ctx: Co
     const clearReviewDisposable = vscode.commands.registerCommand('herdr-collie.clearReview', async () => {
         const count = ctx.reviewController.commentCount;
         if (count === 0) {
-            vscode.window.showInformationMessage(l10n.t('No pending review comments to submit'));
+            vscode.window.showInformationMessage(l10n.t('No pending review comments to clear'));
             return;
         }
         ctx.reviewController.clearAll();
@@ -260,7 +260,7 @@ export function registerReviewCommands(context: vscode.ExtensionContext, ctx: Co
         if (!picked) return;
 
         const confirm = await vscode.window.showWarningMessage(
-            l10n.t("Are you sure you want to rollback to checkpoint '{0}'? Any uncommitted changes will be lost.", picked.checkpoint.id),
+            l10n.t("Are you sure you want to rollback '{0}' to checkpoint '{1}'? Any uncommitted changes will be lost.", path.basename(repoRoot), picked.checkpoint.id),
             { modal: true },
             l10n.t('Rollback'),
             l10n.t('Cancel')

@@ -824,5 +824,152 @@ describe('worktreeManager Unit Tests', () => {
             expect(mockState.lastWarningMessage?.message).to.include('failed to launch agent');
             expect(mockState.lastInformationMessage).to.be.undefined;
         });
+
+        it('aborts on Esc at Step 4 prompt input and warns instead of claiming success when prompt delivery fails', async () => {
+            const repoDir = path.join(tempRoot, 'repo-step4');
+            fs.mkdirSync(repoDir, { recursive: true });
+            const { execFileSync } = require('child_process');
+            execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir });
+            execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoDir });
+            execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+            fs.writeFileSync(path.join(repoDir, 'README.md'), '# demo\n', 'utf8');
+            execFileSync('git', ['add', '.'], { cwd: repoDir });
+            execFileSync('git', ['commit', '-m', 'init'], { cwd: repoDir });
+
+            Object.defineProperty(mockVscode.workspace, 'workspaceFolders', {
+                configurable: true,
+                get: () => [{ uri: { fsPath: repoDir }, name: 'repo-step4', index: 0 }]
+            });
+
+            (cp as any).execFile = (file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+                if (file === 'git') {
+                    return originalExecFile.call(cp, file, args, optionsOrCb, cb);
+                }
+                const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+                if (file === 'which' || file === 'where') {
+                    if (args[0] === 'claude') {
+                        callback?.(null, '/usr/local/bin/claude', '');
+                        return {} as any;
+                    }
+                    callback?.(new Error('not found'), '', '');
+                    return {} as any;
+                }
+                if (file.includes('herdr')) {
+                    if (args.includes('agent') && args.includes('prompt')) {
+                        callback?.(new Error('prompt failed'), '', 'prompt failed');
+                        return {} as any;
+                    }
+                    callback?.(new Error('cli error'), '', '');
+                    return {} as any;
+                }
+                callback?.(new Error('unexpected'), '', '');
+                return {} as any;
+            };
+
+            mockVscode.window.showQuickPick = async (items: any[]) => {
+                const baseMatch = items.find((i: any) => i.branchName === 'main');
+                if (baseMatch) return baseMatch;
+                return items.find((i: any) => i.cmd === 'claude') || items.find((i: any) => i.cmd === 'CUSTOM');
+            };
+
+            const mockSocket: any = {
+                isConnected: true,
+                getSnapshot: async () => ({ agents: [] }),
+                listIntegrations: async () => [],
+                createWorkspace: async () => ({
+                    workspace: { workspace_id: 'w1' },
+                    tab: { tab_id: 'w1:t1' },
+                    root_pane: { pane_id: 'w1:p1' }
+                }),
+                startAgent: async () => ({ started: true }),
+                sendAgentPrompt: async () => { throw new Error('prompt rpc failed'); },
+                request: async () => { throw new Error('rpc failed'); }
+            };
+
+            // Case A: Esc (undefined) at Step 4 prompt input must abort without creating worktree
+            let inputStep = 0;
+            mockVscode.window.showInputBox = async () => {
+                inputStep++;
+                return inputStep === 1 ? 'feat/esc-cancel' : undefined;
+            };
+            await launchWorktreeAgentWizard('vscode', undefined, mockSocket);
+            expect(inputStep).to.equal(2);
+            expect(fs.existsSync(path.join(tempRoot, 'repo-step4-feat-esc-cancel'))).to.be.false;
+
+            // Case B: Native startAgent succeeds, prompt delivery fails -> must warn and not emit "🚀 Agent launched"
+            resetMockState();
+            inputStep = 0;
+            mockVscode.window.showInputBox = async () => {
+                inputStep++;
+                if (inputStep === 1) return 'feat/prompt-fail';
+                return 'implement feature Y';
+            };
+            await launchWorktreeAgentWizard('vscode', undefined, mockSocket);
+            expect(mockState.lastWarningMessage?.message).to.include('failed to deliver the initial prompt');
+            expect(mockState.lastInformationMessage).to.be.undefined;
+        });
+
+        it('startAgentInPane avoids CLI retry and shell fallback on timeout/already_exists errors, and strips control chars in buildAgentLaunchCommand', async () => {
+            // buildAgentLaunchCommand must strip ANSI CSI and C0 control chars such as \x03 and \x1b
+            const safeCmd = buildAgentLaunchCommand('claude', 'hello\x03\x1b[31mworld\x1b[0m\nnext line');
+            expect(safeCmd).to.equal(`claude 'helloworld next line'`);
+
+            let execCalls = 0;
+            let paneInputCalls = 0;
+            (cp as any).execFile = (_file: string, _args: string[], optionsOrCb?: any, cb?: any) => {
+                execCalls++;
+                const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+                callback?.(new Error('should not run'), '', '');
+                return {} as any;
+            };
+
+            const timeoutSocket: any = {
+                isConnected: true,
+                startAgent: async () => { throw new Error('Request timed out after 30000ms'); },
+                sendPaneInput: async () => { paneInputCalls++; }
+            };
+            const res = await startAgentInPane({
+                sessionName: 'vscode',
+                paneId: 'w1:p1',
+                agentName: 'feat-timeout',
+                agentCmd: 'claude',
+                agentKind: 'claude',
+                prompt: 'run task',
+                cwd: '/tmp/wt',
+                socketClient: timeoutSocket
+            });
+            expect(res).to.deep.equal({ method: 'native', started: false, prompted: false });
+            expect(execCalls).to.equal(0);
+            expect(paneInputCalls).to.equal(0);
+        });
+
+        it('normalizePrBaseBranch strips remote prefixes, rejects HEAD, and pushAndCreatePullRequestWithGh passes clean base', async () => {
+            const { normalizePrBaseBranch, pushAndCreatePullRequestWithGh } = require('../../worktreeManager');
+            expect(normalizePrBaseBranch('origin/main')).to.equal('main');
+            expect(normalizePrBaseBranch('refs/remotes/origin/develop')).to.equal('develop');
+            expect(normalizePrBaseBranch('HEAD')).to.equal('');
+            expect(normalizePrBaseBranch('  main  ')).to.equal('main');
+
+            const recordedGhArgs: string[][] = [];
+            (cp as any).execFile = (file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+                const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+                if (file === 'gh') {
+                    recordedGhArgs.push(args);
+                }
+                callback?.(null, 'https://github.com/org/repo/pull/1', '');
+                return {} as any;
+            };
+
+            await pushAndCreatePullRequestWithGh('/tmp/wt', 'feat/x', 'origin/main', 'Title');
+            expect(recordedGhArgs[0]).to.include.members(['pr', 'create', '--base', 'main', '--head', 'feat/x']);
+
+            let rejectedDetached = false;
+            try {
+                await pushAndCreatePullRequestWithGh('/tmp/wt', 'feat/x', 'HEAD', 'Title');
+            } catch (err: any) {
+                rejectedDetached = err.message.includes('detached HEAD');
+            }
+            expect(rejectedDetached).to.be.true;
+        });
     });
 });

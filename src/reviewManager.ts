@@ -6,6 +6,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as cp from 'child_process';
+import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import * as l10n from '@vscode/l10n';
 import { runGitCmd, getErrorMessage } from './executors';
@@ -464,24 +465,26 @@ export function parseGitStatusPorcelain(output: string, repoRoot: string): Chang
             rawPath = unquoteGitPath(rawPath);
         }
 
+        const x = statusCode[0];
+        const y = statusCode[1];
         let status: 'M' | 'A' | 'D' | 'R' | '??' = 'M';
         let statusLabel = 'Modified';
 
         if (statusCode.includes('?')) {
             status = '??';
-            statusLabel = 'Untracked';
-        } else if (statusCode.includes('A')) {
-            status = 'A';
-            statusLabel = 'Added';
-        } else if (statusCode.includes('D')) {
+            statusLabel = l10n.t('Untracked');
+        } else if (x === 'D' || y === 'D') {
             status = 'D';
-            statusLabel = 'Deleted';
-        } else if (statusCode.includes('R')) {
+            statusLabel = l10n.t('Deleted');
+        } else if (x === 'R' || y === 'R') {
             status = 'R';
-            statusLabel = 'Renamed';
+            statusLabel = l10n.t('Renamed');
+        } else if (x === 'A' || y === 'A') {
+            status = 'A';
+            statusLabel = l10n.t('Added');
         } else {
             status = 'M';
-            statusLabel = 'Modified';
+            statusLabel = l10n.t('Modified');
         }
 
         results.push({
@@ -779,7 +782,7 @@ export async function resolveDiffTargets(
 
     const isDeleted = change.status === 'D' || !fs.existsSync(change.fullPath);
     const workingPath = isDeleted ? prepareEmptyFileForDiff(change.filePath) : change.fullPath;
-    const workingLabel = isDeleted ? 'Deleted' : 'Working Tree';
+    const workingLabel = isDeleted ? l10n.t('Deleted') : l10n.t('Working Tree');
     const title = change.originalFilePath
         ? `${path.basename(change.originalFilePath)} → ${change.fileName} (${baseLabel} ↔ ${workingLabel})`
         : `${change.fileName} (${baseLabel} ↔ ${workingLabel})`;
@@ -842,7 +845,7 @@ export class ReviewFolderTreeItem extends ReviewChangeTreeItem {
                 filePath: folderPath,
                 fileName: folderLabel,
                 status: 'M',
-                statusLabel: 'Folder',
+                statusLabel: l10n.t('Folder'),
                 fullPath: path.resolve(repoRoot, folderPath)
             },
             repoRoot,
@@ -1104,6 +1107,19 @@ export interface ReviewCheckpoint {
     hash: string;
     timestamp: number;
     description: string;
+    worktreeScopeId?: string;
+}
+
+/**
+ * Computes a deterministic short identifier for the worktree root so checkpoints stored
+ * under shared Git `refs/herdr/checkpoints/` remain scoped to their originating worktree.
+ */
+export function computeWorktreeScopeId(repoRoot: string): string {
+    let resolved = path.resolve(repoRoot);
+    try {
+        resolved = fs.realpathSync(repoRoot);
+    } catch {}
+    return crypto.createHash('sha256').update(resolved).digest('hex').slice(0, 8);
 }
 
 /**
@@ -1133,7 +1149,8 @@ export async function createReviewCheckpointWithDetails(
     try {
         const timestamp = Date.now();
         const safeLabel = (label || 'pre-review').replace(/[^a-zA-Z0-9_-]/g, '_');
-        const checkpointId = `checkpoint_${timestamp}_${safeLabel}`;
+        const scopeId = computeWorktreeScopeId(repoRoot);
+        const checkpointId = `checkpoint_${timestamp}_wt_${scopeId}_${safeLabel}`;
         
         // Try creating a stash commit if dirty
         let commitHash = '';
@@ -1199,7 +1216,8 @@ export async function createReviewCheckpointWithDetails(
                 id: checkpointId,
                 hash: commitHash,
                 timestamp,
-                description: safeLabel
+                description: safeLabel,
+                worktreeScopeId: scopeId
             }
         };
     } catch (err) {
@@ -1272,8 +1290,16 @@ export async function rollbackReviewCheckpoint(
         return false;
     }
 
+    const scopedMatch = checkpointHashOrRef.match(/(?:^|\/)checkpoint_\d+_wt_([a-f0-9]{8})_/);
+    if (scopedMatch && scopedMatch[1] !== computeWorktreeScopeId(repoRoot)) {
+        return false;
+    }
+
     try {
         const untrackedRef = await resolveCheckpointUntrackedRef(repoRoot, checkpointHashOrRef);
+        const hasStashIndexParent = await runGitCmd(['rev-parse', '--verify', `${checkpointHashOrRef}^2`], repoRoot)
+            .then(out => Boolean(out.trim()))
+            .catch(() => false);
 
         const addedInIndexOut = await runGitCmd(
             ['diff', '--cached', '--name-only', '--diff-filter=A', checkpointHashOrRef, '-z'],
@@ -1292,6 +1318,10 @@ export async function rollbackReviewCheckpoint(
         }
 
         await runGitCmd(['checkout', checkpointHashOrRef, '--', '.'], repoRoot);
+        if (hasStashIndexParent) {
+            // Preserve unstaged vs staged index boundaries captured in stash^2 when rolling back a dirty checkpoint
+            await runGitCmd(['read-tree', `${checkpointHashOrRef}^2`], repoRoot).catch(() => {});
+        }
         if (options.cleanUntracked !== false) {
             const cleanArgs = ['clean', '-fd', '-e', '.env*', '-e', '.vscode/*'];
             if (options.excludePatterns && options.excludePatterns.length > 0) {
@@ -1335,6 +1365,7 @@ export async function listReviewCheckpoints(repoRoot: string): Promise<ReviewChe
 
         if (!out || !out.trim()) return [];
 
+        const currentScopeId = computeWorktreeScopeId(repoRoot);
         const lines = out.trim().split('\n');
         const checkpoints: ReviewCheckpoint[] = [];
         for (const line of lines) {
@@ -1342,6 +1373,10 @@ export async function listReviewCheckpoints(repoRoot: string): Promise<ReviewChe
             if (parts.length >= 3) {
                 const refName = parts[0];
                 const id = refName.replace(/^refs\/herdr\/checkpoints\//, '').replace(/^herdr\/checkpoints\//, '');
+                const scopedMatch = id.match(/^checkpoint_\d+_wt_([a-f0-9]{8})_(.+)$/);
+                if (scopedMatch && scopedMatch[1] !== currentScopeId) {
+                    continue;
+                }
                 const hash = parts[1];
                 const rawDate = parts[2].split(' ')[0];
                 const timestamp = parseInt(rawDate, 10) * 1000;
@@ -1349,7 +1384,8 @@ export async function listReviewCheckpoints(repoRoot: string): Promise<ReviewChe
                     id,
                     hash,
                     timestamp,
-                    description: id
+                    description: scopedMatch ? scopedMatch[2] : id,
+                    ...(scopedMatch ? { worktreeScopeId: scopedMatch[1] } : {})
                 });
             }
         }

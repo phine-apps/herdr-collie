@@ -194,32 +194,44 @@ export function execHerdr(
 }
 
 
+export const GIT_CMD_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+export const GIT_CMD_TIMEOUT_MS = 60_000;
+
 // -----------------------------------------------------------------------------
 // Utility: Run Git CLI commands safely with arguments array
 // -----------------------------------------------------------------------------
 export async function runGitCmd(args: string[], cwd: string): Promise<string> {
     return new Promise((resolve, reject) => {
-        cp.execFile('git', args, { cwd }, (error: cp.ExecFileException | null, stdout: string, stderr: string) => {
-            if (error) {
-                // Check if git is missing
-                if (error.code === 127 || error.code === 'ENOENT' || (error.message && error.message.includes('not found'))) {
-                    reject(new Error('Git CLI is not installed or not in PATH. Please install Git to use this feature.'));
-                } else if (args[0] === 'diff' && (error.code === 1 || error.code === undefined)) {
-                    // Git diff can return exit code 1 if differences exist
-                    resolve(stdout || '');
-                } else {
-                    const stderrTrimmed = (stderr && stderr.trim()) || '';
-                    const stdoutTrimmed = (stdout && stdout.trim()) || '';
-                    let errMsg = stderrTrimmed || stdoutTrimmed || error.message || 'Git command failed';
-                    if (stderrTrimmed && stdoutTrimmed && (args[0] === 'merge' || /^warning:/i.test(stderrTrimmed))) {
-                        errMsg = `${stderrTrimmed}\n${stdoutTrimmed}`;
+        cp.execFile(
+            'git',
+            args,
+            { cwd, maxBuffer: GIT_CMD_MAX_BUFFER_BYTES, timeout: GIT_CMD_TIMEOUT_MS },
+            (error: cp.ExecFileException | null, stdout: string, stderr: string) => {
+                if (error) {
+                    // Check if git is missing
+                    if (error.code === 127 || error.code === 'ENOENT' || (error.message && error.message.includes('not found'))) {
+                        reject(new Error('Git CLI is not installed or not in PATH. Please install Git to use this feature.'));
+                    } else if ((error as any).code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+                        reject(new Error('Git command output exceeded the 10 MiB buffer limit.'));
+                    } else if (error.killed && error.signal) {
+                        reject(new Error('Git command timed out.'));
+                    } else if (args[0] === 'diff' && (error.code === 1 || error.code === undefined)) {
+                        // Git diff can return exit code 1 if differences exist
+                        resolve(stdout || '');
+                    } else {
+                        const stderrTrimmed = (stderr && stderr.trim()) || '';
+                        const stdoutTrimmed = (stdout && stdout.trim()) || '';
+                        let errMsg = stderrTrimmed || stdoutTrimmed || error.message || 'Git command failed';
+                        if (stderrTrimmed && stdoutTrimmed && (args[0] === 'merge' || /^warning:/i.test(stderrTrimmed))) {
+                            errMsg = `${stderrTrimmed}\n${stdoutTrimmed}`;
+                        }
+                        reject(new Error(errMsg));
                     }
-                    reject(new Error(errMsg));
+                    return;
                 }
-                return;
+                resolve(stdout || '');
             }
-            resolve(stdout || '');
-        });
+        );
     });
 }
 

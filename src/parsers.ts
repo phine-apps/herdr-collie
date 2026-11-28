@@ -305,7 +305,8 @@ export function parseAgents(
 
             const matchedWs = workspaces.find(w => w.id === workspaceId);
             const workspaceLabel = matchedWs ? matchedWs.label : (workspaceId ? `Workspace ${workspaceId}` : undefined);
-            const workspaceCwd = matchedWs ? matchedWs.cwd : undefined;
+            const directCwd = firstNonEmptyString(a.workspace_cwd, a.cwd);
+            const workspaceCwd = (matchedWs && matchedWs.cwd) ? matchedWs.cwd : (directCwd || undefined);
             const rawOutput = a.last_output ?? a.latest_output ?? a.summary ?? a.last_line ?? a.output;
             const latestOutput = typeof rawOutput === 'string' ? extractCleanOutputSummary(rawOutput) : undefined;
 

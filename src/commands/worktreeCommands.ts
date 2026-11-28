@@ -4,9 +4,10 @@
  */
 import * as vscode from 'vscode';
 import * as l10n from '@vscode/l10n';
+import * as fs from 'fs';
 import * as path from 'path';
 import { execHerdr, getErrorMessage, runGitCmd, isCommandAvailable } from '../executors';
-import { formatFailingPrChecksPrompt, isSameOrSubPath } from '../formatters';
+import { findAgentForWorktree, formatFailingPrChecksPrompt, isSameOrSubPath, normalizePathForComparison, safeRealPath } from '../formatters';
 import { promptAndDispatchTask } from '../microTaskManager';
 import { resolveWorktreeMergeBase } from '../reviewManager';
 import { launchSwarmPlaybookWizard } from '../swarmPlaybooks';
@@ -21,12 +22,42 @@ import {
     pushAndCreatePullRequestWithGh,
     manageIntegrationsWizard,
     getCurrentGitBranch,
+    normalizePrBaseBranch,
+    validateBranchName,
     formatWorktreeScorecardBadge,
     fetchFailingPrChecksWithLogs
 } from '../worktreeManager';
 import { HerdrWorkspaceTreeItem } from '../workspaceDragAndDrop';
+import { parseSnapshotWorkspaces, parseWorkspaces } from '../parsers';
+import { isSafeCliTargetId } from '../socketClient';
 import { ensureWorkspaceTrustedForAction } from '../workspaceTrust';
 import { CommandContext } from './types';
+
+async function resolveWorkspaceIdForPath(ctx: CommandContext, targetPath: string): Promise<string | undefined> {
+    const resolvedTarget = safeRealPath(targetPath);
+    const socketClient = ctx.getSocketClient();
+    if (socketClient?.isConnected) {
+        try {
+            const snapshot = await socketClient.getSnapshot();
+            if (snapshot) {
+                const parsed = parseSnapshotWorkspaces(snapshot);
+                const match = parsed.find(w => w.cwd && isSameOrSubPath(resolvedTarget, safeRealPath(w.cwd)));
+                if (match?.id) return match.id;
+            }
+        } catch {}
+    }
+
+    const rawWs = await new Promise<string>((resolve) => {
+        execHerdr(
+            ['--session', ctx.getActiveSidebarSession(), 'workspace', 'list'],
+            { skipAutoStart: true },
+            (err, stdout) => resolve(!err && stdout ? stdout : '')
+        );
+    });
+    if (!rawWs) return undefined;
+    const parsedWs = parseWorkspaces(rawWs, []);
+    return parsedWs.find(w => w.cwd && isSameOrSubPath(resolvedTarget, safeRealPath(w.cwd)))?.id;
+}
 
 export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: CommandContext): void {
     const launchWorktreeAgentDisposable = vscode.commands.registerCommand('herdr-collie.launchWorktreeAgent', async () => {
@@ -48,6 +79,9 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
         }
 
         let branchToMerge = item?.branchName;
+        let mergeWorktreePath = item?.cwd;
+        const targetBranch = (await getCurrentGitBranch(repoRoot).catch(() => '')) || path.basename(repoRoot);
+
         if (!branchToMerge) {
             const worktrees = await listGitWorktrees(repoRoot);
             const candidates = worktrees.filter(w => w.branch && !w.isMain && w.worktree !== repoRoot);
@@ -62,27 +96,29 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
                     label: `$(git-branch) ${c.branch}`,
                     description: c.worktree,
                     detail: card ? formatWorktreeScorecardBadge(card) : undefined,
-                    branch: c.branch!
+                    branch: c.branch!,
+                    worktree: c.worktree
                 };
             }), {
                 title: l10n.t('Merge Branch'),
-                placeHolder: l10n.t('Select Git Worktree branch to merge into current branch ({0})', path.basename(repoRoot))
+                placeHolder: l10n.t('Select Git Worktree branch to merge into current branch ({0})', targetBranch)
             });
             if (!selected) return;
             branchToMerge = selected.branch;
+            mergeWorktreePath = selected.worktree;
         }
 
         const mergeBtn = l10n.t('Merge Branch');
         const cancelBtn = l10n.t('Dismiss');
         const confirm = await vscode.window.showInformationMessage(
-            l10n.t("Are you sure you want to merge worktree branch '{0}' into '{1}'?", branchToMerge, path.basename(repoRoot)),
+            l10n.t("Are you sure you want to merge worktree branch '{0}' into '{1}'?", branchToMerge, targetBranch),
             mergeBtn,
             cancelBtn
         );
         if (confirm !== mergeBtn) return;
 
         try {
-            const verification = await verifyWorktreeMerge(repoRoot, branchToMerge, item?.cwd);
+            const verification = await verifyWorktreeMerge(repoRoot, branchToMerge, mergeWorktreePath);
             if (!verification.canMerge) {
                 const delegateBtn = l10n.t('Delegate Resolution to Agent');
                 const mergeAnywayBtn = l10n.t('Merge Anyway');
@@ -100,7 +136,12 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
                     await promptAndDispatchTask(
                         conflictPrompt,
                         l10n.t("Resolve Merge Blockers on '{0}'", branchToMerge),
-                        { socketClient: ctx.getSocketClient(), sessionName: ctx.getActiveSidebarSession(), cwd: item?.cwd || repoRoot }
+                        {
+                            socketClient: ctx.getSocketClient(),
+                            sessionName: ctx.getActiveSidebarSession(),
+                            cwd: mergeWorktreePath || repoRoot,
+                            preferredCwd: mergeWorktreePath || repoRoot
+                        }
                     );
                     return;
                 }
@@ -127,12 +168,16 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
                 cancelBtn
             );
             if (action === delegateBtn) {
-                const targetBranch = await getCurrentGitBranch(repoRoot);
                 const conflictPrompt = formatMergeConflictPrompt(branchToMerge, targetBranch, { errorDetails: errMsg });
                 await promptAndDispatchTask(
                     conflictPrompt,
                     l10n.t("Resolve Merge Blockers on '{0}'", branchToMerge),
-                    { socketClient: ctx.getSocketClient(), sessionName: ctx.getActiveSidebarSession(), cwd: item?.cwd || repoRoot }
+                    {
+                        socketClient: ctx.getSocketClient(),
+                        sessionName: ctx.getActiveSidebarSession(),
+                        cwd: mergeWorktreePath || repoRoot,
+                        preferredCwd: mergeWorktreePath || repoRoot
+                    }
                 );
             }
         }
@@ -141,7 +186,7 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
     const removeWorktreeDisposable = vscode.commands.registerCommand('herdr-collie.removeWorktree', async (item?: HerdrWorkspaceTreeItem) => {
         if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         let targetPath = item?.cwd;
-        const targetId = item?.rawId || (item?.id ? item.id.split(':')[0] : undefined);
+        let targetId = item?.rawId || (item?.id ? item.id.split(':')[0] : undefined);
         let targetLabel = item?.label || 'Worktree';
 
         const repoRoot = await ctx.resolveMainRepoRoot(targetPath);
@@ -169,8 +214,14 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
         }
 
         const worktrees = await listGitWorktrees(repoRoot);
-        const isLinkedWorktree = worktrees.some(w => w.worktree === targetPath && !w.isMain);
-        if (!isLinkedWorktree) {
+        const resolvedTarget = safeRealPath(targetPath);
+        const matchedLinkedWorktree = worktrees.find(
+            w => !w.isMain && isSameOrSubPath(resolvedTarget, safeRealPath(w.worktree))
+        );
+        if (matchedLinkedWorktree) {
+            // Normalize subdirectory or symlinked paths back to the registered linked worktree root
+            targetPath = matchedLinkedWorktree.worktree;
+        } else {
             const closeBtn = l10n.t('Close Workspace');
             const confirm = await vscode.window.showWarningMessage(
                 l10n.t("'{0}' is not a linked Git worktree. Would you like to close the Herdr workspace without deleting any files?", targetLabel),
@@ -178,8 +229,8 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
                 closeBtn
             );
             if (confirm !== closeBtn) return;
-            if (targetId) {
-                execHerdr(['--session', ctx.getActiveSidebarSession(), 'workspace', 'close', targetId], () => {
+            if (targetId && isSafeCliTargetId(targetId)) {
+                execHerdr(['--session', ctx.getActiveSidebarSession(), 'workspace', 'close', targetId], { skipAutoStart: true }, () => {
                     ctx.refreshAllProviders();
                 });
             }
@@ -195,9 +246,13 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
         if (confirm !== removeBtn) return;
 
         try {
-            if (targetId) {
+            if (!targetId) {
+                targetId = await resolveWorkspaceIdForPath(ctx, targetPath);
+            }
+            const resolvedCloseId = targetId;
+            if (resolvedCloseId && isSafeCliTargetId(resolvedCloseId)) {
                 await new Promise<void>((resolve) => {
-                    execHerdr(['--session', ctx.getActiveSidebarSession(), 'workspace', 'close', targetId], (err) => {
+                    execHerdr(['--session', ctx.getActiveSidebarSession(), 'workspace', 'close', resolvedCloseId], { skipAutoStart: true }, (err) => {
                         if (err) {
                             console.warn('[herdr-collie] Failed to close Herdr workspace before removing worktree:', err);
                         }
@@ -205,7 +260,16 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
                     });
                 });
             }
+            const removedNormPath = normalizePathForComparison(safeRealPath(targetPath));
             await removeWorktree(repoRoot, targetPath, true);
+            const activeReviewTarget = ctx.reviewChangesProvider?.getReviewTarget?.();
+            if (
+                activeReviewTarget?.worktreePath &&
+                normalizePathForComparison(safeRealPath(activeReviewTarget.worktreePath)) === removedNormPath
+            ) {
+                ctx.reviewChangesProvider.setReviewTarget(null);
+                ctx.updateTreeViewDescriptions();
+            }
             vscode.window.showInformationMessage(l10n.t("Worktree '{0}' removed.", targetLabel));
             ctx.refreshAllProviders();
         } catch (e: unknown) {
@@ -236,8 +300,10 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
             branchName = await getCurrentGitBranch(worktreePath).catch(() => undefined);
         }
 
+        let worktreesCache: Awaited<ReturnType<typeof listGitWorktrees>> | undefined;
         if (!worktreePath || !branchName) {
             const worktrees = await listGitWorktrees(repoRoot);
+            worktreesCache = worktrees;
             const candidates = worktrees.filter(w => w.branch && !w.isMain && w.worktree !== repoRoot);
             if (candidates.length === 0) {
                 vscode.window.showInformationMessage(l10n.t('No active Git worktree branches found.'));
@@ -265,9 +331,37 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
             branchName = selectedWt.branch;
         }
 
-        const currentMainBranch = await getCurrentGitBranch(repoRoot).catch(() => 'main');
-        const mergeBase = await resolveWorktreeMergeBase(worktreePath, currentMainBranch, branchName);
-        const baseBranch = mergeBase.baseBranch || currentMainBranch || 'main';
+        const rawMainBranch = await getCurrentGitBranch(repoRoot).catch(() => '');
+        const currentMainBranch = rawMainBranch === 'HEAD' ? '' : rawMainBranch;
+        const mergeBase = await resolveWorktreeMergeBase(worktreePath, currentMainBranch || undefined, branchName);
+        let resolvedBaseBranch =
+            normalizePrBaseBranch(mergeBase.baseBranch) ||
+            normalizePrBaseBranch(currentMainBranch);
+
+        if (!resolvedBaseBranch) {
+            const originHeadRef = await runGitCmd(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], repoRoot).catch(() => '');
+            resolvedBaseBranch = normalizePrBaseBranch(originHeadRef);
+        }
+        if (!resolvedBaseBranch) {
+            for (const candidate of ['main', 'master']) {
+                const exists = await runGitCmd(['rev-parse', '--verify', '--quiet', candidate], repoRoot).catch(() => '');
+                if (exists.trim() && candidate !== branchName) {
+                    resolvedBaseBranch = candidate;
+                    break;
+                }
+            }
+        }
+        if (!resolvedBaseBranch) {
+            const inputBase = await vscode.window.showInputBox({
+                title: l10n.t('Base Branch'),
+                prompt: l10n.t('Enter base branch name for Pull Request (e.g. main)'),
+                placeHolder: 'main',
+                validateInput: validateBranchName
+            });
+            if (!inputBase) return;
+            resolvedBaseBranch = inputBase.trim();
+        }
+        const baseBranch = resolvedBaseBranch;
 
         const actionPick = await vscode.window.showQuickPick([
             {
@@ -327,9 +421,8 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
             }
 
             const prompt = formatFailingPrChecksPrompt(branchName, checkResult.checks, checkResult.logSnippet);
-            const matchedAgent = ctx.getAgentItems().find(
-                a => a.cwd && isSameOrSubPath(a.cwd, worktreePath!)
-            );
+            const allWtPaths = (worktreesCache ?? await listGitWorktrees(repoRoot)).map(w => w.worktree);
+            const matchedAgent = findAgentForWorktree(worktreePath!, allWtPaths, ctx.getAgentItems());
             await ctx.sendToHerdr(
                 prompt,
                 l10n.t('Prompt sent to agent to fix {0} failing PR check(s) on {1}', checkResult.checks.length, branchName),
@@ -359,9 +452,8 @@ export function registerWorktreeCommands(context: vscode.ExtensionContext, ctx: 
             if (customInstruction === undefined) return;
 
             const prompt = formatCreatePullRequestPrompt(branchName, baseBranch, customInstruction.trim() || undefined);
-            const matchedAgent = ctx.getAgentItems().find(
-                a => a.cwd && isSameOrSubPath(a.cwd, worktreePath!)
-            );
+            const allWtPaths = (worktreesCache ?? await listGitWorktrees(repoRoot)).map(w => w.worktree);
+            const matchedAgent = findAgentForWorktree(worktreePath!, allWtPaths, ctx.getAgentItems());
             await ctx.sendToHerdr(
                 prompt,
                 l10n.t('Prompt sent to agent to create PR for {0}', branchName),

@@ -151,14 +151,16 @@ export function isSafeCliTargetId(id: unknown): id is string {
  * Resolves the socket path for a given session name.
  */
 export function getSessionSocketPath(sessionName?: string): string {
+    const envSocketPath = process.env['HERDR_SOCKET_PATH'];
+    const envSession = process.env['HERDR_SESSION'];
     if (!sessionName || sessionName === 'default') {
-        if (!sessionName && process.env['HERDR_SOCKET_PATH']) {
-            return process.env['HERDR_SOCKET_PATH'];
+        if (envSocketPath && (!sessionName || !envSession || envSession === 'default')) {
+            return envSocketPath;
         }
         return path.join(os.homedir(), '.config', 'herdr', 'herdr.sock');
     }
-    if (process.env['HERDR_SESSION'] === sessionName && process.env['HERDR_SOCKET_PATH']) {
-        return process.env['HERDR_SOCKET_PATH'];
+    if (envSession === sessionName && envSocketPath) {
+        return envSocketPath;
     }
     // Sanitize sessionName to prevent path traversal
     const safeSessionName = path.basename(sessionName).replace(/[^a-zA-Z0-9_-]/g, '_');

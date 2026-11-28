@@ -4,8 +4,8 @@
  */
 import { expect } from 'chai';
 import '../helpers/mockVscode';
-import { resetMockState, mockState, MockUri, MockRange, MockDiagnostic, MockDiagnosticSeverity } from '../helpers/mockVscode';
-import { classifyAgentStatus } from '../../parsers';
+import { resetMockState, mockState, mockVscode, MockUri, MockRange, MockDiagnostic, MockDiagnosticSeverity } from '../helpers/mockVscode';
+import { classifyAgentStatus, parseAgents } from '../../parsers';
 import {
     AgentHUD,
     escapeMarkdownTableCell,
@@ -188,6 +188,10 @@ describe('AgentHUD & Status Classification Unit Tests', () => {
             expect(summaryA.problemsByFile).to.have.property('src/auth.ts');
             expect(summaryA.problemsByFile).to.not.have.property('src/billing.ts');
             expect(summaryA.problemsByFile).to.not.have.property('Untitled-1');
+
+            const unscopedSummary = collectWorkspaceErrorsForAgent(undefined);
+            expect(unscopedSummary.totalErrors).to.equal(2);
+            expect(Object.keys(unscopedSummary.problemsByFile)).to.not.include('Untitled-1');
         });
 
         it('formats auto-verify prompt with loop iteration header when attempt and maxRetries are provided', () => {
@@ -376,6 +380,263 @@ describe('AgentHUD & Status Classification Unit Tests', () => {
                 expect(mockState.statusBarItems[0].text).to.equal(textAfterFresh);
                 expect(mockState.statusBarItems[0].text).to.not.include('stale-bot');
             } finally {
+                hud.dispose();
+            }
+        });
+
+        it('ignores notification action if active session changed while notification was open', async () => {
+            let resolveWarn!: (choice: string | undefined) => void;
+            const origShowWarning = mockVscode.window.showWarningMessage;
+            (mockVscode.window as any).showWarningMessage = async (msg: string, ...items: any[]) => {
+                mockState.lastWarningMessage = { message: msg, items };
+                if (msg.includes('requires input')) {
+                    return await new Promise<string | undefined>(resolve => {
+                        resolveWarn = resolve;
+                    });
+                }
+                return undefined;
+            };
+
+            let currentSession = 'session-a';
+            let sentKeysCalls = 0;
+            const clientA: any = {
+                on: () => {},
+                off: () => {},
+                isConnected: true,
+                sendPaneKeys: async () => { sentKeysCalls++; },
+                getSnapshot: async () => ({
+                    agents: [{ pane_id: '0:0', name: 'claude-a', agent_status: 'blocked' }]
+                })
+            };
+            const clientB: any = {
+                on: () => {},
+                off: () => {},
+                isConnected: true,
+                sendPaneKeys: async () => { sentKeysCalls++; },
+                getSnapshot: async () => ({ agents: [] })
+            };
+
+            const hud = new AgentHUD(clientA as unknown as HerdrSocketClient, () => currentSession);
+            try {
+                await hud.refresh();
+                // User switches to session-b while blocked notification for session-a is open
+                currentSession = 'session-b';
+                hud.updateSocketClient(clientB as unknown as HerdrSocketClient, { refresh: false });
+
+                resolveWarn('Approve (y)');
+                await new Promise(r => setTimeout(r, 20));
+
+                expect(sentKeysCalls).to.equal(0);
+                expect(mockState.lastWarningMessage?.message).to.include('Ignored action');
+            } finally {
+                mockVscode.window.showWarningMessage = origShowWarning;
+                hud.dispose();
+            }
+        });
+
+        it('falls back to CLI agent list in showHUDQuickPick() when disconnected and guards QuickPick actions on session switch', async () => {
+            const cp = require('child_process');
+            const origExecFile = cp.execFile;
+            const origCreateQuickPick = mockVscode.window.createQuickPick;
+
+            (cp as any).execFile = (_file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+                const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+                if (args.includes('agent') && args.includes('list')) {
+                    callback?.(null, JSON.stringify({
+                        agents: [{ pane_id: '0:0', name: 'cli-agent', status: 'blocked', workspace_id: 'w1' }]
+                    }), '');
+                    return {} as any;
+                }
+                callback?.(null, '', '');
+                return {} as any;
+            };
+
+            let triggerBtnHandler: ((e: any) => Promise<void>) | undefined;
+            let qpItems: any[] = [];
+            (mockVscode.window as any).createQuickPick = () => ({
+                title: '',
+                placeholder: '',
+                set items(val: any[]) { qpItems = val; },
+                get items() { return qpItems; },
+                selectedItems: [],
+                onDidTriggerItemButton: (cb: any) => { triggerBtnHandler = cb; return { dispose: () => {} }; },
+                onDidAccept: () => ({ dispose: () => {} }),
+                onDidHide: () => ({ dispose: () => {} }),
+                show: () => {},
+                hide: () => {},
+                dispose: () => {}
+            });
+
+            let currentSession = 'session-a';
+            let sentKeysCalls = 0;
+            const disconnectedClient: any = {
+                on: () => {},
+                off: () => {},
+                isConnected: false,
+                sendPaneKeys: async () => { sentKeysCalls++; },
+                getSnapshot: async () => null
+            };
+            const clientB: any = { ...disconnectedClient };
+
+            const hud = new AgentHUD(disconnectedClient as unknown as HerdrSocketClient, () => currentSession);
+            try {
+                await hud.showHUDQuickPick();
+                expect(qpItems).to.have.lengthOf(1);
+                expect(qpItems[0].agent.name).to.equal('cli-agent');
+
+                // Switch session while QuickPick is open, then click Quick Approve (y) -> must be ignored cleanly
+                currentSession = 'session-b';
+                hud.updateSocketClient(clientB as unknown as HerdrSocketClient, { refresh: false });
+                await triggerBtnHandler?.({
+                    item: qpItems[0],
+                    button: qpItems[0].buttons.find((b: any) => String(b.tooltip).includes('Quick Approve'))
+                });
+                expect(sentKeysCalls).to.equal(0);
+                expect(mockState.lastWarningMessage?.message).to.include('Ignored action');
+            } finally {
+                cp.execFile = origExecFile;
+                (mockVscode.window as any).createQuickPick = origCreateQuickPick;
+                hud.dispose();
+            }
+        });
+
+        it('awaits CLI sendKeysToAgent errors and reports failure instead of false success notification', async () => {
+            const cp = require('child_process');
+            const origExecFile = cp.execFile;
+            const origShowError = (mockVscode.window as any).showErrorMessage;
+            const errorsShown: string[] = [];
+            (mockVscode.window as any).showErrorMessage = async (msg: string) => {
+                errorsShown.push(msg);
+                return undefined;
+            };
+
+            (cp as any).execFile = (_file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+                const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+                if (args.includes('send-keys')) {
+                    callback?.(new Error('pane gone'), '', 'pane gone');
+                    return {} as any;
+                }
+                callback?.(null, '', '');
+                return {} as any;
+            };
+
+            const disconnectedClient: any = {
+                on: () => {},
+                off: () => {},
+                isConnected: false,
+                getSnapshot: async () => null
+            };
+            const hud = new AgentHUD(disconnectedClient as unknown as HerdrSocketClient, () => 'vscode');
+            try {
+                mockState.warningMessageResponse = 'Approve (y)';
+                await (hud as any).triggerBlockedNotification({
+                    id: 'w1:p1',
+                    name: 'claude',
+                    status: 'blocked',
+                    statusType: 'blocked',
+                    statusIcon: '🔴',
+                    isWorking: false,
+                    isBlocked: true
+                });
+                expect(errorsShown.some(m => m.includes("Failed to send input to 'claude'"))).to.be.true;
+                expect(mockState.lastInformationMessage).to.be.undefined;
+            } finally {
+                cp.execFile = origExecFile;
+                (mockVscode.window as any).showErrorMessage = origShowError;
+                hud.dispose();
+            }
+        });
+
+        it('populates workspaceCwd in AgentHUD CLI fallback without daemon auto-start and isolates auto-verify when workspaceCwd is missing', async () => {
+            const cp = require('child_process');
+            const origExecFile = cp.execFile;
+            const origSpawn = cp.spawn;
+            const execCalls: string[][] = [];
+            let spawnCalls = 0;
+
+            (cp as any).spawn = () => {
+                spawnCalls++;
+                return { unref: () => {}, on: () => {} } as any;
+            };
+            (cp as any).execFile = (_file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+                execCalls.push(args);
+                const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+                if (args.includes('workspace') && args.includes('list')) {
+                    callback?.(null, JSON.stringify({ workspaces: [{ workspace_id: 'w1', label: 'wt-a' }] }), '');
+                    return {} as any;
+                }
+                if (args.includes('pane') && args.includes('list')) {
+                    callback?.(null, JSON.stringify({ panes: [{ pane_id: 'w1:p1', workspace_id: 'w1', foreground_cwd: '/workspace/repo-wt-a' }] }), '');
+                    return {} as any;
+                }
+                if (args.includes('agent') && args.includes('list')) {
+                    callback?.(null, JSON.stringify({ agents: [{ pane_id: 'w1:p1', name: 'cli-agent', status: 'running', workspace_id: 'w1' }] }), '');
+                    return {} as any;
+                }
+                callback?.(new Error('server_not_running'), '', 'error: server_not_running');
+                return {} as any;
+            };
+
+            const disconnectedClient: any = {
+                on: () => {},
+                off: () => {},
+                isConnected: false,
+                getSnapshot: async () => null
+            };
+            const hud = new AgentHUD(disconnectedClient as unknown as HerdrSocketClient, () => 'vscode');
+            try {
+                // Direct parser fallback with explicit agent CWD
+                const directParsed = parseAgents(JSON.stringify({
+                    agents: [{ pane_id: 'w9:p1', name: 'direct', status: 'idle', workspace_cwd: '/workspace/direct-wt' }]
+                }));
+                expect(directParsed[0].workspaceCwd).to.equal('/workspace/direct-wt');
+
+                // CLI fallback resolves workspaceCwd via workspace + pane lists and skips auto-start on errors
+                const resolvedAgents = await (hud as any).fetchAgentsWithCliFallback();
+                expect(execCalls.some(a => a.includes('workspace') && a.includes('list'))).to.be.true;
+                expect(execCalls.some(a => a.includes('pane') && a.includes('list'))).to.be.true;
+                expect(execCalls.some(a => a.includes('agent') && a.includes('list'))).to.be.true;
+                expect(spawnCalls).to.equal(0);
+                expect(resolvedAgents[0].workspaceCwd).to.equal('/workspace/repo-wt-a');
+
+                // Auto-verify must NOT dispatch diagnostics from another worktree when agent.workspaceCwd is undefined
+                mockState.configurations.set('herdr-collie.agentHUD.autoVerifyDiagnostics', 'auto');
+                mockState.workspaceDiagnostics = [
+                    [MockUri.file('/workspace/other-wt/src/broken.ts'), [new MockDiagnostic(new MockRange(0, 0, 0, 5), 'Other worktree error', MockDiagnosticSeverity.Error)]]
+                ];
+                let sentPrompts = 0;
+                const noCwdSocket: any = {
+                    on: () => {},
+                    off: () => {},
+                    isConnected: true,
+                    sendAgentPrompt: async () => { sentPrompts++; },
+                    getSnapshot: async () => ({
+                        workspaces: [{ workspace_id: 'w-no-cwd', label: 'NoCwd' }],
+                        agents: []
+                    })
+                };
+                const hudNoCwd = new AgentHUD(noCwdSocket as unknown as HerdrSocketClient, () => 'vscode');
+                try {
+                    noCwdSocket.getSnapshot = async () => ({
+                        workspaces: [{ workspace_id: 'w-no-cwd', label: 'NoCwd' }],
+                        agents: [{ pane_id: 'w-no-cwd:p1', name: 'isolated-agent', agent_status: 'running', workspace_id: 'w-no-cwd' }]
+                    });
+                    await hudNoCwd.refresh();
+                    noCwdSocket.getSnapshot = async () => ({
+                        workspaces: [{ workspace_id: 'w-no-cwd', label: 'NoCwd' }],
+                        agents: [{ pane_id: 'w-no-cwd:p1', name: 'isolated-agent', agent_status: 'done', workspace_id: 'w-no-cwd' }]
+                    });
+                    await hudNoCwd.refresh();
+                    await new Promise(r => setTimeout(r, 30));
+
+                    expect(sentPrompts).to.equal(0);
+                    expect(hudNoCwd.getAutoVerifyRetryCount('w-no-cwd:p1')).to.equal(0);
+                } finally {
+                    hudNoCwd.dispose();
+                }
+            } finally {
+                cp.execFile = origExecFile;
+                cp.spawn = origSpawn;
                 hud.dispose();
             }
         });

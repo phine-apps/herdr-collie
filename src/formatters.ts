@@ -1,4 +1,5 @@
 import * as path from 'path';
+import * as fs from 'fs';
 import * as l10n from '@vscode/l10n';
 import { ParsedAgent, ParsedWorkspace, GitWorktreeInfo } from './parsers';
 
@@ -300,6 +301,52 @@ export function isSameOrSubPath(candidatePath?: string, basePath?: string): bool
     }
     const prefix = baseNorm.endsWith(path.sep) ? baseNorm : `${baseNorm}${path.sep}`;
     return candidateNorm.startsWith(prefix);
+}
+
+export function safeRealPath(targetPath: string): string {
+    try {
+        return fs.realpathSync(targetPath);
+    } catch {
+        return path.resolve(targetPath);
+    }
+}
+
+/**
+ * Resolves the agent matching `worktreePath` using deepest (longest-prefix) worktree matching
+ * so agents running in nested `.worktrees/<slug>` directories are not attributed to the parent main repo.
+ */
+export function findAgentForWorktree<T extends { cwd?: string }>(
+    worktreePath: string,
+    allWorktreePaths: string[],
+    agents: readonly T[]
+): T | undefined {
+    const targetNorm = normalizePathForComparison(safeRealPath(worktreePath));
+    if (!targetNorm) {
+        return undefined;
+    }
+
+    const resolvedRoots = Array.from(
+        new Set(allWorktreePaths.filter(Boolean).map(p => safeRealPath(p)))
+    );
+    if (!resolvedRoots.some(r => normalizePathForComparison(r) === targetNorm)) {
+        resolvedRoots.push(safeRealPath(worktreePath));
+    }
+
+    return agents.find(agent => {
+        if (!agent.cwd) return false;
+        const agentRealCwd = safeRealPath(agent.cwd);
+        let bestRootNorm = '';
+        let bestLen = -1;
+        for (const root of resolvedRoots) {
+            if (!isSameOrSubPath(agentRealCwd, root)) continue;
+            const rootNorm = normalizePathForComparison(root);
+            if (rootNorm.length > bestLen) {
+                bestLen = rootNorm.length;
+                bestRootNorm = rootNorm;
+            }
+        }
+        return bestLen >= 0 && bestRootNorm === targetNorm;
+    });
 }
 
 /**
@@ -685,7 +732,7 @@ export function formatGitHubIssueTaskPrompt(
         }
     }
 
-    const rawBody = (issue.body || '').trim();
+    const rawBody = stripTerminalControlSequences(issue.body || '');
     if (rawBody) {
         const bodySnippet = rawBody.length > MAX_ISSUE_BODY_CHARS
             ? `${rawBody.slice(0, MAX_ISSUE_BODY_CHARS)}\n... [truncated]`
@@ -695,10 +742,11 @@ export function formatGitHubIssueTaskPrompt(
         lines.push(formatCodeFence(bodySnippet, 'markdown'));
     }
 
-    if (additionalInstruction && additionalInstruction.trim()) {
+    const cleanAdditional = stripTerminalControlSequences(additionalInstruction || '');
+    if (cleanAdditional) {
         lines.push('');
         lines.push('### Additional Instructions');
-        lines.push(additionalInstruction.trim());
+        lines.push(cleanAdditional);
     }
 
     lines.push('');

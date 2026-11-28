@@ -162,7 +162,7 @@ export class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.Tr
             if (this.type === 'workspaces' && element instanceof HerdrWorkspaceTreeItem && element.tabs && element.tabs.length > 0) {
                 const sessionName = this.getSessionName();
                 return element.tabs.map(tab => new HerdrTabTreeItem(
-                    tab.label ? `Tab ${tab.label}` : `Tab ${tab.number || tab.id}`,
+                    tab.label ? l10n.t('Tab {0}', tab.label) : l10n.t('Tab {0}', tab.number || tab.id),
                     tab.id,
                     element.rawId,
                     tab.focused,
@@ -356,28 +356,28 @@ export class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.Tr
                     }
                 };
 
-                execHerdr([...sessionArgs, 'workspace', 'list'], (err, stdout) => {
+                execHerdr([...sessionArgs, 'workspace', 'list'], { skipAutoStart: true }, (err, stdout) => {
                     if (!err && stdout) {
                         rawWorkspaces = stdout;
                     }
                     checkDone();
                 });
 
-                execHerdr([...sessionArgs, 'pane', 'list'], (err, stdout) => {
+                execHerdr([...sessionArgs, 'pane', 'list'], { skipAutoStart: true }, (err, stdout) => {
                     if (!err && stdout) {
                         rawPanes = stdout;
                     }
                     checkDone();
                 });
 
-                execHerdr([...sessionArgs, 'agent', 'list'], (err, stdout) => {
+                execHerdr([...sessionArgs, 'agent', 'list'], { skipAutoStart: true }, (err, stdout) => {
                     if (!err && stdout) {
                         rawAgents = stdout;
                     }
                     checkDone();
                 });
 
-                execHerdr([...sessionArgs, 'tab', 'list'], (err, stdout) => {
+                execHerdr([...sessionArgs, 'tab', 'list'], { skipAutoStart: true }, (err, stdout) => {
                     if (!err && stdout) {
                         rawTabs = stdout;
                     }
@@ -441,17 +441,17 @@ export class HerdrWorkspaceProvider implements vscode.TreeDataProvider<vscode.Tr
                     }
                 };
 
-                execHerdr([...sessionArgs, 'workspace', 'list'], (err, stdout) => {
+                execHerdr([...sessionArgs, 'workspace', 'list'], { skipAutoStart: true }, (err, stdout) => {
                     if (!err && stdout) rawWorkspaces = stdout;
                     checkDone();
                 });
 
-                execHerdr([...sessionArgs, 'pane', 'list'], (err, stdout) => {
+                execHerdr([...sessionArgs, 'pane', 'list'], { skipAutoStart: true }, (err, stdout) => {
                     if (!err && stdout) rawPanes = stdout;
                     checkDone();
                 });
 
-                execHerdr([...sessionArgs, 'agent', 'list'], (err, stdout) => {
+                execHerdr([...sessionArgs, 'agent', 'list'], { skipAutoStart: true }, (err, stdout) => {
                     if (!err && stdout) rawAgents = stdout;
                     checkDone();
                 });

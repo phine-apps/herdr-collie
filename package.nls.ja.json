@@ -54,6 +54,7 @@
   "view.reviewChanges": "レビュー変更一覧",
   "configuration.title": "Herdr Collie",
   "config.hideHerdrSidebar": "VS Code ターミナルで実行する際に Herdr 組み込みのサイドバー (スペースとエージェント) を非表示にする",
+  "config.autoStartServer": "信頼済みワークスペースを開いた際に Herdr セッションサーバーを自動起動し、現在の VS Code フォルダを自動的にバインドする",
   "config.sessionName": "VS Code ターミナルから Herdr を起動する際に使用するセッション名 (例: 'vscode')",
   "config.worktreeLocation": "エージェント起動時に Git worktree を作成する場所 ('sibling' 同階層ディレクトリ または '.worktrees' サブフォルダ)",
   "config.agentHUD.enableNotifications": "エージェントが承認を必要とする場合やタスクを完了した際に対話的な通知を表示する",
@@ -72,6 +73,6 @@
   "capabilities.virtualWorkspaces.description": "Herdr Collie は Git Worktree、CLI 実行、Unix ドメインソケットのためにローカルファイルシステムへのアクセスを必要とします。",
   "capabilities.untrustedWorkspaces.description": "信頼されていないワークスペースでは、Herdr デーモンの自動起動、ワークスペースの自動バインド、ターミナル自動復元、postCreateCommand の実行が無効化され、エージェントや Git 変更を伴うコマンドにはワークスペースの信頼が必要です。",
   "viewsWelcome.reviewChanges": "レビュー対象の変更ファイルはありません。\n[Worktree でエージェントを起動](command:herdr-collie.launchWorktreeAgent)",
-  "viewsWelcome.workspaces": "アクティブな Herdr ワークスペースはありません。\n[Herdr ターミナルを開く](command:herdr-collie.openTerminal)",
+  "viewsWelcome.workspaces": "アクティブな Herdr ワークスペースはありません。\n[Herdr ターミナルを開く](command:herdr-collie.attachWorkspace)",
   "viewsWelcome.agents": "実行中の Herdr エージェントはありません。\n[Worktree でエージェントを起動](command:herdr-collie.launchWorktreeAgent)"
 }

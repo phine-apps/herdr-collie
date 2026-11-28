@@ -363,6 +363,62 @@ describe('swarmPlaybooks Unit Tests', () => {
             expect(failWsRes.failures).to.have.lengthOf(1);
             expect(failWsRes.warnings).to.deep.equal(['postCreateCommand failed: offline']);
         });
+
+        it('records a warning in both playbooks when an agent starts but initial prompt delivery fails', async () => {
+            const candidates = buildBestOfNPlan({
+                repoRoot: '/repos/demo',
+                baseBranch: 'main',
+                branchPrefix: 'swarm/prompt-warn',
+                existingBranches: [],
+                locationPref: 'sibling',
+                agents: [{ cmd: 'claude', agentKind: 'claude' }],
+                taskPrompt: 'Implement X'
+            });
+
+            const bestRes = await executeBestOfNPlaybook({
+                sessionName: 'vscode',
+                repoRoot: '/repos/demo',
+                baseBranch: 'main',
+                locationPref: 'sibling',
+                candidates,
+                deps: {
+                    createWorktreeFn: async () => {},
+                    createHerdrWorkspaceFn: async () => ({ workspaceId: 'w1', rootPaneId: 'w1:p1' }),
+                    startAgentInPaneFn: async () => ({ method: 'native', started: true, prompted: false })
+                }
+            });
+            expect(bestRes.launched).to.have.lengthOf(1);
+            expect(bestRes.launched[0].prompted).to.be.false;
+            expect(bestRes.warnings).to.have.lengthOf(1);
+            expect(bestRes.warnings?.[0]).to.include('failed to deliver the initial prompt');
+
+            const duoPlan = buildImplementReviewPlan({
+                topology: 'new-worktree',
+                repoRoot: '/repos/demo',
+                branchName: 'feat/duo-prompt-warn',
+                baseBranch: 'main',
+                locationPref: 'sibling',
+                implementer: { cmd: 'claude', agentKind: 'claude' },
+                reviewer: { cmd: 'codex', agentKind: 'codex' },
+                taskPrompt: 'Implement Y'
+            });
+
+            const duoRes = await executeImplementReviewPlaybook({
+                sessionName: 'vscode',
+                repoRoot: '/repos/demo',
+                locationPref: 'sibling',
+                plan: duoPlan,
+                deps: {
+                    createWorktreeFn: async () => {},
+                    createHerdrWorkspaceFn: async () => ({ workspaceId: 'w2', rootPaneId: 'w2:p1' }),
+                    splitHerdrPaneFn: async () => 'w2:p2',
+                    startAgentInPaneFn: async () => ({ method: 'native', started: true, prompted: false })
+                }
+            });
+            expect(duoRes.launched).to.have.lengthOf(2);
+            expect(duoRes.warnings).to.have.lengthOf(2);
+            expect(duoRes.warnings?.[0]).to.include('failed to deliver the initial prompt');
+        });
     });
 
     describe('createHerdrWorkspace & splitHerdrPane helpers', () => {

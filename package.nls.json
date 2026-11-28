@@ -54,6 +54,7 @@
   "view.reviewChanges": "Review Changes",
   "configuration.title": "Herdr Collie",
   "config.hideHerdrSidebar": "Hide Herdr's built-in sidebar (spaces and agents) when running in VS Code terminal",
+  "config.autoStartServer": "Automatically start the Herdr session server and bind the current VS Code folder when opening a trusted workspace",
   "config.sessionName": "Session name to use when launching Herdr from VS Code terminal (e.g. 'vscode')",
   "config.worktreeLocation": "Where to create Git worktrees when launching swarm agents ('sibling' directory or '.worktrees' subfolder)",
   "config.agentHUD.enableNotifications": "Show interactive notifications when an agent requires approval or completes a task",
@@ -72,6 +73,6 @@
   "capabilities.virtualWorkspaces.description": "Herdr Collie requires local filesystem access for Git worktrees, CLI execution, and Unix domain sockets.",
   "capabilities.untrustedWorkspaces.description": "Automatic Herdr daemon startup, workspace binding, terminal auto-restore, postCreateCommand execution, and agent/Git-modifying commands require Workspace Trust.",
   "viewsWelcome.reviewChanges": "No modified files detected for review.\n[Launch Worktree Agent](command:herdr-collie.launchWorktreeAgent)",
-  "viewsWelcome.workspaces": "No active Herdr workspaces.\n[Open Herdr Terminal](command:herdr-collie.openTerminal)",
+  "viewsWelcome.workspaces": "No active Herdr workspaces.\n[Open Herdr Terminal](command:herdr-collie.attachWorkspace)",
   "viewsWelcome.agents": "No running Herdr agents.\n[Launch Worktree Agent](command:herdr-collie.launchWorktreeAgent)"
 }

@@ -295,6 +295,32 @@
     "menus": {
       "commandPalette": [
         {
+          "command": "herdr-collie.attachWorkspace"
+        },
+        {
+          "command": "herdr-collie.switchSession"
+        },
+        {
+          "command": "herdr-collie.createSession"
+        },
+        {
+          "command": "herdr-collie.refreshSessions",
+          "when": "false"
+        },
+        {
+          "command": "herdr-collie.deleteSession"
+        },
+        {
+          "command": "herdr-collie.toggleAgentSort"
+        },
+        {
+          "command": "herdr-collie.createTab",
+          "when": "false"
+        },
+        {
+          "command": "herdr-collie.peekAgentOutput"
+        },
+        {
           "command": "herdr-collie.selectAgent"
         },
         {
@@ -441,38 +467,47 @@
       "editor/context": [
         {
           "command": "herdr-collie.dispatchContextTask",
+          "when": "editorTextFocus",
           "group": "herdr@0"
         },
         {
           "command": "herdr-collie.addReviewComment",
+          "when": "editorTextFocus",
           "group": "herdr@1"
         },
         {
           "command": "herdr-collie.sendContext",
+          "when": "editorTextFocus",
           "group": "herdr@2"
         },
         {
           "command": "herdr-collie.sendDiagnostics",
+          "when": "editorTextFocus",
           "group": "herdr@2"
         },
         {
           "command": "herdr-collie.sendHoverInfo",
+          "when": "editorTextFocus",
           "group": "herdr@3"
         },
         {
           "command": "herdr-collie.sendWorkspaceProblems",
+          "when": "editorTextFocus",
           "group": "herdr@4"
         },
         {
           "command": "herdr-collie.sendStagedChanges",
+          "when": "editorTextFocus && gitOpenRepositoryCount > 0",
           "group": "herdr@5"
         },
         {
           "command": "herdr-collie.sendWorkingTreeChanges",
+          "when": "editorTextFocus && gitOpenRepositoryCount > 0",
           "group": "herdr@6"
         },
         {
           "command": "herdr-collie.sendBranchContext",
+          "when": "editorTextFocus && gitOpenRepositoryCount > 0",
           "group": "herdr@7"
         }
       ],
@@ -704,6 +739,12 @@
           "type": "boolean",
           "default": true,
           "description": "%config.hideHerdrSidebar%"
+        },
+        "herdr-collie.autoStartServer": {
+          "type": "boolean",
+          "default": false,
+          "restricted": true,
+          "description": "%config.autoStartServer%"
         },
         "herdr-collie.sessionName": {
           "type": "string",

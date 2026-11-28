@@ -50,7 +50,7 @@ export class HerdrTabTreeItem extends vscode.TreeItem {
         this.contextValue = 'tab';
         this.id = `${workspaceId}:${tabId}`;
         this.iconPath = new vscode.ThemeIcon(isFocused ? 'window' : 'terminal');
-        this.description = isFocused ? l10n.t('(Active)') : (paneCount > 1 ? `${paneCount} panes` : undefined);
+        this.description = isFocused ? l10n.t('(Active)') : (paneCount > 1 ? l10n.t('{0} panes', paneCount) : undefined);
         this.tooltip = l10n.t('Tab {0} (ID: {1}, Panes: {2})', label, tabId, paneCount);
         (this as any).accessibilityInformation = {
             label: this.tooltip

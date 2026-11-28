@@ -6,7 +6,7 @@ import '../helpers/mockVscode'; // Must be first to install global mock
 import { expect } from 'chai';
 import cp = require('child_process');
 import { mockState, mockVscode, resetMockState } from '../helpers/mockVscode';
-import { createTerminalBridge, createSessionSwitchCoordinator, getSessionName, sendPromptToHerdr } from '../../herdrBridge';
+import { createTerminalBridge, createSessionSwitchCoordinator, fetchRunningSessions, getSessionName, sendPromptToHerdr } from '../../herdrBridge';
 import { HerdrSocketClient } from '../../socketClient';
 
 describe('herdrBridge Unit Tests', () => {
@@ -99,6 +99,36 @@ describe('herdrBridge Unit Tests', () => {
         // Wait longer than the initial 600ms timer to confirm it was cancelled
         await new Promise(resolve => setTimeout(resolve, 700));
         expect(sentTexts).to.be.empty;
+    });
+
+    it('cancels pending restore timer when openOrAttachTerminal manually sends command within 600ms', async () => {
+        const sentTexts: string[] = [];
+        const mockTerminal: any = {
+            name: 'Herdr (vscode)',
+            exitStatus: undefined,
+            processId: Promise.resolve(undefined),
+            sendText: (text: string) => sentTexts.push(text),
+            show: () => {},
+            dispose: () => {}
+        };
+        (mockVscode.window as any).terminals = [mockTerminal];
+        (cp as any).execFile = (file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+            const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+            callback?.(null, '/usr/local/bin/herdr', '');
+            return {} as any;
+        };
+
+        const bridge = createTerminalBridge(() => {}, {
+            ensureServerRunning: async () => true
+        });
+        try {
+            await bridge.restoreTerminalIfNeeded('vscode', mockTerminal);
+            await bridge.openOrAttachTerminal('w1', false, 'App', 'vscode');
+            await new Promise(resolve => setTimeout(resolve, 750));
+            expect(sentTexts).to.deep.equal(['herdr --session vscode']);
+        } finally {
+            bridge.dispose();
+        }
     });
 
     it('does not collide default "Herdr" terminal with "vscode" session in openOrAttachTerminal', async () => {
@@ -326,20 +356,91 @@ describe('herdrBridge Unit Tests', () => {
             { ensureServerRunning: async () => true }
         );
         try {
-            // Reject unsafe target / unsafe tabId before issuing CLI commands or terminals
+            // Reject unsafe target / unsafe tabId / unsafe workspaceId before issuing CLI commands or terminals
             await bridge.openOrAttachTerminal('-evil-id', false, 'Bad', 'vscode');
             await bridge.openOrAttachTerminal('w1', false, 'BadTab', 'vscode', 'w1', '--evil-tab');
+            await bridge.openOrAttachTerminal('w1:p1', true, 'BadWs', 'vscode', '-evil-ws');
             expect(execFileCalls).to.be.empty;
             expect(createTerminalCalls).to.equal(0);
 
-            // Concurrent calls for the same session must coalesce to a single createTerminal
+            // Concurrent calls for the same session serialize cleanly, create a single terminal, and still honor the latest target focus
             await Promise.all([
                 bridge.openOrAttachTerminal('w1', false, 'App 1', 'vscode'),
-                bridge.openOrAttachTerminal('w1', false, 'App 1', 'vscode')
+                bridge.openOrAttachTerminal('w2', false, 'App 2', 'vscode')
             ]);
             expect(createTerminalCalls).to.equal(1);
+            expect(execFileCalls.some(a => a.includes('focus') && a.includes('w2'))).to.be.true;
         } finally {
             bridge.dispose();
+        }
+    });
+
+    it('filters stopped sessions in fetchRunningSessions and skips auto-start on sendPromptToHerdr CLI discovery', async () => {
+        const origSpawn = cp.spawn;
+        let spawnCalls = 0;
+        (cp as any).spawn = () => {
+            spawnCalls++;
+            return { unref: () => {}, on: () => {} } as any;
+        };
+
+        let quickPickItems: any[] = [];
+        const origShowQuickPick = mockVscode.window.showQuickPick;
+        (mockVscode.window as any).showQuickPick = async (items: any[]) => {
+            quickPickItems = items;
+            return undefined;
+        };
+
+        (cp as any).execFile = (_file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+            execFileCalls.push(args);
+            const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+            if (args[0] === 'session' && args[1] === 'list') {
+                callback?.(null, JSON.stringify({
+                    sessions: [
+                        { name: 'default', default: true, running: false },
+                        { name: 'vscode', default: false, running: true }
+                    ]
+                }), '');
+                return {} as any;
+            }
+            if (args[0] === '--session' && args[1] === 'vscode' && args[2] === 'workspace' && args[3] === 'list') {
+                callback?.(null, JSON.stringify({ workspaces: [{ workspace_id: 'w1', label: 'repo' }] }), '');
+                return {} as any;
+            }
+            if (args[0] === '--session' && args[1] === 'vscode' && args[2] === 'pane' && args[3] === 'list') {
+                callback?.(null, JSON.stringify({ panes: [{ pane_id: 'w1:p1', name: 'main', workspace_id: 'w1', foreground_cwd: '/tmp/repo' }] }), '');
+                return {} as any;
+            }
+            if (args[0] === '--session' && args[1] === 'vscode' && args[2] === 'agent' && args[3] === 'list') {
+                callback?.(null, JSON.stringify({ agents: [{ pane_id: 'w1:p1', name: 'claude', status: 'idle', workspace_id: 'w1' }] }), '');
+                return {} as any;
+            }
+            callback?.(new Error('server_not_running'), '', 'error: server_not_running');
+            return {} as any;
+        };
+
+        const disconnectedSocket = {
+            isConnected: false,
+            getSnapshot: async () => null
+        } as unknown as HerdrSocketClient;
+
+        try {
+            const running = await fetchRunningSessions();
+            expect(running).to.deep.equal(['vscode']);
+
+            await sendPromptToHerdr({
+                activeSidebarSession: 'default',
+                socketClient: disconnectedSocket,
+                richText: 'Review changes',
+                successMsg: 'Sent',
+                quickPickTitle: 'Send Prompt'
+            });
+
+            expect(execFileCalls.some(a => a[0] === '--session' && a[1] === 'default')).to.be.false;
+            expect(spawnCalls).to.equal(0);
+            expect(quickPickItems.some(item => item.targetId === 'w1:p1')).to.be.true;
+        } finally {
+            cp.spawn = origSpawn;
+            (mockVscode.window as any).showQuickPick = origShowQuickPick;
         }
     });
 });

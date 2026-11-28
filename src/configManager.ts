@@ -139,6 +139,7 @@ export function syncHerdrConfig(
             if (process.env['HERDR_CONFIG_PATH']?.includes('herdr_config_embedded.toml')) {
                 delete process.env['HERDR_CONFIG_PATH'];
             }
+            reloadConfigForSessions(sessionNames, vscodeModule);
             return undefined;
         }
 

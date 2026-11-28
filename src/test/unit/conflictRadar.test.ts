@@ -180,5 +180,76 @@ describe('conflictRadar Unit Tests', () => {
                 radar.dispose();
             }
         });
+
+        it('guards against late async scanNow() completion after dispose()', async () => {
+            let resolveRepoRoot!: (val: string | null) => void;
+            const repoRootPromise = new Promise<string | null>(resolve => {
+                resolveRepoRoot = resolve;
+            });
+
+            const radar = new WorktreeConflictRadar({
+                getRepoRoot: () => repoRootPromise,
+                getActiveAgents: () => [],
+                dispatchPrompt: async () => true
+            });
+
+            let decorationFires = 0;
+            radar.onDidChangeFileDecorations(() => {
+                decorationFires++;
+            });
+
+            const scanPromise = radar.scanNow(true);
+            radar.dispose();
+            resolveRepoRoot('/repo');
+            const scanResult = await scanPromise;
+
+            expect(scanResult).to.be.null;
+            expect(radar.getLatestResult()).to.be.null;
+            expect(decorationFires).to.equal(0);
+            expect(radar.provideFileDecoration(mockVscode.Uri.file('/repo/src/extension.ts') as any)).to.be.undefined;
+        });
+
+        it('immediately clears StatusBar and Explorer decorations when conflictRadar setting is toggled off', async () => {
+            const radar = new WorktreeConflictRadar({
+                getRepoRoot: async () => '/repo',
+                getActiveAgents: () => [],
+                dispatchPrompt: async () => true
+            });
+            try {
+                (radar as any).applyScanResult({
+                    repoRoot: '/repo',
+                    worktreeCount: 2,
+                    worktreePaths: ['/repo', '/repo-wt-a'],
+                    conflicts: [
+                        {
+                            filePath: 'src/extension.ts',
+                            severity: 'high',
+                            touches: [
+                                { worktreePath: '/repo', branchName: 'main', isMain: true, status: 'M', dirty: true },
+                                { worktreePath: '/repo-wt-a', branchName: 'feat/a', isMain: false, status: 'M', dirty: true }
+                            ]
+                        }
+                    ],
+                    scannedAt: Date.now()
+                }, false);
+
+                const sb = mockState.statusBarItems.find(i => i.id === 'herdr-collie.conflictRadar');
+                expect(sb?.visible).to.be.true;
+                expect(radar.getLatestResult()).to.not.be.null;
+
+                mockState.configurations.set('herdr-collie.worktree.conflictRadar', false);
+                for (const listener of [...mockState.configurationChangeListeners]) {
+                    listener({ affectsConfiguration: (s: string) => s === 'herdr-collie.worktree.conflictRadar' });
+                }
+
+                expect(sb?.visible).to.be.false;
+                expect(radar.getLatestResult()).to.be.null;
+
+                await radar.showConflictRadarWizard();
+                expect(mockState.lastInformationMessage?.message).to.include('disabled in settings');
+            } finally {
+                radar.dispose();
+            }
+        });
     });
 });

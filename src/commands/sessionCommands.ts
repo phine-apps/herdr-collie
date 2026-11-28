@@ -20,7 +20,7 @@ import { listGitWorktrees, getRepoRoot, openWorkspaceFolderInWindow } from '../w
 import { HerdrWorkspaceTreeItem, HerdrTabTreeItem } from '../workspaceDragAndDrop';
 import { ensureWorkspaceTrustedForAction } from '../workspaceTrust';
 import { getWorktreesForCwds } from '../gitContext';
-import { fetchActiveSessions, TargetQuickPickItem, SessionQuickPickItem } from '../herdrBridge';
+import { fetchActiveSessions, fetchRunningSessions, TargetQuickPickItem, SessionQuickPickItem } from '../herdrBridge';
 import { CommandContext } from './types';
 
 export function registerSessionCommands(context: vscode.ExtensionContext, ctx: CommandContext): void {
@@ -48,7 +48,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
                         const parsedWorkspaces = parseSnapshotWorkspaces(snapshot, os.homedir());
                         parsedWorkspaces.forEach(ws => {
                             targetItems.push({
-                                label: `[${defaultSession}] $(window) Workspace: ${ws.label}`,
+                                label: `[${defaultSession}] $(window) ${l10n.t('Workspace: {0}', ws.label)}`,
                                 description: ws.cwd ? ws.cwd : `ID: ${ws.id}`,
                                 targetId: ws.id,
                                 sessionName: defaultSession,
@@ -61,10 +61,10 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
                         const parsedAg = parseSnapshotAgents(snapshot, parsedWorkspaces);
                         parsedAg.forEach(a => {
                             const agentName = a.name && a.name !== a.id ? a.name : 'Agent';
-                            const wsName = a.workspaceLabel || (a.workspaceId ? `Workspace ${a.workspaceId}` : '');
+                            const wsName = a.workspaceLabel || (a.workspaceId ? l10n.t('Workspace {0}', a.workspaceId) : '');
                             const itemLabel = wsName ? `${agentName} [${wsName}]` : agentName;
                             targetItems.push({
-                                label: `[${defaultSession}] ${a.statusIcon} Agent: ${agentName}`,
+                                label: `[${defaultSession}] ${a.statusIcon} ${l10n.t('Agent: {0}', agentName)}`,
                                 description: `${a.status} (ID: ${a.id})`,
                                 targetId: a.id,
                                 sessionName: defaultSession,
@@ -77,7 +77,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
                 }
 
                 if (targetItems.length === 0) {
-                    const sessions = await fetchActiveSessions();
+                    const sessions = await fetchRunningSessions();
                     await Promise.all(sessions.map(sessionName => {
                         return new Promise<void>((resolve) => {
                             const sessionArgs = ['--session', sessionName];
@@ -93,7 +93,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
                                     const parsedWs = parseWorkspaces(rawWs, parsedPanes, os.homedir());
                                     parsedWs.forEach(ws => {
                                         targetItems.push({
-                                            label: `[${sessionName}] $(window) Workspace: ${ws.label}`,
+                                            label: `[${sessionName}] $(window) ${l10n.t('Workspace: {0}', ws.label)}`,
                                             description: ws.id,
                                             targetId: ws.id,
                                             sessionName,
@@ -106,10 +106,10 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
                                     const parsedAg = parseAgents(rawAgents, parsedWs);
                                     parsedAg.forEach(a => {
                                         const agentName = a.name && a.name !== a.id ? a.name : 'Agent';
-                                        const wsName = a.workspaceLabel || (a.workspaceId ? `Workspace ${a.workspaceId}` : '');
+                                        const wsName = a.workspaceLabel || (a.workspaceId ? l10n.t('Workspace {0}', a.workspaceId) : '');
                                         const itemLabel = wsName ? `${agentName} [${wsName}]` : agentName;
                                         targetItems.push({
-                                            label: `[${sessionName}] $(hubot) Agent: ${agentName}`,
+                                            label: `[${sessionName}] $(hubot) ${l10n.t('Agent: {0}', agentName)}`,
                                             description: `ID: ${a.id}`,
                                             targetId: a.id,
                                             sessionName,
@@ -123,17 +123,17 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
                                 }
                             };
 
-                            execHerdr([...sessionArgs, 'workspace', 'list'], (err, out) => {
+                            execHerdr([...sessionArgs, 'workspace', 'list'], { skipAutoStart: true }, (err, out) => {
                                 if (!err && out) rawWs = out;
                                 checkDone();
                             });
 
-                            execHerdr([...sessionArgs, 'pane', 'list'], (err, out) => {
+                            execHerdr([...sessionArgs, 'pane', 'list'], { skipAutoStart: true }, (err, out) => {
                                 if (!err && out) rawPanes = out;
                                 checkDone();
                             });
 
-                            execHerdr([...sessionArgs, 'agent', 'list'], (err, out) => {
+                            execHerdr([...sessionArgs, 'agent', 'list'], { skipAutoStart: true }, (err, out) => {
                                 if (!err && out) rawAgents = out;
                                 checkDone();
                             });
@@ -197,7 +197,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
         }
 
         if (agentItems.length === 0 && !socketClient.isConnected) {
-            const sessions = await fetchActiveSessions();
+            const sessions = await fetchRunningSessions();
             await Promise.all(sessions.map(s => {
                 return new Promise<void>((resolve) => {
                     const sessionArgs = ['--session', s];
@@ -228,14 +228,14 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
                             resolve();
                         }
                     };
-                    execHerdr([...sessionArgs, 'pane', 'list'], (err, out) => {
+                    execHerdr([...sessionArgs, 'pane', 'list'], { skipAutoStart: true }, (err, out) => {
                         if (!err && out) rawPanes = out;
-                        execHerdr([...sessionArgs, 'workspace', 'list'], (wErr, wOut) => {
+                        execHerdr([...sessionArgs, 'workspace', 'list'], { skipAutoStart: true }, (wErr, wOut) => {
                             if (!wErr && wOut) rawWs = wOut;
                             checkDone();
                         });
                     });
-                    execHerdr([...sessionArgs, 'agent', 'list'], (err, out) => {
+                    execHerdr([...sessionArgs, 'agent', 'list'], { skipAutoStart: true }, (err, out) => {
                         if (!err && out) rawAgents = out;
                         checkDone();
                     });
@@ -295,7 +295,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
         }
 
         if (wsItems.length === 0 && !socketClient.isConnected) {
-            const sessions = await fetchActiveSessions();
+            const sessions = await fetchRunningSessions();
             await Promise.all(sessions.map(sName => {
                 return new Promise<void>((resolve) => {
                     const sessionArgs = ['--session', sName];
@@ -322,11 +322,11 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
                             resolve();
                         }
                     };
-                    execHerdr([...sessionArgs, 'workspace', 'list'], (err, out) => {
+                    execHerdr([...sessionArgs, 'workspace', 'list'], { skipAutoStart: true }, (err, out) => {
                         if (!err && out) rawWs = out;
                         checkDone();
                     });
-                    execHerdr([...sessionArgs, 'pane', 'list'], (err, out) => {
+                    execHerdr([...sessionArgs, 'pane', 'list'], { skipAutoStart: true }, (err, out) => {
                         if (!err && out) rawPanes = out;
                         checkDone();
                     });
@@ -475,19 +475,32 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
         ctx.refreshAllProviders();
     });
 
+    const validateWorkspaceLabel = (val: string): string | null => {
+        if (val && val.trim().startsWith('-')) {
+            return l10n.t('Workspace label cannot start with a hyphen (-)');
+        }
+        return null;
+    };
+
     const createWorkspaceDisposable = vscode.commands.registerCommand('herdr-collie.createWorkspace', async () => {
         if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const label = await vscode.window.showInputBox({
             prompt: l10n.t('Enter label / name for the new workspace'),
-            placeHolder: l10n.t('e.g. backend, frontend, docs')
+            placeHolder: l10n.t('e.g. backend, frontend, docs'),
+            validateInput: validateWorkspaceLabel
         });
 
         if (label === undefined) return;
+        const trimmedLabel = label.trim();
+        if (trimmedLabel.startsWith('-')) {
+            vscode.window.showWarningMessage(l10n.t('Workspace label cannot start with a hyphen (-)'));
+            return;
+        }
 
         const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
         const createArgs = ['--session', ctx.getActiveSidebarSession(), 'workspace', 'create', '--cwd', cwd];
-        if (label) {
-            createArgs.push('--label', label);
+        if (trimmedLabel) {
+            createArgs.push('--label', trimmedLabel);
         }
 
         execHerdr(createArgs, (error) => {
@@ -503,17 +516,18 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
         if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         if (!item) return;
         const targetId = item.rawId || (item.id ? item.id.split(':')[0] : '');
-        if (!targetId || targetId.startsWith('-')) return;
+        if (!isSafeCliTargetId(targetId)) return;
 
         const currentLabel = item.label.replace('★ ', '').replace(/\(\d+ panes\)/, '').trim();
 
         const newLabel = await vscode.window.showInputBox({
             prompt: l10n.t('Enter new label for workspace "{0}"', item.label || targetId),
-            value: currentLabel
+            value: currentLabel,
+            validateInput: validateWorkspaceLabel
         });
 
         const trimmedLabel = newLabel?.trim();
-        if (!trimmedLabel) return;
+        if (!trimmedLabel || trimmedLabel.startsWith('-')) return;
 
         execHerdr(['--session', ctx.getActiveSidebarSession(), 'workspace', 'rename', targetId, trimmedLabel], (error) => {
             if (error) {
@@ -538,7 +552,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
 
         if (confirm !== closeBtn) return;
 
-        execHerdr(['--session', ctx.getActiveSidebarSession(), 'workspace', 'close', targetId], (error) => {
+        execHerdr(['--session', ctx.getActiveSidebarSession(), 'workspace', 'close', targetId], { skipAutoStart: true }, (error) => {
             if (error) {
                 vscode.window.showErrorMessage(l10n.t('Failed to close workspace: {0}', error.message));
                 return;
@@ -619,12 +633,13 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
         if (!tabId) return;
         const targetSession = sessionArg || ctx.getActiveSidebarSession();
         const wsId = workspaceId || (tabId.includes(':') ? tabId.split(':')[0] : '');
-        await ctx.openOrAttachTerminal(wsId, false, `Tab ${tabId}`, targetSession, undefined, tabId);
+        await ctx.openOrAttachTerminal(wsId, false, l10n.t('Tab {0}', tabId), targetSession, undefined, tabId);
     });
 
     const createTabDisposable = vscode.commands.registerCommand('herdr-collie.createTab', async (item?: HerdrWorkspaceTreeItem) => {
         if (!(await ensureWorkspaceTrustedForAction(vscode))) return;
         const workspaceId = item?.rawId;
+        if (workspaceId && !isSafeCliTargetId(workspaceId)) return;
         const sessionName = ctx.getActiveSidebarSession();
         const args = ['--session', sessionName, 'tab', 'create'];
         if (workspaceId) {
@@ -652,7 +667,7 @@ export function registerSessionCommands(context: vscode.ExtensionContext, ctx: C
         );
         if (confirm !== closeBtn) return;
 
-        execHerdr(['--session', sessionName, 'tab', 'close', item.tabId], (err) => {
+        execHerdr(['--session', sessionName, 'tab', 'close', item.tabId], { skipAutoStart: true }, (err) => {
             if (err) {
                 vscode.window.showErrorMessage(l10n.t('Failed to close tab: {0}', err.message));
                 return;

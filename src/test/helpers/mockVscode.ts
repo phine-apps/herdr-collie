@@ -37,6 +37,7 @@ export interface MockVscodeState {
     workspaceTrustRequestResponse?: boolean | undefined;
     requestWorkspaceTrustCalls: any[];
     grantWorkspaceTrustListeners: Array<() => any>;
+    configurationChangeListeners: Array<(e: { affectsConfiguration: (section: string) => boolean }) => any>;
     statusBarItems: MockStatusBarItem[];
     treeViews: Map<string, MockTreeView>;
     configurations: Map<string, any>;
@@ -47,6 +48,7 @@ export interface MockVscodeState {
 export const mockState: MockVscodeState = {
     requestWorkspaceTrustCalls: [],
     grantWorkspaceTrustListeners: [],
+    configurationChangeListeners: [],
     statusBarItems: [],
     treeViews: new Map(),
     configurations: new Map(),
@@ -75,6 +77,7 @@ export function resetMockState(): void {
     mockState.workspaceTrustRequestResponse = undefined;
     mockState.requestWorkspaceTrustCalls = [];
     mockState.grantWorkspaceTrustListeners = [];
+    mockState.configurationChangeListeners = [];
     mockState.statusBarItems = [];
     mockState.treeViews = new Map();
     mockState.configurations.clear();
@@ -402,6 +405,17 @@ export const mockVscode = {
                     const idx = mockState.grantWorkspaceTrustListeners.indexOf(listener);
                     if (idx >= 0) {
                         mockState.grantWorkspaceTrustListeners.splice(idx, 1);
+                    }
+                }
+            };
+        },
+        onDidChangeConfiguration: (listener: (e: { affectsConfiguration: (section: string) => boolean }) => any) => {
+            mockState.configurationChangeListeners.push(listener);
+            return {
+                dispose: () => {
+                    const idx = mockState.configurationChangeListeners.indexOf(listener);
+                    if (idx >= 0) {
+                        mockState.configurationChangeListeners.splice(idx, 1);
                     }
                 }
             };

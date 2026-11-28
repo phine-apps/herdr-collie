@@ -4,12 +4,13 @@
  */
 import * as vscode from 'vscode';
 import * as l10n from '@vscode/l10n';
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execHerdr, ensureSessionServerRunning, isCommandAvailable, setPreServerStartHook } from './executors';
 import {
+    findAgentForWorktree,
     findMatchingWorkspaceForCwd,
-    isSameOrSubPath,
     AgentSortOrder
 } from './formatters';
 import {
@@ -17,13 +18,14 @@ import {
     parsePanes,
     GitWorktreeInfo
 } from './parsers';
-import { HerdrSocketClient, validateSessionName } from './socketClient';
+import { HerdrSocketClient, getSessionSocketPath, validateSessionName } from './socketClient';
 import { setupConfigManager, reloadConfigForSessions, ConfigManagerHandle } from './configManager';
 import { AgentHUD } from './agentHUD';
 import { WorkspaceHUD } from './workspaceHUD';
 import {
     getRepoRoot,
     getCurrentGitBranch,
+    listGitWorktrees,
     collectWorktreeScorecardMap,
     WorktreeScorecard
 } from './worktreeManager';
@@ -126,13 +128,29 @@ export function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push({ dispose: () => setPreServerStartHook(null) });
 
-    // Ensure session server is running in background (when herdr CLI is available and workspace is trusted)
-    let sessionServerReadyPromise = !isWorkspaceTrusted(vscode)
-        ? Promise.resolve(false)
-        : ensureSessionServerAfterConfigReady(initialSession).catch(() => false);
+    const isAutoStartServerEnabled = (): boolean =>
+        Boolean(vscode.workspace.getConfiguration('herdr-collie').get<boolean>('autoStartServer', false));
+
+    const hasExistingSessionSocket = (sessionName?: string): boolean => {
+        try {
+            return fs.existsSync(getSessionSocketPath(sessionName));
+        } catch {
+            return false;
+        }
+    };
+
+    // Only auto-start daemon on startup when opt-in `autoStartServer` is enabled;
+    // otherwise connect passively only if an active session socket already exists.
+    const initialTrusted = isWorkspaceTrusted(vscode);
+    const shouldAutoStartOnActivation = initialTrusted && isAutoStartServerEnabled();
+    const shouldConnectOnActivation = initialTrusted && (shouldAutoStartOnActivation || hasExistingSessionSocket(initialSession));
+
+    let sessionServerReadyPromise = shouldAutoStartOnActivation
+        ? ensureSessionServerAfterConfigReady(initialSession).catch(() => false)
+        : Promise.resolve(false);
 
     let socketClient = new HerdrSocketClient(activeSidebarSession);
-    if (isWorkspaceTrusted(vscode)) {
+    if (shouldConnectOnActivation) {
         socketClient.connect();
     }
 
@@ -238,6 +256,18 @@ export function activate(context: vscode.ExtensionContext) {
 
     updateAgentBadge(agentHUD.getBlockedCount());
     context.subscriptions.push(agentHUD.onDidChangeBlockedCount(updateAgentBadge));
+
+    // When user opens any Herdr sidebar view in a trusted workspace, connect socket if a session socket exists
+    const connectIfVisibleAndTrusted = (visible: boolean) => {
+        if (visible && isWorkspaceTrusted(vscode) && !socketClient.isConnected && hasExistingSessionSocket(activeSidebarSession)) {
+            socketClient.retryNow();
+        }
+    };
+    context.subscriptions.push(
+        sessionTreeView.onDidChangeVisibility(e => connectIfVisibleAndTrusted(e.visible)),
+        workspaceTreeView.onDidChangeVisibility(e => connectIfVisibleAndTrusted(e.visible)),
+        agentTreeView.onDidChangeVisibility(e => connectIfVisibleAndTrusted(e.visible))
+    );
 
     const getActiveRepoRoot = async (): Promise<string | null> => {
         const gitCtx = await resolveGitContextForUri(undefined, vscode.window.activeTextEditor?.document.uri);
@@ -493,7 +523,9 @@ export function activate(context: vscode.ExtensionContext) {
         context.subscriptions.push(
             vscode.window.onDidChangeWindowState((state) => {
                 if (state.focused && isWorkspaceTrusted(vscode) && !socketClient.isConnected) {
-                    socketClient.retryNow();
+                    if (isAutoStartServerEnabled() || hasExistingSessionSocket(activeSidebarSession)) {
+                        socketClient.retryNow();
+                    }
                 }
             })
         );
@@ -623,8 +655,8 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (answer !== deleteBtn) return;
 
-        execHerdr(['session', 'stop', trimmedSession], () => {
-            execHerdr(['session', 'delete', trimmedSession], async (err) => {
+        execHerdr(['session', 'stop', trimmedSession], { skipAutoStart: true }, () => {
+            execHerdr(['session', 'delete', trimmedSession], { skipAutoStart: true }, async (err) => {
                 if (err) {
                     vscode.window.showErrorMessage(l10n.t('Failed to delete session: {0}', err.message));
                     return;
@@ -641,14 +673,15 @@ export function activate(context: vscode.ExtensionContext) {
         });
     };
 
-    // Auto-bind VS Code workspace to Herdr workspace safely without duplicates
+    // Auto-bind VS Code workspace to Herdr workspace safely without duplicates (only when opt-in autoStartServer is enabled)
     let hasAutoBoundWorkspace = false;
     const autoBindWorkspaceIfTrusted = () => {
-        if (hasAutoBoundWorkspace || !isWorkspaceTrusted(vscode)) {
+        if (hasAutoBoundWorkspace || !isWorkspaceTrusted(vscode) || !isAutoStartServerEnabled()) {
             return;
         }
         const currentCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        const wsName = vscode.workspace.name || (currentCwd ? path.basename(currentCwd) : 'VSCode Workspace');
+        const rawWsName = vscode.workspace.name || (currentCwd ? path.basename(currentCwd) : 'VSCode Workspace');
+        const wsName = rawWsName.trim().replace(/^-+/, '') || 'workspace';
         if (!currentCwd) {
             return;
         }
@@ -688,14 +721,25 @@ export function activate(context: vscode.ExtensionContext) {
                 const previousSession = activeSidebarSession;
                 const currentSession = getSessionName();
                 reviewChangesProvider.refresh();
-                void runSessionServerSwitch(currentSession, () => {
-                    if (currentSession !== previousSession) {
+                const autoStart = isAutoStartServerEnabled();
+                if (autoStart || hasExistingSessionSocket(currentSession)) {
+                    if (autoStart) {
+                        void runSessionServerSwitch(currentSession, () => {
+                            if (currentSession !== previousSession) {
+                                replaceSessionSocket(currentSession);
+                            } else {
+                                socketClient.connect();
+                                refreshAllProviders();
+                            }
+                        }).catch(() => {});
+                    } else if (currentSession !== previousSession) {
+                        activeSidebarSession = currentSession;
                         replaceSessionSocket(currentSession);
                     } else {
                         socketClient.connect();
                         refreshAllProviders();
                     }
-                }).catch(() => {});
+                }
                 void terminalBridge.restoreTerminalIfNeeded(currentSession).catch(() => {});
                 autoBindWorkspaceIfTrusted();
             })
@@ -738,8 +782,11 @@ export function activate(context: vscode.ExtensionContext) {
         branchName?: string,
         labelHint?: string
     ): Promise<void> => {
-        const matchedAgent = agentProvider.getCurrentItems().find(
-            a => a.cwd && isSameOrSubPath(a.cwd, worktreePath)
+        const worktrees = await listGitWorktrees(repoRoot).catch(() => [] as GitWorktreeInfo[]);
+        const matchedAgent = findAgentForWorktree(
+            worktreePath,
+            worktrees.map(w => w.worktree),
+            agentProvider.getCurrentItems()
         );
         const currentBranch = await getCurrentGitBranch(repoRoot).catch(() => undefined);
         const mergeBase = await resolveWorktreeMergeBase(worktreePath, currentBranch, branchName);

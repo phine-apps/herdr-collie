@@ -228,6 +228,11 @@ sidebar_collapsed_mode = "compact"
                 await disposable.whenIdle();
                 expect(recordedCalls).to.deep.include(['--session', 'renamed-session', 'server', 'reload-config']);
 
+                // Disabling hideSidebar must also notify running sessions so TUI sidebar restores live
+                recordedCalls.length = 0;
+                await syncHerdrConfig(mockContext, false, 'renamed-session', mockVscode);
+                expect(recordedCalls).to.deep.include(['--session', 'renamed-session', 'server', 'reload-config']);
+
                 disposable.dispose();
             } finally {
                 executors.execHerdr = originalExecHerdr;

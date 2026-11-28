@@ -340,4 +340,181 @@ describe('Command Handler Unit & Multi-Root Tests', () => {
             changesProvider.dispose();
         }
     });
+
+    it('herdr-collie.removeWorktree matches linked worktree when item.cwd is a nested subdirectory inside it', async () => {
+        const mainRepoDir = await createTempGitRepo('main');
+        const wtPath = resolveWorktreePath(mainRepoDir, 'feat/sub-cwd-remove', 'sibling');
+        tempDirs.push(wtPath);
+        await createWorktree(mainRepoDir, 'feat/sub-cwd-remove', wtPath, 'main');
+        const expectedResolvedWt = fs.realpathSync(wtPath);
+
+        const nestedSubdir = path.join(wtPath, 'packages', 'sub');
+        fs.mkdirSync(nestedSubdir, { recursive: true });
+
+        let removedTargetArg: string | undefined;
+        const realExecFile = cp.execFile;
+        (cp as any).execFile = (file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+            if (file === 'git' && args[0] === 'worktree' && args[1] === 'remove') {
+                removedTargetArg = args[args.length - 1];
+            }
+            return (realExecFile as any)(file, args, optionsOrCb, cb);
+        };
+
+        const fakeContext = { subscriptions: [] } as any;
+        registerWorktreeCommands(fakeContext, createMockCommandContext());
+        mockState.warningMessageResponse = 'Remove Worktree';
+
+        await registeredHandlers.get('herdr-collie.removeWorktree')!({
+            cwd: nestedSubdir,
+            label: 'feat/sub-cwd-remove'
+        });
+
+        expect(removedTargetArg).to.exist;
+        expect(path.resolve(removedTargetArg!)).to.equal(expectedResolvedWt);
+        expect(fs.existsSync(wtPath)).to.be.false;
+    });
+
+    it('enforces isSafeCliTargetId on renameWorkspace/createTab and sets skipAutoStart on closeWorkspace/closeTab', async () => {
+        const execCalls: Array<{ args: string[]; opts: any }> = [];
+        (cp as any).execFile = (_file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+            const opts = typeof optionsOrCb === 'object' ? optionsOrCb : {};
+            const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+            execCalls.push({ args, opts });
+            callback?.(null, '', '');
+            return {} as any;
+        };
+
+        const fakeContext = { subscriptions: [] } as any;
+        registerSessionCommands(fakeContext, createMockCommandContext());
+
+        // renameWorkspace and createTab must reject unsafe workspace IDs (whitespace / leading hyphen / shell metacharacters)
+        mockState.inputBoxResponse = 'New Label';
+        await registeredHandlers.get('herdr-collie.renameWorkspace')!({ rawId: 'bad id', label: 'Bad' });
+        await registeredHandlers.get('herdr-collie.createTab')!({ rawId: '-bad-ws' });
+        expect(execCalls).to.be.empty;
+
+        // closeWorkspace and closeTab must pass skipAutoStart: true
+        mockState.warningMessageResponse = 'Close Workspace';
+        await registeredHandlers.get('herdr-collie.closeWorkspace')!({ rawId: 'ws_1', label: 'WS 1' });
+        mockState.warningMessageResponse = 'Close Tab';
+        await registeredHandlers.get('herdr-collie.closeTab')!({ tabId: 'tab_1', label: 'Tab 1' });
+
+        expect(execCalls).to.have.lengthOf(2);
+        expect(execCalls[0].args).to.include.members(['workspace', 'close', 'ws_1']);
+        expect(execCalls[0].opts?.skipAutoStart).to.be.true;
+        expect(execCalls[1].args).to.include.members(['tab', 'close', 'tab_1']);
+        expect(execCalls[1].opts?.skipAutoStart).to.be.true;
+    });
+
+    it('herdr-collie.removeWorktree resets ReviewTarget matching deleted worktree and clearReview displays clear-specific message', async () => {
+        const mainRepoDir = await createTempGitRepo('main');
+        const wtPath = resolveWorktreePath(mainRepoDir, 'feat/clear-review-target', 'sibling');
+        tempDirs.push(wtPath);
+        await createWorktree(mainRepoDir, 'feat/clear-review-target', wtPath, 'main');
+
+        let clearedTarget: any = 'NOT_CALLED';
+        let updatedDescriptions = 0;
+        const controller = new HerdrReviewController();
+        const fakeContext = { subscriptions: [] } as any;
+        try {
+            registerWorktreeCommands(fakeContext, createMockCommandContext({
+                reviewChangesProvider: {
+                    getReviewTarget: () => ({ kind: 'worktree', worktreePath: wtPath, repoRoot: mainRepoDir, branchName: 'feat/clear-review-target', baseBranch: 'main', label: 'feat/clear-review-target' }),
+                    setReviewTarget: (val: any) => { clearedTarget = val; }
+                } as any,
+                updateTreeViewDescriptions: () => { updatedDescriptions++; }
+            }));
+            registerReviewCommands(fakeContext, createMockCommandContext({
+                reviewController: controller
+            }));
+
+            mockState.warningMessageResponse = 'Remove Worktree';
+            await registeredHandlers.get('herdr-collie.removeWorktree')!({
+                cwd: wtPath,
+                label: 'feat/clear-review-target'
+            });
+            expect(clearedTarget).to.be.null;
+            expect(updatedDescriptions).to.equal(1);
+
+            await registeredHandlers.get('herdr-collie.clearReview')!();
+            expect(mockState.lastInformationMessage?.message).to.equal('No pending review comments to clear');
+        } finally {
+            controller.dispose();
+        }
+    });
+
+    it('resolves workspaceId via workspace list when removeWorktree runs from Command Palette and shows target branch in mergeWorktree dialog', async () => {
+        const mainRepoDir = await createTempGitRepo('trunk');
+        const wtPath = resolveWorktreePath(mainRepoDir, 'feat/cmd-palette-close', 'sibling');
+        tempDirs.push(wtPath);
+        await createWorktree(mainRepoDir, 'feat/cmd-palette-close', wtPath, 'trunk');
+        fs.writeFileSync(path.join(wtPath, 'palette.txt'), 'ok\n', 'utf8');
+        await runGitCmd(['add', 'palette.txt'], wtPath);
+        await runGitCmd(['commit', '-m', 'add palette.txt'], wtPath);
+
+        const realExecFile = cp.execFile;
+        const herdrCalls: Array<{ args: string[]; opts: any }> = [];
+        (cp as any).execFile = (file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+            if (file === 'herdr') {
+                const opts = typeof optionsOrCb === 'object' ? optionsOrCb : {};
+                const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+                herdrCalls.push({ args, opts });
+                if (args.includes('workspace') && args.includes('list')) {
+                    callback?.(null, JSON.stringify({
+                        workspaces: [{ id: 'ws-palette', label: 'feat/cmd-palette-close', cwd: wtPath, focused: false }]
+                    }), '');
+                    return {} as any;
+                }
+                callback?.(null, '', '');
+                return {} as any;
+            }
+            return (realExecFile as any)(file, args, optionsOrCb, cb);
+        };
+
+        const fakeContext = { subscriptions: [] } as any;
+        registerWorktreeCommands(fakeContext, createMockCommandContext({
+            resolveMainRepoRoot: async () => mainRepoDir
+        }));
+
+        // 1. mergeWorktree from Command Palette (no item) must show branch name 'trunk' in confirmation dialog
+        const shownInfoMessages: string[] = [];
+        const origShowInfo = mockVscode.window.showInformationMessage;
+        (mockVscode.window as any).showInformationMessage = async (msg: string, ...items: any[]) => {
+            shownInfoMessages.push(msg);
+            return await origShowInfo(msg, ...items);
+        };
+        try {
+            mockState.informationMessageResponse = 'Merge Branch';
+            await registeredHandlers.get('herdr-collie.mergeWorktree')!();
+            expect(shownInfoMessages.some(m => m.includes("into 'trunk'"))).to.be.true;
+        } finally {
+            mockVscode.window.showInformationMessage = origShowInfo;
+        }
+
+        // 2. removeWorktree from Command Palette (no item) must resolve ws-palette and close it with skipAutoStart: true
+        mockState.warningMessageResponse = 'Remove Worktree';
+        await registeredHandlers.get('herdr-collie.removeWorktree')!();
+        const closeCall = herdrCalls.find(c => c.args.includes('workspace') && c.args.includes('close'));
+        expect(closeCall?.args).to.include('ws-palette');
+        expect(closeCall?.opts?.skipAutoStart).to.be.true;
+        expect(fs.existsSync(wtPath)).to.be.false;
+    });
+
+    it('rejects leading-hyphen workspace labels in createWorkspace and renameWorkspace', async () => {
+        const execCalls: string[][] = [];
+        (cp as any).execFile = (_file: string, args: string[], optionsOrCb?: any, cb?: any) => {
+            execCalls.push(args);
+            const callback = typeof optionsOrCb === 'function' ? optionsOrCb : cb;
+            callback?.(null, '', '');
+            return {} as any;
+        };
+
+        const fakeContext = { subscriptions: [] } as any;
+        registerSessionCommands(fakeContext, createMockCommandContext());
+
+        mockState.inputBoxResponse = '--evil-label';
+        await registeredHandlers.get('herdr-collie.createWorkspace')!();
+        await registeredHandlers.get('herdr-collie.renameWorkspace')!({ rawId: 'ws1', label: 'Valid' });
+        expect(execCalls).to.be.empty;
+    });
 });

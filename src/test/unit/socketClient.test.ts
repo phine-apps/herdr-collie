@@ -357,6 +357,17 @@ describe('HerdrSocketClient Unit Tests', function() {
             expect(getSessionSocketPath('other-session')).to.equal(path.join(os.homedir(), '.config', 'herdr', 'sessions', 'other-session', 'herdr.sock'));
         });
 
+        it('honors HERDR_SOCKET_PATH for explicit "default" session when HERDR_SESSION is unset or default', () => {
+            process.env['HERDR_SOCKET_PATH'] = '/custom/path/to/herdr.sock';
+            expect(getSessionSocketPath('default')).to.equal('/custom/path/to/herdr.sock');
+
+            process.env['HERDR_SESSION'] = 'default';
+            expect(getSessionSocketPath('default')).to.equal('/custom/path/to/herdr.sock');
+
+            process.env['HERDR_SESSION'] = 'other-session';
+            expect(getSessionSocketPath('default')).to.equal(path.join(os.homedir(), '.config', 'herdr', 'herdr.sock'));
+        });
+
         it('sanitizes malicious session names to prevent directory traversal', () => {
             const result = getSessionSocketPath('../../tmp/malicious');
             expect(result).to.not.include('..');
